@@ -12,6 +12,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import type {
   OrchestrationProjectShell,
   ProjectId,
@@ -29,6 +30,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as PullRequestFilesViewed from "../persistence/PullRequestFilesViewed.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
+import * as GitHubSourceControlProvider from "../sourceControl/GitHubSourceControlProvider.ts";
 import * as SourceControlRateLimit from "../sourceControl/SourceControlRateLimit.ts";
 import * as ForgejoCli from "../sourceControl/ForgejoCli.ts";
 import * as ForgejoPullRequestProvider from "./ForgejoPullRequestProvider.ts";
@@ -515,6 +517,68 @@ function makeService(input: {
     (context) => Effect.provideContext(PullRequestService.make, context),
   );
 }
+
+it.effect("lists GitHub Enterprise PRs for a stored unknown repository after host discovery", () =>
+  Effect.gen(function* () {
+    const service = yield* makeService({
+      projects: [
+        project({
+          id: "p1",
+          title: "enterprise",
+          workspaceRoot: "/repo",
+          repository: "team/project",
+          provider: "unknown",
+          host: "code.example.test",
+        }),
+      ],
+      providers: [
+        fakeProvider("github", {
+          listChangeRequests: ({ host, repository }) => {
+            assert.strictEqual(host, "code.example.test");
+            assert.strictEqual(repository, "team/project");
+            return Effect.succeed({
+              items: [changeRequest(42, "2026-07-05T00:00:00Z")],
+              truncated: false,
+              continues: false,
+            });
+          },
+        }),
+      ],
+      resolveHandle: ({ cwd, context }) => {
+        assert.ok(context);
+        const provider = GitHubSourceControlProvider.discovery.refineUnknownRemote({
+          cwd,
+          context,
+          auth: {
+            stdout: JSON.stringify({
+              hosts: {
+                "code.example.test": [
+                  {
+                    host: "code.example.test",
+                    login: "enterprise-user",
+                    state: "success",
+                    active: true,
+                  },
+                ],
+              },
+            }),
+            stderr: "",
+            exitCode: ChildProcessSpawner.ExitCode(0),
+          },
+        });
+        return Effect.succeed({
+          context: { ...context, provider: provider ?? context.provider },
+          provider: undefined as never,
+        });
+      },
+    });
+    const result = yield* service.list({ state: "open" });
+    assert.deepStrictEqual(
+      result.entries.map(({ host, number }) => [host, number]),
+      [["code.example.test", 42]],
+    );
+  }),
+);
 
 it.effect("refines unknown self-hosted GitLab projects before listing merge requests", () =>
   Effect.gen(function* () {
