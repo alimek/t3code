@@ -163,6 +163,10 @@ export function parseGitHubAuth(
   });
 }
 
+/**
+ * Identifies custom GitHub hosts from successful CLI accounts when DNS naming is inconclusive.
+ * Returns null without a matching account and preserves the remote's base URL when matched.
+ */
 function refineUnknownGitHubRemote(input: SourceControlUnknownRemoteRefinementInput) {
   const host = input.context.provider.name.toLowerCase();
   const authenticated = parseGitHubAuthStatus(input.auth.stdout).accounts.some(
