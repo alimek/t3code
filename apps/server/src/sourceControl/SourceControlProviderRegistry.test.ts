@@ -366,10 +366,12 @@ for (const scenario of [
     expected: "unknown",
   },
   {
+    // Expired/revoked token: gh still lists the host, so we claim it and let gh's
+    // auth error surface as "run gh auth login" rather than "unsupported host".
     name: "failed custom-host account",
     host: "code.example.test",
     state: "error",
-    expected: "unknown",
+    expected: "github",
   },
 ]) {
   it.effect(`resolves GitHub Enterprise remotes with ${scenario.name}`, () =>

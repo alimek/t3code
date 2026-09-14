@@ -108,16 +108,18 @@ function parseGitHubAuth(input: SourceControlAuthProbeInput) {
 }
 
 /**
- * Identifies custom GitHub hosts from successful CLI accounts when DNS naming is inconclusive.
- * Returns null without a matching account and preserves the remote's base URL when matched.
+ * Identifies custom GitHub hosts from CLI accounts when DNS naming is inconclusive.
+ * Matches on host presence, not auth state: `gh auth status --json hosts` lists hosts with
+ * expired tokens too, and claiming them lets gh's auth error surface as "run `gh auth login`"
+ * instead of "unsupported host". Returns null without a matching account.
  */
 function refineUnknownGitHubRemote(input: SourceControlUnknownRemoteRefinementInput) {
   const host = input.context.provider.name.toLowerCase();
-  const authenticated = parseGitHubAuthStatus(input.auth.stdout).accounts.some(
-    (account) => account.authenticated && account.host === host,
+  const known = parseGitHubAuthStatus(input.auth.stdout).accounts.some(
+    (account) => account.host === host,
   );
 
-  if (!authenticated) return null;
+  if (!known) return null;
 
   return {
     kind: "github",
