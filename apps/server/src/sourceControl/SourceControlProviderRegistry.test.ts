@@ -356,7 +356,7 @@ it.effect(
     }).pipe(Effect.scoped),
 );
 
-for (const scenario of [
+it.effect.each([
   {
     name: "authenticated custom host",
     host: "code.example.test",
@@ -383,53 +383,51 @@ for (const scenario of [
     state: "error",
     expected: "github",
   },
-]) {
-  it.effect(`resolves GitHub Enterprise remotes with ${scenario.name}`, () =>
-    Effect.gen(function* () {
-      const registry = yield* makeRegistry({
-        remotes: [{ name: "origin", url: "git@code.example.test:team/project.git" }],
-        process: {
-          /** Simulates mixed-account GitHub auth output while leaving other provider probes empty. */
-          run: ({ command }) =>
-            Effect.succeed(
-              processOutput(
-                command === "gh"
-                  ? JSON.stringify({
-                      hosts: {
-                        "github.com": [
-                          {
-                            host: "github.com",
-                            login: "cloud-user",
-                            state: "success",
-                            active: true,
-                          },
-                        ],
-                        [scenario.host]: [
-                          {
-                            host: scenario.host,
-                            login: "enterprise-user",
-                            state: scenario.state,
-                            active: true,
-                          },
-                        ],
-                      },
-                    })
-                  : "",
-                {
-                  stderr: "warning: unrelated account failed",
-                  exitCode: ChildProcessSpawner.ExitCode(1),
-                },
-              ),
+])("resolves GitHub Enterprise remotes with $name", (scenario) =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry({
+      remotes: [{ name: "origin", url: "git@code.example.test:team/project.git" }],
+      process: {
+        /** Simulates mixed-account GitHub auth output while leaving other provider probes empty. */
+        run: ({ command }) =>
+          Effect.succeed(
+            processOutput(
+              command === "gh"
+                ? JSON.stringify({
+                    hosts: {
+                      "github.com": [
+                        {
+                          host: "github.com",
+                          login: "cloud-user",
+                          state: "success",
+                          active: true,
+                        },
+                      ],
+                      [scenario.host]: [
+                        {
+                          host: scenario.host,
+                          login: "enterprise-user",
+                          state: scenario.state,
+                          active: true,
+                        },
+                      ],
+                    },
+                  })
+                : "",
+              {
+                stderr: "warning: unrelated account failed",
+                exitCode: ChildProcessSpawner.ExitCode(1),
+              },
             ),
-        },
-      });
-      const handle = yield* registry.resolveHandle({ cwd: "/repo" });
-      assert.strictEqual(handle.provider.kind, scenario.expected);
-      assert.strictEqual(handle.context?.provider.baseUrl, "https://code.example.test");
-      assert.strictEqual(handle.context?.remoteUrl, "git@code.example.test:team/project.git");
-    }),
-  );
-}
+          ),
+      },
+    });
+    const handle = yield* registry.resolveHandle({ cwd: "/repo" });
+    assert.strictEqual(handle.provider.kind, scenario.expected);
+    assert.strictEqual(handle.context?.provider.baseUrl, "https://code.example.test");
+    assert.strictEqual(handle.context?.remoteUrl, "git@code.example.test:team/project.git");
+  }),
+);
 
 it.effect("leaves custom hosts unknown when GitHub auth JSON is unavailable", () =>
   Effect.gen(function* () {

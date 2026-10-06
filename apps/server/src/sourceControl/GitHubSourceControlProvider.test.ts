@@ -1,3 +1,4 @@
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
@@ -964,4 +965,111 @@ it("names the environment token that overrides the Settings choice", () => {
     ),
   );
   assert.strictEqual(auth.accounts?.[2]?.environmentVariable, "GH_TOKEN");
+});
+
+it.live.each([
+  "git@code.example.test:team/project.git",
+  "ssh://git@code.example.test/team/project.git",
+  "https://code.example.test/team/project.git",
+])("keeps Enterprise operations on the selected remote: %s", (remoteUrl) => {
+  const graphql: GitHubApi.GitHubGraphQlInput[] = [];
+  const rest: GitHubApi.GitHubRestInput[] = [];
+  const api = {
+    graphql: (input: GitHubApi.GitHubGraphQlInput) =>
+      Effect.sync(() => {
+        graphql.push(input);
+        const pr = {
+          ...node(42, "feature", "team"),
+          url: "https://code.example.test/team/project/pull/42",
+          isCrossRepository: false,
+          headRepository: { name: "project", nameWithOwner: "team/project" },
+        };
+        return encodeJson({
+          data: {
+            repository:
+              input.operation === "getPullRequest" ? { pullRequest: pr } : { h0: { nodes: [pr] } },
+          },
+        });
+      }),
+    rest: (input: GitHubApi.GitHubRestInput) =>
+      Effect.sync(() => {
+        rest.push(input);
+        return restResponse({
+          full_name: "team/project",
+          html_url: `https://${input.host}/team/project`,
+          ssh_url: `git@${input.host}:team/project.git`,
+          default_branch: "main",
+        });
+      }),
+  };
+  const { layer, git } = harness({
+    remotes: remotesOutput(
+      ["origin", "git@github.com:team/project.git"],
+      ["enterprise", remoteUrl],
+    ),
+    api,
+  });
+  return Effect.gen(function* () {
+    const provider = yield* GitHubSourceControlProvider.make;
+    const fs = yield* FileSystem.FileSystem;
+    const bodyFile = yield* fs.makeTempFileScoped({ suffix: ".md" });
+    yield* fs.writeFileString(bodyFile, "Enterprise PR");
+    const input = {
+      cwd: "/repo",
+      context: {
+        provider: {
+          kind: "github" as const,
+          name: "GitHub Self-Hosted",
+          baseUrl: "https://code.example.test",
+        },
+        remoteName: "enterprise",
+        remoteUrl,
+      },
+    };
+    for (const state of ["open", "closed"] as const) {
+      const prs = yield* provider.listChangeRequests({
+        ...input,
+        state,
+        headSelector: "feature",
+      });
+      assert.strictEqual(prs[0]?.url, "https://code.example.test/team/project/pull/42");
+    }
+    yield* provider.getChangeRequest({ ...input, reference: "42" });
+    yield* provider.getChangeRequest({ ...input, reference: "feature" });
+    yield* provider.createChangeRequest({
+      ...input,
+      baseRefName: "main",
+      headSelector: "feature",
+      title: "PR",
+      bodyFile,
+    });
+    assert.strictEqual(yield* provider.getDefaultBranch(input), "main");
+    yield* provider.checkoutChangeRequest({ ...input, reference: "42" });
+    yield* provider.getRepositoryCloneUrls({ ...input, repository: "team/other" });
+    yield* provider.getRepositoryCloneUrls({ ...input, repository: "github.com/team/explicit" });
+    assert.strictEqual(graphql.length, 5);
+    for (const request of graphql) {
+      assert.strictEqual(request.host, "code.example.test");
+      assert.strictEqual(request.variables?.owner, "team");
+      assert.strictEqual(request.variables?.name, "project");
+    }
+    assert.deepStrictEqual(
+      rest.map(({ host, path }) => [host, path]),
+      [
+        ["code.example.test", "repos/team/project/pulls"],
+        ["code.example.test", "repos/team/project"],
+        ["code.example.test", "repos/team/other"],
+        ["github.com", "repos/team/explicit"],
+      ],
+    );
+    assert.deepStrictEqual(git.find(([name]) => name === "fetchRemoteTrackingBranch")?.[1], {
+      cwd: "/repo",
+      remoteName: "enterprise",
+      remoteBranch: "feature",
+    });
+  }).pipe(
+    Effect.provide(layer),
+    Effect.provideService(HostProcessEnvironment, { GH_REPO: "github.com/wrong/repo" }),
+    Effect.scoped,
+  );
 });
