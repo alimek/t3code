@@ -53,7 +53,6 @@ import {
   type SourceControlAuthProbeInput,
   type SourceControlCliDiscoverySpec,
   type SourceControlManagedCliDiscoverySpec,
-  type SourceControlUnknownRemoteRefinementInput,
 } from "./SourceControlProviderDiscovery.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 
@@ -164,27 +163,6 @@ export function parseGitHubAuth(
   });
 }
 
-/**
- * Identifies custom GitHub hosts from CLI accounts when DNS naming is inconclusive.
- * Matches on host presence, not auth state: `gh auth status --json hosts` lists hosts with
- * expired tokens too, and claiming them lets the credential error surface as "run `gh auth login`"
- * instead of "unsupported host". Returns null without a matching account.
- */
-function refineUnknownGitHubRemote(input: SourceControlUnknownRemoteRefinementInput) {
-  const host = input.context.provider.name.toLowerCase();
-  const known = parseGitHubAuthStatus(input.auth.stdout).accounts.some(
-    (account) => account.host === host,
-  );
-
-  if (!known) return null;
-
-  return {
-    kind: "github",
-    name: "GitHub Self-Hosted",
-    baseUrl: input.context.provider.baseUrl,
-  } as const;
-}
-
 export const discovery = {
   type: "cli",
   kind: "github",
@@ -193,7 +171,6 @@ export const discovery = {
   versionArgs: ["--version"],
   authArgs: ["auth", "status", "--json", "hosts"],
   parseAuth: parseGitHubAuth,
-  refineUnknownRemote: refineUnknownGitHubRemote,
   installHint:
     "Install the GitHub command-line tool (`gh`) via https://cli.github.com/ or your package manager (for example `brew install gh`).",
 } satisfies SourceControlCliDiscoverySpec;
@@ -279,22 +256,26 @@ export const makeDiscovery = Effect.gen(function* () {
         },
       } satisfies SourceControlProviderDiscoveryItem;
     }),
-    refineUnknownRemote: ({ cwd, context }) =>
-      process
-        .run({
-          operation: "source-control.discovery.refine-unknown-remote",
-          command: discovery.executable,
-          args: discovery.authArgs,
-          cwd,
-          allowNonZeroExit: true,
-          timeoutMs: 5_000,
-          maxOutputBytes: 8_000,
-          appendTruncationMarker: true,
-        })
-        .pipe(
-          Effect.map((auth) => refineUnknownGitHubRemote({ cwd, context, auth })),
-          Effect.orElseSucceed(() => null),
+    /**
+     * Claims a custom host GitHub holds a credential for, from whichever source supplies it
+     * (Settings, the environment or gh). A host turned off in Settings is claimed too, so its
+     * error says so instead of "unsupported host".
+     */
+    refineUnknownRemote: ({ context }) =>
+      api.credential(new URL(context.provider.baseUrl).host).pipe(
+        Effect.as(true),
+        Effect.catchTags({ GitHubHostDisabledError: () => Effect.succeed(true) }),
+        Effect.orElseSucceed(() => false),
+        Effect.map((known) =>
+          known
+            ? ({
+                kind: "github",
+                name: "GitHub Self-Hosted",
+                baseUrl: context.provider.baseUrl,
+              } as const)
+            : null,
         ),
+      ),
   } satisfies SourceControlManagedCliDiscoverySpec;
 });
 

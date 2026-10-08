@@ -4,6 +4,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import { ChildProcessSpawner } from "effect/process";
 import { VcsRepositoryDetectionError } from "@t3tools/contracts";
 
@@ -16,6 +17,7 @@ import * as AzureDevOpsCli from "./AzureDevOpsCli.ts";
 import * as BitbucketApi from "./BitbucketApi.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as GitHubApi from "./GitHubApi.ts";
+import * as GitHubCredentials from "./GitHubCredentials.ts";
 import * as GitLabCli from "./GitLabCli.ts";
 import * as ForgejoCli from "./ForgejoCli.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
@@ -97,7 +99,11 @@ function makeRegistry(input: {
         Layer.mock(AzureDevOpsCli.AzureDevOpsCli)({}),
         Layer.mock(BitbucketApi.BitbucketApi)({}),
         ServerSettings.ServerSettingsService.layerTest(),
-        Layer.mock(GitHubApi.GitHubApi)(input.githubApi ?? {}),
+        Layer.mock(GitHubApi.GitHubApi)({
+          // No GitHub credential unless a test supplies one, so custom hosts stay unclaimed.
+          credential: (host) => Effect.fail(new GitHubCredentials.GitHubNotSignedInError({ host })),
+          ...input.githubApi,
+        }),
         Layer.mock(GitVcsDriver.GitVcsDriver)({}),
         Layer.mock(GitLabCli.GitLabCli)(input.gitlab ?? {}),
         Layer.mock(ForgejoCli.ForgejoCli)({ listLogins: () => Effect.succeed([]) }),
@@ -357,85 +363,38 @@ it.effect(
 );
 
 it.effect.each([
-  {
-    name: "authenticated custom host",
-    host: "code.example.test",
-    state: "success",
-    expected: "github",
-  },
-  {
-    name: "case-insensitive custom host",
-    host: "CODE.EXAMPLE.TEST",
-    state: "success",
-    expected: "github",
-  },
-  {
-    name: "unrelated authenticated host",
-    host: "other.example.test",
-    state: "success",
-    expected: "unknown",
-  },
-  {
-    // Expired/revoked token: gh still lists the host, so we claim it and let gh's
-    // auth error surface as "run gh auth login" rather than "unsupported host".
-    name: "failed custom-host account",
-    host: "code.example.test",
-    state: "error",
-    expected: "github",
-  },
-])("resolves GitHub Enterprise remotes with $name", (scenario) =>
+  { name: "a credential", credential: "found", expected: "github" },
+  // Claimed so the error says the host is turned off, not that it is unsupported.
+  { name: "a host turned off in Settings", credential: "disabled", expected: "github" },
+  { name: "no credential", credential: "missing", expected: "unknown" },
+] as const)("resolves custom-host remotes with $name", (scenario) =>
   Effect.gen(function* () {
+    const hosts: Array<string> = [];
+    const commands: Array<string> = [];
     const registry = yield* makeRegistry({
       remotes: [{ name: "origin", url: "git@code.example.test:team/project.git" }],
       process: {
-        /** Simulates mixed-account GitHub auth output while leaving other provider probes empty. */
-        run: ({ command }) =>
-          Effect.succeed(
-            processOutput(
-              command === "gh"
-                ? JSON.stringify({
-                    hosts: {
-                      "github.com": [
-                        {
-                          host: "github.com",
-                          login: "cloud-user",
-                          state: "success",
-                          active: true,
-                        },
-                      ],
-                      [scenario.host]: [
-                        {
-                          host: scenario.host,
-                          login: "enterprise-user",
-                          state: scenario.state,
-                          active: true,
-                        },
-                      ],
-                    },
-                  })
-                : "",
-              {
-                stderr: "warning: unrelated account failed",
-                exitCode: ChildProcessSpawner.ExitCode(1),
-              },
-            ),
-          ),
+        run: ({ command }) => {
+          commands.push(command);
+          return Effect.succeed(processOutput(""));
+        },
+      },
+      githubApi: {
+        credential: (host) => {
+          hosts.push(host);
+          return scenario.credential === "found"
+            ? Effect.succeed({ token: Redacted.make("token"), fingerprint: `${host}:fingerprint` })
+            : scenario.credential === "disabled"
+              ? Effect.fail(new GitHubCredentials.GitHubHostDisabledError({ host }))
+              : Effect.fail(new GitHubCredentials.GitHubNotSignedInError({ host }));
+        },
       },
     });
     const handle = yield* registry.resolveHandle({ cwd: "/repo" });
     assert.strictEqual(handle.provider.kind, scenario.expected);
     assert.strictEqual(handle.context?.provider.baseUrl, "https://code.example.test");
-    assert.strictEqual(handle.context?.remoteUrl, "git@code.example.test:team/project.git");
-  }),
-);
-
-it.effect("leaves custom hosts unknown when GitHub auth JSON is unavailable", () =>
-  Effect.gen(function* () {
-    const registry = yield* makeRegistry({
-      remotes: [{ name: "origin", url: "https://code.example.test/team/project.git" }],
-      process: { run: () => Effect.succeed(processOutput("invalid JSON")) },
-    });
-    const provider = yield* registry.resolve({ cwd: "/repo" });
-    assert.strictEqual(provider.kind, "unknown");
+    assert.deepStrictEqual(hosts, ["code.example.test"]);
+    // Recognition goes through the credential layer; gh is only one of its sources.
+    assert.notInclude(commands, "gh");
   }),
 );

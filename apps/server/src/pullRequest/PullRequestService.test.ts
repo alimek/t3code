@@ -29,7 +29,6 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as PullRequestFilesViewed from "../persistence/PullRequestFilesViewed.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
-import * as GitHubSourceControlProvider from "../sourceControl/GitHubSourceControlProvider.ts";
 import * as SourceControlRateLimit from "../sourceControl/SourceControlRateLimit.ts";
 import * as ForgejoCli from "../sourceControl/ForgejoCli.ts";
 import * as ForgejoPullRequestProvider from "./ForgejoPullRequestProvider.ts";
@@ -544,31 +543,14 @@ it.effect("lists GitHub Enterprise PRs for a stored unknown repository after hos
           },
         }),
       ],
-      /** Exercises real GitHub host refinement with synthetic auth, without contacting a server. */
-      resolveHandle: ({ cwd, context }) => {
+      /** Stands in for discovery claiming the custom host as GitHub. */
+      resolveHandle: ({ context }) => {
         assert.ok(context);
-        const provider = GitHubSourceControlProvider.discovery.refineUnknownRemote({
-          cwd,
-          context,
-          auth: {
-            stdout: JSON.stringify({
-              hosts: {
-                "code.example.test": [
-                  {
-                    host: "code.example.test",
-                    login: "enterprise-user",
-                    state: "success",
-                    active: true,
-                  },
-                ],
-              },
-            }),
-            stderr: "",
-            exitCode: ChildProcessSpawner.ExitCode(0),
-          },
-        });
         return Effect.succeed({
-          context: { ...context, provider: provider ?? context.provider },
+          context: {
+            ...context,
+            provider: { ...context.provider, kind: "github", name: "GitHub Self-Hosted" },
+          },
           provider: undefined as never,
         });
       },
