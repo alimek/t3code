@@ -261,8 +261,11 @@ export const makeDiscovery = Effect.gen(function* () {
      * (Settings, the environment or gh). A host turned off in Settings is claimed too, so its
      * error says so instead of "unsupported host".
      */
-    refineUnknownRemote: ({ context }) =>
-      api.credential(new URL(context.provider.baseUrl).host).pipe(
+    refineUnknownRemote: ({ context }) => {
+      // Identity resolution also probes providers before a web base URL is known.
+      const url = URL.parse(context.provider.baseUrl);
+      if (!url?.host) return Effect.succeed(null);
+      return api.credential(url.host).pipe(
         Effect.as(true),
         Effect.catchTags({ GitHubHostDisabledError: () => Effect.succeed(true) }),
         Effect.orElseSucceed(() => false),
@@ -275,7 +278,8 @@ export const makeDiscovery = Effect.gen(function* () {
               } as const)
             : null,
         ),
-      ),
+      );
+    },
   } satisfies SourceControlManagedCliDiscoverySpec;
 });
 

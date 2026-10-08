@@ -398,3 +398,38 @@ it.effect.each([
     assert.notInclude(commands, "gh");
   }),
 );
+
+it.effect("skips GitHub discovery for the identity resolver's empty base URL", () =>
+  Effect.gen(function* () {
+    const hosts: string[] = [];
+    const remoteUrl = "git@githubenterprise.dev.example.com:team/workspace.git";
+    const registry = yield* makeRegistry({
+      remotes: [{ name: "origin", url: remoteUrl }],
+      githubApi: {
+        credential: (host) => {
+          hosts.push(host);
+          return Effect.succeed({
+            token: Redacted.make("token"),
+            fingerprint: `${host}:fingerprint`,
+          });
+        },
+      },
+    });
+    const context = {
+      provider: { kind: "unknown" as const, name: "Unknown", baseUrl: "" },
+      remoteName: "origin",
+      remoteUrl,
+    };
+    const unresolved = yield* registry.resolveHandle({ cwd: "/repo", context });
+    assert.deepStrictEqual(unresolved.context, context);
+    assert.deepStrictEqual(hosts, []);
+
+    const resolved = yield* registry.resolveHandle({ cwd: "/repo" });
+    assert.strictEqual(resolved.provider.kind, "github");
+    assert.strictEqual(
+      resolved.context?.provider.baseUrl,
+      "https://githubenterprise.dev.example.com",
+    );
+    assert.deepStrictEqual(hosts, ["githubenterprise.dev.example.com"]);
+  }),
+);
