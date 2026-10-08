@@ -75,6 +75,7 @@ function harness(input: {
   readonly remotes: string;
   readonly api: Partial<GitHubApi.GitHubApi["Service"]>;
   readonly localBranches?: ReadonlyArray<string>;
+  readonly resolved?: string;
   /** Fails the local branch listing, the first git read a checkout makes. */
   readonly gitFailure?: unknown;
 }) {
@@ -111,7 +112,9 @@ function harness(input: {
   const process = Layer.mock(VcsProcess.VcsProcess)({
     run: (args) =>
       Effect.succeed(
-        args.args[0] === "remote" ? processOutput(input.remotes) : processOutput("", 1),
+        args.args[0] === "remote"
+          ? processOutput(input.remotes)
+          : processOutput(input.resolved ?? "", input.resolved ? 0 : 1),
       ),
   });
   const layer = Layer.mergeAll(
@@ -1067,9 +1070,95 @@ it.live.each([
       remoteName: "enterprise",
       remoteBranch: "feature",
     });
-  }).pipe(
-    Effect.provide(layer),
-    Effect.provideService(HostProcessEnvironment, { GH_REPO: "github.com/wrong/repo" }),
-    Effect.scoped,
-  );
+  }).pipe(Effect.provide(layer), Effect.provideService(HostProcessEnvironment, {}), Effect.scoped);
 });
+
+it.effect.each([
+  { host: "github.com", resolved: "", envRepository: "", expected: "acme/web" },
+  { host: "code.example.test", resolved: "", envRepository: "", expected: "acme/web" },
+  {
+    host: "github.com",
+    resolved: "remote.origin.gh-resolved base",
+    envRepository: "",
+    expected: "me/web",
+  },
+  {
+    host: "code.example.test",
+    resolved: "remote.origin.gh-resolved base",
+    envRepository: "",
+    expected: "me/web",
+  },
+  {
+    host: "github.com",
+    resolved: "remote.upstream.gh-resolved acme/other",
+    envRepository: "",
+    expected: "acme/other",
+  },
+  {
+    host: "code.example.test",
+    resolved: "remote.upstream.gh-resolved acme/other",
+    envRepository: "",
+    expected: "acme/other",
+  },
+  { host: "github.com", resolved: "", envRepository: "chosen/repo", expected: "chosen/repo" },
+  {
+    host: "code.example.test",
+    resolved: "",
+    envRepository: "chosen/repo",
+    expected: "chosen/repo",
+  },
+])(
+  "preserves repository precedence on $host: $resolved $envRepository",
+  ({ host, resolved, envRepository, expected }) => {
+    const targets: string[] = [];
+    const { layer } = harness({
+      remotes: remotesOutput(
+        ["origin", `git@${host}:me/web.git`],
+        ["upstream", `git@${host}:acme/web.git`],
+      ),
+      resolved,
+      api: {
+        rest: (input) =>
+          Effect.sync(() => {
+            targets.push(`${input.host}/${input.path}`);
+            return restResponse({
+              full_name: expected,
+              html_url: `https://${host}/${expected}`,
+              ssh_url: `git@${host}:${expected}.git`,
+              default_branch: "main",
+            });
+          }),
+      },
+    });
+    return Effect.gen(function* () {
+      const provider = yield* GitHubSourceControlProvider.make;
+      const fs = yield* FileSystem.FileSystem;
+      const bodyFile = yield* fs.makeTempFileScoped();
+      yield* fs.writeFileString(bodyFile, "Body");
+      const input = {
+        cwd: "/repo",
+        context: {
+          provider: { kind: "github" as const, name: "GitHub", baseUrl: `https://${host}` },
+          remoteName: "origin",
+          remoteUrl: `git@${host}:me/web.git`,
+        },
+      };
+      yield* provider.getDefaultBranch(input);
+      yield* provider.createChangeRequest({
+        ...input,
+        baseRefName: "main",
+        headSelector: "me:feature",
+        title: "PR",
+        bodyFile,
+      });
+      assert.deepStrictEqual(targets, [
+        `${host}/repos/${expected}`,
+        `${host}/repos/${expected}/pulls`,
+      ]);
+    }).pipe(
+      Effect.provide(layer),
+      Effect.provideService(HostProcessEnvironment, { GH_REPO: envRepository }),
+      Effect.scoped,
+    );
+  },
+);

@@ -508,8 +508,8 @@ export const make = Effect.gen(function* () {
     });
 
   /**
-   * The selected context takes precedence; otherwise GH_REPO, else the remote `gh` would pick, else
-   * the remote the caller resolved the provider from, else the best-ranked GitHub remote.
+   * Uses GH_REPO, then gh's remote selection on the detected host. The provider context is
+   * a fallback when the checkout's remotes cannot resolve that repository.
    */
   const resolveRepository = Effect.fn("GitHubSourceControlProvider.resolveRepository")(
     function* (input: {
@@ -518,19 +518,8 @@ export const make = Effect.gen(function* () {
       readonly context?: SourceControlProvider.SourceControlProviderContext | undefined;
     }) {
       const envRepository = environment.GH_REPO?.trim();
-      const defaultHost = (input.host ?? environment.GH_HOST ?? "github.com").toLowerCase();
-      if (input.context) {
-        const remote = normalizeGitRemoteUrl(input.context.remoteUrl);
-        const host =
-          gitHubApiHostForRemote(input.context.remoteUrl) ??
-          new URL(input.context.provider.baseUrl).host;
-        const locator = parseGitHubRepositorySelector(
-          `${host}/${remote.slice(remote.indexOf("/") + 1)}`,
-          host,
-        );
-        if (locator !== null) return locator;
-        return yield* failure("Repositories are named host/owner/name.");
-      }
+      const hostHint = input.host ?? contextHost(input.context);
+      const defaultHost = (hostHint ?? environment.GH_HOST ?? "github.com").toLowerCase();
       if (envRepository) {
         const locator = parseGitHubRepositorySelector(envRepository, defaultHost);
         if (locator !== null) return locator;
@@ -542,10 +531,18 @@ export const make = Effect.gen(function* () {
       const { host, locator } = resolveGitHubRepository({
         remotes: remotes?.exitCode === 0 ? remotes.stdout : "",
         resolved: resolved?.exitCode === 0 ? resolved.stdout : "",
-        hostHint: input.host,
+        hostHint,
         defaultHost,
       });
       if (locator !== null) return locator;
+      if (input.context) {
+        const remote = normalizeGitRemoteUrl(input.context.remoteUrl);
+        const fallback = parseGitHubRepositorySelector(
+          `${host}/${remote.slice(remote.indexOf("/") + 1)}`,
+          host,
+        );
+        if (fallback !== null) return fallback;
+      }
       return yield* failure(
         `No GitHub repository on ${host} was found among this checkout's git remotes.`,
       );
