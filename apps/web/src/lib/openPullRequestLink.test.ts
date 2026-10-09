@@ -8,9 +8,10 @@ import {
   matchesLinkedPullRequestUrl,
   parseChangeRequestUrl,
   pullRequestCandidateUrlFromReferenceAutolink,
+  resolvePullRequestPreviewTarget,
   shouldOpenPullRequestExternally,
 } from "./openPullRequestLink";
-import { ProjectId, type RepositoryIdentity } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, type RepositoryIdentity } from "@t3tools/contracts";
 import { normalizeGitRemoteUrl } from "@t3tools/shared/git";
 
 function repositoryIdentity(
@@ -541,5 +542,39 @@ describe("findProjectForChangeRequest", () => {
         number: 1,
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("resolvePullRequestPreviewTarget", () => {
+  it("opens a GitHub Enterprise pull request in the app when its host names no provider", () => {
+    const environmentId = EnvironmentId.make("local");
+    const project = {
+      id: ProjectId.make("workspace"),
+      environmentId,
+      repositoryIdentity: {
+        ...repositoryIdentity(
+          "github",
+          "git.corp.example/team/workspace",
+          "git@git.corp.example:team/workspace.git",
+        ),
+        displayName: "team/workspace",
+      },
+    } as never;
+    expect(
+      resolvePullRequestPreviewTarget({
+        environmentId,
+        projects: [project],
+        pullRequestsEnabled: true,
+        url: "https://git.corp.example/team/workspace/pull/7",
+      }),
+    ).toEqual({
+      environmentId,
+      input: {
+        projectId: "workspace",
+        host: "git.corp.example",
+        repository: "team/workspace",
+        number: 7,
+      },
+    });
   });
 });
