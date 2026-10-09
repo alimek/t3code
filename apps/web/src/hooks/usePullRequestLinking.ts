@@ -79,7 +79,7 @@ export function usePullRequestLinking(environmentId: EnvironmentId | null | unde
       if (mode !== "multiple")
         return (
           thread.linkedPullRequest != null &&
-          matchesLinkedPullRequestUrl(thread.linkedPullRequest, url)
+          matchesLinkedPullRequestUrl(thread.linkedPullRequest, url, gitHubHosts)
         );
       const parsed = parse(url);
       return (
