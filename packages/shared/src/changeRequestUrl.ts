@@ -93,7 +93,11 @@ export function parseChangeRequestUrl(
   return null;
 }
 
-/** The hosts of the GitHub repositories these projects were checked out from. */
+/**
+ * The hosts of the GitHub repositories these projects were checked out from. The server refines
+ * a GitHub Enterprise identity to GitHub before the project reaches a client, so an install
+ * named nothing like GitHub is still listed; a host no provider claimed is not.
+ */
 export function gitHubHostsOf(
   projects: ReadonlyArray<{ readonly repositoryIdentity?: RepositoryIdentity | null | undefined }>,
 ): string[] {
