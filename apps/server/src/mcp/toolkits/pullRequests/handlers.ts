@@ -11,7 +11,11 @@ import {
   type ThreadId,
   type ThreadPullRequestLink,
 } from "@t3tools/contracts";
-import { changeRequestUrlFor, parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
+import {
+  changeRequestUrlFor,
+  gitHubHostsOf,
+  parseChangeRequestUrl,
+} from "@t3tools/shared/changeRequestUrl";
 import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import {
   normalizeThreadPullRequestKey,
@@ -82,7 +86,7 @@ const resolveTarget = Effect.fn("PullRequestsToolkit.resolveTarget")(function* (
   project: OrchestrationProjectShell | undefined,
 ) {
   if (input.url !== undefined) {
-    const parsed = parseChangeRequestUrl(input.url);
+    const parsed = parseChangeRequestUrl(input.url, gitHubHostsOf(project ? [project] : []));
     if (parsed === null) {
       return yield* new PullRequestUrlInvalidError({});
     }

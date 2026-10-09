@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   changeRequestUrlFor,
+  gitHubHostsOf,
   parseChangeRequestUrl,
   pullRequestCandidateUrlFromReferenceAutolink,
   siblingPullRequestUrl,
@@ -20,6 +21,31 @@ describe("parseChangeRequestUrl", () => {
     expect(parseChangeRequestUrl("https://github.acme.test/platform/api/pull/7")).toEqual({
       host: "github.acme.test",
       repository: "platform/api",
+      number: 7,
+    });
+  });
+
+  it("reads a GitHub Enterprise host named nothing like GitHub once a project names it", () => {
+    const url = "https://git.corp.example/team/workspace/pull/7";
+    const projects = [
+      {
+        repositoryIdentity: {
+          canonicalKey: "git.corp.example/team/workspace",
+          provider: "github",
+          locator: {
+            source: "git-remote" as const,
+            remoteName: "origin",
+            remoteUrl: "git@git.corp.example:team/workspace.git",
+          },
+        },
+      },
+      { repositoryIdentity: null },
+    ];
+    expect(parseChangeRequestUrl(url)).toBeNull();
+    expect(gitHubHostsOf(projects)).toEqual(["git.corp.example"]);
+    expect(parseChangeRequestUrl(url, gitHubHostsOf(projects))).toEqual({
+      host: "git.corp.example",
+      repository: "team/workspace",
       number: 7,
     });
   });
