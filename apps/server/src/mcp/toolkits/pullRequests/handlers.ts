@@ -79,9 +79,10 @@ function projectHostAndProvider(project: OrchestrationProjectShell | undefined):
 const resolveTarget = Effect.fn("PullRequestsToolkit.resolveTarget")(function* (
   input: PullRequestTargetInput,
   project: OrchestrationProjectShell | undefined,
+  gitHubHosts: ReadonlyArray<string>,
 ) {
   if (input.url !== undefined) {
-    const parsed = parseChangeRequestUrl(input.url, gitHubHostsOf(project ? [project] : []));
+    const parsed = parseChangeRequestUrl(input.url, gitHubHosts);
     if (parsed === null) {
       return yield* new PullRequestUrlInvalidError({});
     }
@@ -192,6 +193,13 @@ const make = Effect.gen(function* () {
     return thread.value;
   });
 
+  /** Every project's GitHub hosts, so an agent's URL is read the way the web client reads it. */
+  const knownGitHubHosts = (project: OrchestrationProjectShell | undefined) =>
+    projects.listShells().pipe(
+      Effect.map(gitHubHostsOf),
+      Effect.orElseSucceed(() => gitHubHostsOf(project ? [project] : [])),
+    );
+
   const projectOf = (
     thread: OrchestrationV2ThreadShell,
     Failure:
@@ -231,7 +239,7 @@ const make = Effect.gen(function* () {
   ) {
     const thread = yield* requireThread(PullRequestWatchFailedError, input.threadId);
     const project = yield* projectOf(thread, PullRequestWatchFailedError);
-    const target = yield* resolveTarget(input, project);
+    const target = yield* resolveTarget(input, project, yield* knownGitHubHosts(project));
     const watchedLink = (shell: OrchestrationV2ThreadShell) =>
       threadPullRequestsOf(shell).find(
         (link) => link.source !== "stack-dismissed" && threadPullRequestKeysEqual(link, target),
@@ -278,7 +286,7 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const thread = yield* requireThread(PullRequestLinkFailedError, input.threadId);
         const project = yield* projectOf(thread, PullRequestLinkFailedError);
-        const target = yield* resolveTarget(input, project);
+        const target = yield* resolveTarget(input, project, yield* knownGitHubHosts(project));
         const existing = threadPullRequestsOf(thread).find((link) =>
           threadPullRequestKeysEqual(link, target),
         );
@@ -309,7 +317,7 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const thread = yield* requireThread(PullRequestUnlinkFailedError, input.threadId);
         const project = yield* projectOf(thread, PullRequestUnlinkFailedError);
-        const target = yield* resolveTarget(input, project);
+        const target = yield* resolveTarget(input, project, yield* knownGitHubHosts(project));
         if (!threadPullRequestsOf(thread).some((link) => threadPullRequestKeysEqual(link, target)))
           return {
             host: target.host,

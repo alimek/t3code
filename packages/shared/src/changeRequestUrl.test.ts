@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  changeRequestRepositoryUrl,
   changeRequestUrlFor,
   gitHubHostsOf,
+  providerUrlHosts,
   parseChangeRequestUrl,
   pullRequestCandidateUrlFromReferenceAutolink,
   siblingPullRequestUrl,
@@ -234,5 +236,17 @@ describe("changeRequestUrlFor", () => {
       repository: "org/project/_git/web",
       number: 42,
     });
+  });
+});
+
+describe("URLs a provider returned", () => {
+  const url = "https://git.corp.example/team/workspace/pull/7/files";
+
+  it("reads a stored GitHub Enterprise link back on a host named nothing like GitHub", () => {
+    expect(siblingPullRequestUrl(url, 8)).toBe("https://git.corp.example/team/workspace/pull/8");
+    expect(changeRequestRepositoryUrl(url, providerUrlHosts(url))).toBe(
+      "https://git.corp.example/team/workspace",
+    );
+    expect(changeRequestRepositoryUrl(url)).toBeNull();
   });
 });
