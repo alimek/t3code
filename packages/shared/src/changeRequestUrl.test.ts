@@ -39,10 +39,32 @@ describe("parseChangeRequestUrl", () => {
           },
         },
       },
+      {
+        repositoryIdentity: {
+          canonicalKey: "code.corp.example/team/tools",
+          provider: "unknown",
+          locator: {
+            source: "git-remote" as const,
+            remoteName: "origin",
+            remoteUrl: "git@code.corp.example:team/tools.git",
+          },
+        },
+      },
+      {
+        repositoryIdentity: {
+          canonicalKey: "gitlab.corp.example/team/api",
+          provider: "gitlab",
+          locator: {
+            source: "git-remote" as const,
+            remoteName: "origin",
+            remoteUrl: "git@gitlab.corp.example:team/api.git",
+          },
+        },
+      },
       { repositoryIdentity: null },
     ];
     expect(parseChangeRequestUrl(url)).toBeNull();
-    expect(gitHubHostsOf(projects)).toEqual(["git.corp.example"]);
+    expect(gitHubHostsOf(projects)).toEqual(["git.corp.example", "code.corp.example"]);
     expect(parseChangeRequestUrl(url, gitHubHostsOf(projects))).toEqual({
       host: "git.corp.example",
       repository: "team/workspace",

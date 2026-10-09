@@ -93,13 +93,22 @@ export function parseChangeRequestUrl(
   return null;
 }
 
-/** The hosts of the GitHub repositories these projects were checked out from. */
+/**
+ * The hosts these projects were checked out from that may be GitHub: GitHub's own, and those
+ * whose hostname named no provider, since a GitHub Enterprise install is often only known to
+ * be one once the server reads it. A link still has to match one of these projects to open.
+ */
 export function gitHubHostsOf(
   projects: ReadonlyArray<{ readonly repositoryIdentity?: RepositoryIdentity | null | undefined }>,
 ): string[] {
   return projects.flatMap(({ repositoryIdentity }) =>
-    repositoryIdentity?.provider === "github"
-      ? [pullRequestHostOf(repositoryIdentity, SourceControlProviderKind.make("github"))]
+    repositoryIdentity?.provider === "github" || repositoryIdentity?.provider === "unknown"
+      ? [
+          pullRequestHostOf(
+            repositoryIdentity,
+            SourceControlProviderKind.make(repositoryIdentity.provider),
+          ),
+        ]
       : [],
   );
 }

@@ -578,3 +578,42 @@ describe("resolvePullRequestPreviewTarget", () => {
     });
   });
 });
+
+describe("resolvePullRequestPreviewTarget before the server names the provider", () => {
+  it("opens a pull request on a host no provider claimed yet in the app", () => {
+    const environmentId = EnvironmentId.make("local");
+    const project = {
+      id: ProjectId.make("workspace"),
+      environmentId,
+      repositoryIdentity: {
+        ...repositoryIdentity(
+          "unknown",
+          "git.corp.example/team/workspace",
+          "git@git.corp.example:team/workspace.git",
+        ),
+        displayName: "team/workspace",
+      },
+    } as never;
+    expect(
+      resolvePullRequestPreviewTarget({
+        environmentId,
+        projects: [project],
+        pullRequestsEnabled: true,
+        url: "https://git.corp.example/team/workspace/pull/7",
+      })?.input,
+    ).toEqual({
+      projectId: "workspace",
+      host: "git.corp.example",
+      repository: "team/workspace",
+      number: 7,
+    });
+    expect(
+      resolvePullRequestPreviewTarget({
+        environmentId,
+        projects: [project],
+        pullRequestsEnabled: true,
+        url: "https://git.corp.example/team/other/pull/7",
+      }),
+    ).toBeNull();
+  });
+});
