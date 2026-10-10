@@ -74,6 +74,7 @@ import Migration0057 from "./Migrations/057_ScheduledTaskWebhooks.ts";
 import Migration0058 from "./Migrations/058_WebhookRelayDeliveries.ts";
 import Migration0059 from "./Migrations/059_McpAppModelContext.ts";
 import Migration0060 from "./Migrations/060_ThreadSnapshotWindowIndexes.ts";
+import Migration0062 from "./Migrations/062_AuthPairingIssuer.ts";
 import Migration0061 from "./Migrations/061_AuthResourceGrants.ts";
 
 /**
@@ -150,6 +151,7 @@ export const migrationEntries = [
   [59, "McpAppModelContext", Migration0059],
   [60, "ThreadSnapshotWindowIndexes", Migration0060],
   [61, "AuthResourceGrants", Migration0061],
+  [62, "AuthPairingIssuer", Migration0062],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

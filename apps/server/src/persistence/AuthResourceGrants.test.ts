@@ -177,13 +177,13 @@ it.effect("malformed explicit storage fails closed in lookups, lists and consump
   }).pipe(Effect.provide(layer)),
 );
 
-it.effect("migration 61 preserves old rows with unrestricted SQL NULL grants", () =>
+it.effect("migrations 61 and 62 preserve old rows with unrestricted SQL NULL grants", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* runMigrations({ toMigrationInclusive: 60 });
     yield* sql`INSERT INTO auth_pairing_links (id, credential, method, scopes, subject, created_at, expires_at) VALUES ('legacy', 'legacy', 'one-time-token', '[]', 'legacy', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')`;
     yield* sql`INSERT INTO auth_sessions (session_id, subject, scopes, method, issued_at, expires_at) VALUES ('legacy', 'legacy', '[]', 'bearer-access-token', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')`;
-    yield* runMigrations({ toMigrationInclusive: 61 });
+    yield* runMigrations({ toMigrationInclusive: 62 });
     const links = yield* AuthPairingLinks.AuthPairingLinkRepository;
     const sessions = yield* AuthSessions.AuthSessionRepository;
     expect(
@@ -193,7 +193,7 @@ it.effect("migration 61 preserves old rows with unrestricted SQL NULL grants", (
       Option.getOrThrow(yield* sessions.getById({ sessionId: AuthSessionId.make("legacy") }))
         .resourceGrant,
     ).toBeNull();
-    expect(yield* runMigrations({ toMigrationInclusive: 61 })).toEqual([]);
+    expect(yield* runMigrations({ toMigrationInclusive: 62 })).toEqual([]);
   }).pipe(
     Effect.provide(
       Layer.merge(AuthPairingLinks.layer, AuthSessions.layer).pipe(

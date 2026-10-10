@@ -444,8 +444,17 @@ export const layer = HttpApiBuilder.group(
                 return yield* failEnvironmentScopeRequired(delegatedScope);
               }
             }
-            return yield* serverAuth.issuePairingCredential(args.payload);
+            return yield* serverAuth.issueClientPairingCredential(
+              { ...session, scopes: [...session.scopes] },
+              args.payload,
+            );
           },
+          Effect.catchTags({
+            ServerAuthAuthorityUpdateError: (error) =>
+              error.reason === "not_owner"
+                ? failEnvironmentScopeRequired(AuthAccessWriteScope)
+                : failEnvironmentInvalidRequest("invalid_scope"),
+          }),
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
             failEnvironmentInternal("pairing_credential_issuance_failed", error),
           ),
@@ -488,6 +497,33 @@ export const layer = HttpApiBuilder.group(
           },
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
             failEnvironmentInternal("client_sessions_load_failed", error),
+          ),
+        ),
+      )
+      .handle(
+        "updateClientGrants",
+        Effect.fn("environment.auth.updateClientGrants")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* EnvironmentAuthenticatedPrincipal;
+            return yield* serverAuth.updateClientGrants(
+              { ...session, scopes: [...session.scopes] },
+              args.params.sessionId,
+              args.payload,
+            );
+          },
+          Effect.catchTags({
+            ServerAuthAuthorityUpdateError: (error) =>
+              error.reason === "not_owner"
+                ? failEnvironmentScopeRequired(AuthAccessWriteScope)
+                : failEnvironmentInvalidRequest(
+                    error.reason === "revision_conflict"
+                      ? "authority_revision_conflict"
+                      : "invalid_scope",
+                  ),
+          }),
+          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+            failEnvironmentInternal("internal_error", error),
           ),
         ),
       )

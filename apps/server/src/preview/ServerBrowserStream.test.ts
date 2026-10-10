@@ -6,12 +6,15 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthSessionId,
+  AuthAllResourceGrant,
+  EnvironmentId,
   PREVIEW_STREAM_HOST_SETUP_CLOSE_CODE,
   PreviewStreamHostSetup,
   type AuthEnvironmentScope,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -19,6 +22,11 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import { HttpRouter, HttpServer } from "effect/http";
 
+import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
@@ -43,7 +51,15 @@ const makeAuth = (
             scopes,
           });
     },
-  });
+  }).pipe(
+    Layer.merge(
+      Layer.mock(SessionStore.SessionStore, {
+        cookieName: "test",
+        legacyCookieName: undefined,
+        withConnection: (_session, effect) => effect,
+      }),
+    ),
+  );
   return { layer, requests };
 };
 
@@ -355,4 +371,90 @@ it.effect.each([
       command: "sudo t3 browser setup",
     });
   }).pipe(Effect.scoped),
+);
+
+it.effect(
+  "authority cuts close the preview socket after detaching its viewer before acknowledgement",
+  () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const issued = yield* sessions.issue();
+      const session = yield* sessions.verify(issued.token);
+      const stopped = yield* Deferred.make<void>();
+      const output = yield* Queue.unbounded<ServerBrowser.ServerBrowserViewerOutput>();
+      const browser = ServerBrowser.ServerBrowser.of({
+        clearProfile: () => Effect.void,
+        openDownload: () => Effect.succeedNone,
+        answerFileChooser: () => Effect.succeed(false),
+        attachViewer: () =>
+          Effect.acquireRelease(Effect.succeed({ output, input: () => Effect.void }), () =>
+            Deferred.succeed(stopped, undefined),
+          ),
+      });
+      const services = yield* Layer.build(
+        HttpRouter.serve(
+          routeLayer.pipe(
+            Layer.provide(Layer.succeed(ServerBrowser.ServerBrowser, browser)),
+            Layer.provide(Layer.succeed(SessionStore.SessionStore, sessions)),
+            Layer.provide(platformLayer),
+          ),
+          { disableListenLog: true },
+        ).pipe(
+          Layer.provideMerge(NodeHttpServer.layerTest),
+          Layer.provide(
+            Layer.mock(EnvironmentAuth.EnvironmentAuth, {
+              authenticateWebSocketUpgrade: () => Effect.succeed(session),
+            }),
+          ),
+        ),
+      );
+      const server = Context.get(services, HttpServer.HttpServer);
+      const origin = HttpServer.formatAddress(server.address).replace(/^http/, "ws");
+      const opened = Promise.withResolvers<void>();
+      const closed = Promise.withResolvers<void>();
+      const received = Promise.withResolvers<void>();
+      const messages: string[] = [];
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const socket = new WebSocket(`${origin}/api/preview-stream/ws?threadId=thread&tabId=tab`);
+          socket.addEventListener("open", () => opened.resolve());
+          socket.addEventListener("close", () => closed.resolve());
+          socket.addEventListener("error", () => opened.reject(new Error("socket failed")));
+          socket.addEventListener("message", (event) => {
+            messages.push(String(event.data));
+            received.resolve();
+          });
+          return socket;
+        }),
+        (socket) => Effect.sync(() => socket.close()),
+      );
+      yield* Effect.promise(() => opened.promise);
+      yield* Queue.offer(output, { _tag: "viewport", width: 100, height: 200 });
+      yield* Effect.promise(() => received.promise);
+      yield* sessions.updateAuthority({
+        sessionId: issued.sessionId,
+        scopes: [],
+        resourceGrant: AuthAllResourceGrant,
+        authorityRevision: 0,
+      });
+      expect(yield* Deferred.isDone(stopped)).toBe(true);
+      yield* Queue.offer(output, { _tag: "viewport", width: 300, height: 400 });
+      yield* Effect.promise(() => closed.promise);
+      expect(messages).toEqual([JSON.stringify({ type: "viewport", width: 100, height: 200 })]);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        SessionStore.layer.pipe(
+          Layer.provideMerge(SqlitePersistence.layerMemory),
+          Layer.provide(ServerSecretStore.layer),
+          Layer.provide(
+            Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
+              getEnvironmentId: Effect.succeed(EnvironmentId.make("preview-auth-test")),
+            }),
+          ),
+          Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-preview-auth-test-" })),
+          Layer.provide(NodeServices.layer),
+        ),
+      ),
+    ),
 );

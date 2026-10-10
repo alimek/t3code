@@ -1,5 +1,6 @@
 import {
   AuthAdministrativeScopes,
+  type AuthSessionId,
   AuthStandardClientScopes,
   type AuthResourceGrant,
   type AuthEnvironmentScope,
@@ -34,6 +35,7 @@ export interface BootstrapGrant {
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly subject: string;
   readonly label?: string;
+  readonly resourceGrant?: AuthResourceGrant;
   readonly proofKeyThumbprint?: string;
   readonly expiresAt: DateTime.DateTime;
 }
@@ -218,6 +220,7 @@ export class PairingGrantStore extends Context.Service<
       readonly ttl?: Duration.Duration;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly resourceGrant?: AuthResourceGrant;
+      readonly issuerSessionId?: AuthSessionId;
       readonly subject?: string;
       readonly label?: string;
       readonly proofKeyThumbprint?: string;
@@ -433,6 +436,7 @@ export const make = Effect.gen(function* () {
         method: "one-time-token",
         scopes: input?.scopes ?? AuthStandardClientScopes,
         resourceGrant: input?.resourceGrant ?? null,
+        issuerSessionId: input?.issuerSessionId ?? null,
         subject,
         label: input?.label ?? null,
         proofKeyThumbprint: input?.proofKeyThumbprint ?? null,
@@ -586,6 +590,9 @@ export const make = Effect.gen(function* () {
         return {
           method: consumed.value.method,
           scopes: consumed.value.scopes,
+          ...(consumed.value.resourceGrant == null
+            ? {}
+            : { resourceGrant: consumed.value.resourceGrant }),
           subject: consumed.value.subject,
           ...(consumed.value.label ? { label: consumed.value.label } : {}),
           ...(consumed.value.proofKeyThumbprint

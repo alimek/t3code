@@ -14,7 +14,9 @@ export class ResourceGrantsNotActivatedError extends Schema.TaggedError<Resource
 const isResourceGrant = Schema.is(AuthResourceGrant);
 
 /** Remove this gate only once every access path enforces resource grants (activation ticket). */
-export function requireUnrestrictedResourceGrant(grant: unknown) {
+export function requireUnrestrictedResourceGrant(
+  grant: unknown,
+): Effect.Effect<void, ResourceGrantsNotActivatedError> {
   return grant === undefined ||
     grant === null ||
     (isResourceGrant(grant) && grant.projects.mode === "all" && grant.providers.mode === "all")

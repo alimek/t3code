@@ -7,6 +7,7 @@ import {
   ForwardCompatibleArray,
   ClientSurface,
   ClientWebDeployment,
+  NonNegativeInt,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 
@@ -355,7 +356,14 @@ export const AuthClientMetadata = Schema.Struct({
 });
 export type AuthClientMetadata = typeof AuthClientMetadata.Type;
 
+const authorityMetadataFields = {
+  resourceGrant: Schema.optionalKey(AuthResourceGrant),
+  authorityRevision: Schema.optionalKey(NonNegativeInt),
+  deviceId: Schema.optionalKey(AuthSessionId),
+};
+
 export const AuthClientSession = Schema.Struct({
+  ...authorityMetadataFields,
   sessionId: AuthSessionId,
   subject: TrimmedNonEmptyString,
   ...authScopeResponseFields,
@@ -463,7 +471,15 @@ export const AuthCreatePairingCredentialInput = Schema.Struct({
 });
 export type AuthCreatePairingCredentialInput = typeof AuthCreatePairingCredentialInput.Type;
 
+export const AuthUpdateClientGrantsInput = Schema.Struct({
+  scopes: AuthGrantScopes,
+  resourceGrant: AuthResourceGrant,
+  authorityRevision: NonNegativeInt,
+});
+export type AuthUpdateClientGrantsInput = typeof AuthUpdateClientGrantsInput.Type;
+
 export const AuthSessionState = Schema.Struct({
+  ...authorityMetadataFields,
   authenticated: Schema.Boolean,
   auth: ServerAuthDescriptor,
   scopes: Schema.optionalKey(AuthEnvironmentScopes),

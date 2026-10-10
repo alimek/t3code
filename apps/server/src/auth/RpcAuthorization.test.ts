@@ -20,6 +20,7 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Ref from "effect/Ref";
 import * as Layer from "effect/Layer";
 import * as RpcTest from "effect/rpc/RpcTest";
 
@@ -253,6 +254,44 @@ describe("RPC scope middleware", () => {
     }).pipe(Effect.scoped),
   );
 });
+
+it.effect("rechecks authority before every RPC on an existing connection", () =>
+  Effect.gen(function* () {
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof WS_METHODS.serverProbe> =>
+          tag !== WS_METHODS.serverProbe,
+      ),
+    );
+    let calls = 0;
+    const allowed = yield* Ref.make(true);
+    const client = yield* RpcTest.makeClient(group).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          group.toLayerHandler(WS_METHODS.serverProbe, () =>
+            Effect.sync(() => {
+              calls++;
+              return {};
+            }),
+          ),
+          RpcAuthorization.layer(
+            [AuthOrchestrationReadScope],
+            Ref.get(allowed).pipe(
+              Effect.map((grant) => (grant ? [AuthOrchestrationReadScope] : [])),
+            ),
+          ),
+        ),
+      ),
+    );
+    yield* client[WS_METHODS.serverProbe]({});
+    yield* Ref.set(allowed, false);
+    expect(yield* client[WS_METHODS.serverProbe]({}).pipe(Effect.flip)).toMatchObject({
+      _tag: "EnvironmentAuthorizationError",
+      requiredPermission: AuthOrchestrationReadScope,
+    });
+    expect(calls).toBe(1);
+  }).pipe(Effect.scoped),
+);
 
 describe("settings mutation authorization", () => {
   const group = WsRpcGroup.omit(

@@ -263,11 +263,23 @@ const requiredScopesForRpcCall = (
 };
 
 /** Authorizes every RPC on one connection against that connection's session scopes. */
-export const layer = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
+export const layer = (
+  scopes: ReadonlyArray<AuthEnvironmentScope>,
+  currentScopes: Effect.Effect<
+    ReadonlyArray<AuthEnvironmentScope>,
+    EnvironmentAuthorizationError
+  > = Effect.succeed(scopes),
+) =>
   Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {
     const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);
-    const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));
-    return requiredScope === undefined ? effect : Effect.fail(rpcAuthorizationError(requiredScope));
+    return currentScopes.pipe(
+      Effect.flatMap((current) => {
+        const requiredScope = requiredScopes.find((scope) => !current.includes(scope));
+        return requiredScope === undefined
+          ? effect
+          : Effect.fail(rpcAuthorizationError(requiredScope));
+      }),
+    );
   });
 
 /** Retrying can install or restart tools even though ordinary listing is readable. */

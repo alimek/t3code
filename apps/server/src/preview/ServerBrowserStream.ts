@@ -20,6 +20,7 @@ import {
 } from "effect/http";
 import * as Socket from "effect/socket/Socket";
 
+import * as SessionStore from "../auth/SessionStore.ts";
 import { authenticateMediaRequest } from "../auth/http.ts";
 import { assetResponseHeaders } from "../http.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
@@ -50,7 +51,10 @@ const parseMessage = (chunk: Uint8Array | string): unknown => {
   }
 };
 
-const makeHandler = (browser: ServerBrowser.ServerBrowser["Service"]) =>
+const makeHandler = (
+  browser: ServerBrowser.ServerBrowser["Service"],
+  sessions: SessionStore.SessionStore["Service"],
+) =>
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const url = HttpServerRequest.toURL(request);
@@ -188,6 +192,7 @@ const makeHandler = (browser: ServerBrowser.ServerBrowser["Service"]) =>
         return yield* Effect.raceFirst(Effect.forever(sendOutput), Effect.forever(receiveInput));
       }),
     ).pipe(
+      (effect) => sessions.withConnection(session, effect),
       Effect.catchTags({
         ServerBrowserLaunchError: (error) =>
           Effect.logWarning("server preview browser failed to start", { cause: error.cause }).pipe(
@@ -277,10 +282,11 @@ const receiveUpload = (browser: ServerBrowser.ServerBrowser["Service"], params: 
 export const routeLayer = HttpRouter.use((router) =>
   Effect.gen(function* () {
     const browser = yield* ServerBrowser.ServerBrowser;
+    const sessions = yield* SessionStore.SessionStore;
     const platform = yield* Effect.context<
       HttpPlatform.HttpPlatform | FileSystem.FileSystem | Path.Path
     >();
-    const handler = makeHandler(browser).pipe(Effect.provideContext(platform));
+    const handler = makeHandler(browser, sessions).pipe(Effect.provideContext(platform));
     yield* router.add("GET", `${PREVIEW_STREAM_ROUTE_PREFIX}/*`, handler);
     yield* router.add("POST", `${PREVIEW_STREAM_ROUTE_PREFIX}/upload`, handler);
   }),

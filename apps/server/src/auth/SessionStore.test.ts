@@ -6,6 +6,8 @@ import {
   EnvironmentId,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -14,6 +16,9 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
+import * as Rpc from "effect/rpc/Rpc";
+import * as RpcGroup from "effect/rpc/RpcGroup";
+import * as RpcTest from "effect/rpc/RpcTest";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -98,6 +103,7 @@ const repositoryFailure = new PersistenceSqlError({
 });
 
 const layerFailingSessionLookupRepository = Layer.succeed(AuthSessions.AuthSessionRepository, {
+  updateAuthority: () => Effect.fail(repositoryFailure),
   create: () => Effect.void,
   createReplacingActive: () => Effect.succeed([]),
   createIfAbsent: () => Effect.void,
@@ -121,6 +127,316 @@ const layerFailingSessionLookupCredential = Layer.effect(
 );
 
 it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
+  it.effect("uses live root scopes while exchanges and tickets retain their ceilings", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const root = yield* sessions.issue({
+        scopes: ["orchestration:read", "orchestration:operate"],
+      });
+      const other = yield* sessions.issue();
+      const child = yield* sessions.issue({
+        parentSessionId: root.sessionId,
+        scopes: ["orchestration:read"],
+        method: "bearer-access-token",
+      });
+      const ticket = yield* sessions.issueWebSocketToken(child.sessionId);
+      const cut = yield* sessions.updateAuthority({
+        sessionId: root.sessionId,
+        scopes: [],
+        resourceGrant: AuthAllResourceGrant,
+        authorityRevision: 0,
+      });
+      expect(Option.isSome(cut) && cut.value.authorityRevision).toBe(1);
+      expect((yield* sessions.verify(root.token)).scopes).toEqual([]);
+      expect((yield* sessions.verify(child.token)).scopes).toEqual([]);
+      expect((yield* sessions.verifyWebSocketToken(ticket.token)).scopes).toEqual([]);
+      expect((yield* sessions.verify(other.token)).scopes).toEqual(AuthStandardClientScopes);
+      expect(
+        Option.isNone(
+          yield* sessions.updateAuthority({
+            sessionId: root.sessionId,
+            scopes: AuthStandardClientScopes,
+            resourceGrant: AuthAllResourceGrant,
+            authorityRevision: 0,
+          }),
+        ),
+      ).toBe(true);
+      yield* sessions.updateAuthority({
+        sessionId: child.sessionId,
+        scopes: AuthStandardClientScopes,
+        resourceGrant: AuthAllResourceGrant,
+        authorityRevision: 1,
+      });
+      expect((yield* sessions.verify(root.token)).scopes).toEqual(AuthStandardClientScopes);
+      expect((yield* sessions.verify(child.token)).scopes).toEqual(["orchestration:read"]);
+      expect((yield* sessions.verifyWebSocketToken(ticket.token)).scopes).toEqual([
+        "orchestration:read",
+      ]);
+      const refreshed = yield* sessions.issue({
+        parentSessionId: child.sessionId,
+        scopes: AuthStandardClientScopes,
+      });
+      expect((yield* sessions.verify(refreshed.token)).deviceId).toBe(root.sessionId);
+      expect((yield* sessions.verify(refreshed.token)).scopes).toEqual(["orchestration:read"]);
+    }).pipe(Effect.provide(layerSessionStore())),
+  );
+
+  it.effect("concurrent edits commit one revision and reject the stale comparison", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const issued = yield* sessions.issue();
+      const updates = yield* Effect.all(
+        [[], ["orchestration:read"] as const].map((scopes) =>
+          sessions.updateAuthority({
+            sessionId: issued.sessionId,
+            scopes,
+            resourceGrant: AuthAllResourceGrant,
+            authorityRevision: 0,
+          }),
+        ),
+        { concurrency: "unbounded" },
+      );
+      expect(updates.filter(Option.isSome)).toHaveLength(1);
+      expect(updates.filter(Option.isNone)).toHaveLength(1);
+      expect((yield* sessions.verify(issued.token)).authorityRevision).toBe(1);
+    }).pipe(Effect.provide(layerSessionStore())),
+  );
+
+  it.effect(
+    "intersects current fixture grants with exchange ceilings; public conversion stays closed",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const sql = yield* SqlClient.SqlClient;
+        const root = yield* sessions.issue();
+        const child = yield* sessions.issue({ parentSessionId: root.sessionId });
+        const grant = (ids: ReadonlyArray<string>) =>
+          JSON.stringify({
+            version: 1,
+            projects: { mode: "explicit", ids },
+            providers: { mode: "all" },
+          });
+        // Restricted rows belong only to internal fixtures until activation.
+        yield* sql`UPDATE auth_sessions SET resource_grant = ${grant(["A", "B"])} WHERE session_id = ${root.sessionId}`;
+        yield* sql`UPDATE auth_sessions SET resource_grant = ${grant(["A"])} WHERE session_id = ${child.sessionId}`;
+        expect((yield* sessions.getAuthority(child.sessionId)).resourceGrant.projects).toEqual({
+          mode: "explicit",
+          ids: ["A"],
+        });
+        yield* sql`UPDATE auth_sessions SET resource_grant = ${grant(["B"])} WHERE session_id = ${root.sessionId}`;
+        expect((yield* sessions.getAuthority(child.sessionId)).resourceGrant.projects).toEqual({
+          mode: "explicit",
+          ids: [],
+        });
+        expect((yield* Effect.flip(sessions.verify(child.token)))._tag).toBe(
+          "ResourceGrantsNotActivatedError",
+        );
+        yield* sql`UPDATE auth_sessions SET resource_grant = NULL WHERE session_id = ${root.sessionId}`;
+        expect((yield* sessions.getAuthority(child.sessionId)).resourceGrant.projects).toEqual({
+          mode: "explicit",
+          ids: ["A"],
+        });
+      }).pipe(Effect.provide(layerSessionStore())),
+  );
+
+  it.effect("legacy signed claims cannot regain removed or newly added scopes", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const root = yield* sessions.issue({ scopes: ["orchestration:read"] });
+      const payload = JSON.parse(base64UrlDecodeUtf8(root.token.split(".")[0]!));
+      delete payload.did;
+      const encoded = base64UrlEncode(JSON.stringify(payload));
+      const key = yield* secrets.getOrCreateRandom("server-signing-key", 32);
+      const legacy = `${encoded}.${signPayload(encoded, key)}`;
+      yield* sessions.updateAuthority({
+        sessionId: root.sessionId,
+        scopes: [],
+        resourceGrant: AuthAllResourceGrant,
+        authorityRevision: 0,
+      });
+      expect((yield* sessions.verify(legacy)).scopes).toEqual([]);
+      yield* sessions.updateAuthority({
+        sessionId: root.sessionId,
+        scopes: AuthStandardClientScopes,
+        resourceGrant: AuthAllResourceGrant,
+        authorityRevision: 1,
+      });
+      expect((yield* sessions.verify(legacy)).scopes).toEqual(["orchestration:read"]);
+      expect((yield* sessions.verify(root.token)).scopes).toEqual(AuthStandardClientScopes);
+    }).pipe(Effect.provide(layerSessionStore())),
+  );
+
+  it.effect(
+    "finishes affected connection subscriptions before update acknowledgement, then permits fresh reconnect",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const root = yield* sessions.issue();
+        const child = yield* sessions.issue({ parentSessionId: root.sessionId });
+        const other = yield* sessions.issue();
+        const start = (token: string) =>
+          Effect.gen(function* () {
+            const session = yield* sessions.verify(token);
+            const ready = yield* Deferred.make<void>();
+            const stopped = yield* Deferred.make<void>();
+            const connection = yield* sessions
+              .withConnection(
+                session,
+                Effect.acquireUseRelease(
+                  Deferred.succeed(ready, undefined),
+                  () => Effect.never,
+                  () => Deferred.succeed(stopped, undefined),
+                ),
+              )
+              .pipe(Effect.forkChild);
+            yield* Deferred.await(ready);
+            return { connection, stopped };
+          });
+        const first = yield* start(root.token);
+        const second = yield* start(child.token);
+        const unrelated = yield* start(other.token);
+        yield* sessions.updateAuthority({
+          sessionId: root.sessionId,
+          scopes: ["orchestration:read"],
+          resourceGrant: AuthAllResourceGrant,
+          authorityRevision: 0,
+        });
+        expect(yield* Deferred.isDone(first.stopped)).toBe(true);
+        expect(yield* Deferred.isDone(second.stopped)).toBe(true);
+        expect(yield* Deferred.isDone(unrelated.stopped)).toBe(false);
+        const reconnected = yield* start(child.token);
+        yield* sessions.revoke(child.sessionId);
+        expect(yield* Deferred.isDone(reconnected.stopped)).toBe(true);
+        expect(yield* Deferred.isDone(unrelated.stopped)).toBe(false);
+        expect((yield* Effect.flip(sessions.verify(root.token)))._tag).toBe(
+          "SessionTokenRevokedError",
+        );
+        yield* Fiber.interrupt(unrelated.connection);
+      }).pipe(Effect.provide(layerSessionStore())),
+  );
+
+  it.effect(
+    "auth cuts stop HTTP stream producers and discard queued output before acknowledgement",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const issued = yield* sessions.issue();
+        const session = yield* sessions.verify(issued.token);
+        const source = yield* Queue.unbounded<string>();
+        const blocked = yield* Deferred.make<void>();
+        const stopped = yield* Deferred.make<void>();
+        const stream = sessions.withConnectionStream(
+          session,
+          Stream.fromQueue(source).pipe(
+            Stream.tap((value) =>
+              value === "blocked" ? Deferred.succeed(blocked, undefined) : Effect.void,
+            ),
+            Stream.ensuring(Deferred.succeed(stopped, undefined)),
+          ),
+        );
+        const pull = yield* Stream.toPull(stream);
+        yield* Queue.offer(source, "first");
+        expect(yield* pull).toEqual(["first"]);
+        yield* Queue.offer(source, "buffered");
+        yield* Queue.offer(source, "blocked");
+        yield* Deferred.await(blocked);
+        yield* sessions.updateAuthority({
+          sessionId: issued.sessionId,
+          scopes: [],
+          resourceGrant: AuthAllResourceGrant,
+          authorityRevision: 0,
+        });
+        expect(yield* Deferred.isDone(stopped)).toBe(true);
+        const remaining = yield* Effect.exit(pull);
+        expect(remaining._tag).toBe("Failure");
+        // Finite streams still deliver their final buffered values on normal completion.
+        const fresh = yield* sessions.verify(issued.token);
+        expect(
+          yield* Stream.runCollect(sessions.withConnectionStream(fresh, Stream.make("a", "b"))),
+        ).toEqual(["a", "b"]);
+      }).pipe(Effect.scoped, Effect.provide(layerSessionStore())),
+  );
+
+  it.effect("auth cuts cancel live RPC subscriptions before returning and stop later output", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const issued = yield* sessions.issue();
+      const session = yield* sessions.verify(issued.token);
+      const subscribed = yield* Deferred.make<void>();
+      const stopped = yield* Deferred.make<void>();
+      const source = yield* Queue.unbounded<string>();
+      const received = yield* Queue.unbounded<string>();
+      const group = RpcGroup.make(Rpc.make("events", { success: Schema.String, stream: true }));
+      yield* sessions
+        .withConnection(
+          session,
+          Effect.gen(function* () {
+            const client = yield* RpcTest.makeClient(group).pipe(
+              Effect.provide(
+                group.toLayerHandler("events", () =>
+                  Stream.fromQueue(source).pipe(
+                    Stream.onStart(Deferred.succeed(subscribed, undefined)),
+                    Stream.ensuring(Deferred.succeed(stopped, undefined)),
+                  ),
+                ),
+              ),
+            );
+            yield* client.events().pipe(Stream.runForEach((value) => Queue.offer(received, value)));
+          }),
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(subscribed);
+      yield* Queue.offer(source, "before-cut");
+      expect(yield* Queue.take(received)).toBe("before-cut");
+      yield* sessions.updateAuthority({
+        sessionId: issued.sessionId,
+        scopes: [],
+        resourceGrant: AuthAllResourceGrant,
+        authorityRevision: 0,
+      });
+      expect(yield* Deferred.isDone(stopped)).toBe(true);
+      yield* Queue.offer(source, "after-cut");
+      expect(yield* Queue.size(received)).toBe(0);
+    }).pipe(Effect.provide(layerSessionStore())),
+  );
+
+  it.effect(
+    "anchor expiry ends derived connections and revoke-others preserves the whole current device",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const root = yield* sessions.issue({ ttl: Duration.seconds(10) });
+        const child = yield* sessions.issue({
+          parentSessionId: root.sessionId,
+          ttl: Duration.days(30),
+        });
+        const other = yield* sessions.issue();
+        yield* sessions.revokeAllExcept(child.sessionId);
+        expect((yield* Effect.flip(sessions.verify(other.token)))._tag).toBe(
+          "SessionTokenRevokedError",
+        );
+        const ready = yield* Deferred.make<void>();
+        const stopped = yield* Deferred.make<void>();
+        const session = yield* sessions.verify(child.token);
+        yield* sessions
+          .withConnection(
+            session,
+            Deferred.succeed(ready, undefined).pipe(
+              Effect.andThen(Effect.never),
+              Effect.ensuring(Deferred.succeed(stopped, undefined)),
+            ),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(ready);
+        yield* TestClock.adjust(Duration.seconds(10));
+        yield* Deferred.await(stopped);
+        expect((yield* Effect.flip(sessions.verify(child.token)))._tag).toBe(
+          "SessionTokenExpiredError",
+        );
+      }).pipe(Effect.provide(layerSessionStore())),
+  );
+
   it.effect(
     "rejects restricted session issuance, editing, verification and ticket conversion",
     () =>
@@ -139,12 +455,14 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
         const issued = yield* sessions.issue({ resourceGrant: AuthAllResourceGrant });
         expect((yield* sessions.verify(issued.token)).scopes).toEqual(AuthStandardClientScopes);
         const ticket = yield* sessions.issueWebSocketToken(issued.sessionId);
+        const child = yield* sessions.issue({ parentSessionId: issued.sessionId });
         yield* sql`UPDATE auth_sessions SET resource_grant = ${JSON.stringify(restricted)} WHERE session_id = ${issued.sessionId}`;
         for (const operation of [
           sessions.verify(issued.token).pipe(Effect.asVoid),
           sessions.verifyWebSocketToken(ticket.token).pipe(Effect.asVoid),
           sessions.issueWebSocketToken(issued.sessionId).pipe(Effect.asVoid),
           sessions.issue({ replaceSessionId: issued.sessionId }).pipe(Effect.asVoid),
+          sessions.issue({ replaceSessionId: child.sessionId }).pipe(Effect.asVoid),
           sessions.issue({ replaceActiveForSubjectAndMethod: true }).pipe(Effect.asVoid),
         ]) {
           expect((yield* Effect.flip(operation))._tag).toBe("ResourceGrantsNotActivatedError");
@@ -152,7 +470,7 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
         const rows = yield* sql<{
           revoked_at: string | null;
         }>`SELECT revoked_at FROM auth_sessions`;
-        expect(rows).toEqual([{ revoked_at: null }]);
+        expect(rows).toEqual([{ revoked_at: null }, { revoked_at: null }]);
       }).pipe(Effect.provide(layerSessionStore())),
   );
 
@@ -489,6 +807,32 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
       ).toHaveLength(1);
       expect(bearerVerification.filter(Option.isSome)).toHaveLength(1);
     }).pipe(Effect.provide(layerSessionStore())),
+  );
+
+  it.effect(
+    "manual re-pairing replaces the previous cookie device and all its derived transports",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const root = yield* sessions.issue({ method: "bearer-access-token" });
+        const cookie = yield* sessions.issue({
+          parentSessionId: root.sessionId,
+          method: "browser-session-cookie",
+        });
+        const other = yield* sessions.issue();
+        const next = yield* sessions.issue({
+          replaceSessionId: cookie.sessionId,
+          method: "browser-session-cookie",
+        });
+        expect((yield* Effect.flip(sessions.verify(root.token)))._tag).toBe(
+          "SessionTokenRevokedError",
+        );
+        expect((yield* Effect.flip(sessions.verify(cookie.token)))._tag).toBe(
+          "SessionTokenRevokedError",
+        );
+        expect((yield* sessions.verify(next.token)).deviceId).toBe(next.sessionId);
+        expect((yield* sessions.verify(other.token)).deviceId).toBe(other.sessionId);
+      }).pipe(Effect.provide(layerSessionStore())),
   );
 
   it.effect("keeps the previous desktop session valid when replacement fails", () =>

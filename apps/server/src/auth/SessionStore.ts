@@ -1,9 +1,11 @@
 import {
   AuthSessionId,
+  AuthAccessWriteScope,
   AuthAdministrativeScopes,
   AuthStandardClientScopes,
   AuthEnvironmentScopes,
   AuthResourceGrant,
+  intersectResourceGrants,
   type AuthClientMetadata,
   type AuthClientSession,
   type AuthEnvironmentScope,
@@ -11,6 +13,9 @@ import {
   RuntimeMode,
   type ServerAuthSessionMethod,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Semaphore from "effect/Semaphore";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -18,6 +23,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -55,7 +61,18 @@ export interface IssuedSession {
   readonly proofKeyThumbprint?: string;
 }
 
+export interface DeviceAuthority {
+  readonly deviceId: AuthSessionId;
+  readonly authorityRevision: number;
+  readonly resourceGrant: AuthResourceGrant;
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly expiresAt: DateTime.DateTime;
+}
+
 export interface VerifiedSession {
+  readonly deviceId?: AuthSessionId;
+  readonly authorityRevision?: number;
+  readonly resourceGrant?: AuthResourceGrant;
   readonly sessionId: AuthSessionId;
   readonly token: string;
   readonly method: ServerAuthSessionMethod;
@@ -371,9 +388,33 @@ export const SessionCredentialError = Schema.Union([
 ]);
 export type SessionCredentialError = typeof SessionCredentialError.Type;
 
+export type AuthConnection = Pick<
+  VerifiedSession,
+  "sessionId" | "deviceId" | "authorityRevision" | "scopes" | "resourceGrant" | "expiresAt"
+>;
+
 export class SessionStore extends Context.Service<
   SessionStore,
   {
+    readonly getAuthority: (
+      sessionId: AuthSessionId,
+      ceiling?: {
+        readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+        readonly resourceGrant?: AuthResourceGrant;
+      },
+    ) => Effect.Effect<DeviceAuthority, SessionCredentialError>;
+    readonly updateAuthority: (
+      input: Omit<AuthSessions.UpdateAuthSessionAuthorityInput, "now">,
+      issuer?: Pick<VerifiedSession, "sessionId" | "scopes" | "resourceGrant">,
+    ) => Effect.Effect<Option.Option<AuthClientSession>, SessionCredentialError>;
+    readonly withConnection: <A, E, R>(
+      session: AuthConnection,
+      effect: Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E | SessionCredentialError, R>;
+    readonly withConnectionStream: <A, E, R>(
+      session: AuthConnection,
+      stream: Stream.Stream<A, E, R>,
+    ) => Stream.Stream<A, E | SessionCredentialError, R>;
     readonly cookieName: string;
     readonly legacyCookieName: string | undefined;
     readonly issue: (input?: {
@@ -382,6 +423,8 @@ export class SessionStore extends Context.Service<
       readonly method?: ServerAuthSessionMethod;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly resourceGrant?: AuthResourceGrant;
+      /** Original session owns mutable authority; this row stores the exchange ceiling. */
+      readonly parentSessionId?: AuthSessionId;
       readonly client?: AuthClientMetadata;
       readonly proofKeyThumbprint?: string;
       readonly runtimeModeCeiling?: RuntimeMode;
@@ -392,19 +435,21 @@ export class SessionStore extends Context.Service<
       readonly replaceActiveForSubjectAndMethod?: boolean;
       /** Replace only this session, of the same method, in the issuance transaction. */
       readonly replaceSessionId?: AuthSessionId;
-    }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
+    }) => Effect.Effect<IssuedSession, SessionCredentialError>;
     readonly verify: (token: string) => Effect.Effect<VerifiedSession, SessionCredentialError>;
     readonly issueWebSocketToken: (
       sessionId: AuthSessionId,
       input?: {
         readonly ttl?: Duration.Duration;
+        readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+        readonly resourceGrant?: AuthResourceGrant;
       },
     ) => Effect.Effect<
       {
         readonly token: string;
         readonly expiresAt: DateTime.DateTime;
       },
-      SessionCredentialInternalError
+      SessionCredentialError
     >;
     readonly verifyWebSocketToken: (
       token: string,
@@ -443,6 +488,7 @@ const SessionClaims = Schema.Struct({
   sub: Schema.String,
   scopes: AuthEnvironmentScopes,
   resourceGrant: Schema.optionalKey(AuthResourceGrant),
+  did: Schema.optionalKey(AuthSessionId),
   method: Schema.Literals(["browser-session-cookie", "bearer-access-token", "dpop-access-token"]),
   jkt: Schema.optionalKey(Schema.String),
   rtc: Schema.optionalKey(RuntimeMode),
@@ -455,6 +501,8 @@ const WebSocketClaims = Schema.Struct({
   v: Schema.Literal(1),
   kind: Schema.Literal("websocket"),
   sid: AuthSessionId,
+  scopes: Schema.optionalKey(AuthEnvironmentScopes),
+  resourceGrant: Schema.optionalKey(AuthResourceGrant),
   iat: Schema.Number,
   exp: Schema.Number,
 });
@@ -502,6 +550,21 @@ export const make = Effect.gen(function* () {
   const authSessions = yield* AuthSessions.AuthSessionRepository;
   const signingSecret = yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32);
   const connectedSessionsRef = yield* Ref.make(new Map<AuthSessionId, number>());
+  // ponytail: one auth mutation lock; per-device locks only if auth editing gets busy.
+  const authorityLock = yield* Semaphore.make(1);
+  const connections = yield* Ref.make(
+    new Map<object, { deviceId: AuthSessionId; close: Effect.Effect<void> }>(),
+  );
+  const invalidateDevice = (deviceId: AuthSessionId) =>
+    Ref.get(connections).pipe(
+      Effect.flatMap((entries) =>
+        Effect.forEach(
+          [...entries.values()].filter((entry) => entry.deviceId === deviceId),
+          (entry) => entry.close,
+          { discard: true },
+        ),
+      ),
+    );
   const changesPubSub = yield* PubSub.unbounded<SessionCredentialChange>();
   const cookieInput = {
     mode: serverConfig.mode,
@@ -551,9 +614,124 @@ export const make = Effect.gen(function* () {
       sessionId,
     }).pipe(Effect.asVoid);
 
-  const loadActiveSession = (sessionId: AuthSessionId) =>
+  const getAuthority: SessionStore["Service"]["getAuthority"] = Effect.fn(
+    "SessionStore.getAuthority",
+  )(function* (sessionId, ceiling) {
+    const load = (id: AuthSessionId) =>
+      authSessions.getById({ sessionId: id }).pipe(
+        Effect.mapError(
+          (cause) => new SessionCredentialVerificationError({ sessionId: id, cause }),
+        ),
+        Effect.flatMap((row) =>
+          Option.isSome(row)
+            ? Effect.succeed(row.value)
+            : Effect.fail(new UnknownSessionTokenError({ sessionId: id })),
+        ),
+      );
+    const row = yield* load(sessionId);
+    const deviceId = AuthSessionId.make(row.deviceId ?? row.sessionId);
+    const root = deviceId === row.sessionId ? row : yield* load(deviceId);
+    // A single anchor, never a recursive invitation/session graph.
+    if (root.deviceId != null && root.deviceId !== root.sessionId) {
+      return yield* new UnknownSessionTokenError({ sessionId: deviceId });
+    }
+    const observedAt = yield* DateTime.now;
+    for (const record of [row, root]) {
+      if (record.revokedAt !== null)
+        return yield* new SessionTokenRevokedError({
+          sessionId: record.sessionId,
+          revokedAt: record.revokedAt,
+        });
+      if (record.expiresAt.epochMilliseconds <= observedAt.epochMilliseconds)
+        return yield* new SessionTokenExpiredError({
+          sessionId: record.sessionId,
+          expiresAt: record.expiresAt,
+          observedAt,
+        });
+    }
+    const scopes = root.scopes.filter(
+      (scope) =>
+        (row === root || row.scopes.includes(scope)) &&
+        (ceiling?.scopes === undefined || ceiling.scopes.includes(scope)),
+    );
+    return {
+      deviceId,
+      authorityRevision: root.authorityRevision ?? 0,
+      resourceGrant: intersectResourceGrants(
+        intersectResourceGrants(root.resourceGrant, row === root ? undefined : row.resourceGrant),
+        ceiling?.resourceGrant,
+      ),
+      scopes,
+      expiresAt:
+        row.expiresAt.epochMilliseconds < root.expiresAt.epochMilliseconds
+          ? row.expiresAt
+          : root.expiresAt,
+    } satisfies DeviceAuthority;
+  });
+
+  const withConnection: SessionStore["Service"]["withConnection"] = (session, effect) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const ready = yield* Deferred.make<void>();
+        const connection = yield* Deferred.await(ready).pipe(
+          Effect.andThen(Effect.scoped(effect)),
+          Effect.forkChild,
+        );
+        const key = {};
+        yield* Effect.acquireRelease(
+          Ref.update(connections, (current) =>
+            new Map(current).set(key, {
+              deviceId: session.deviceId ?? session.sessionId,
+              close: Fiber.interrupt(connection).pipe(Effect.asVoid),
+            }),
+          ),
+          () =>
+            Ref.update(connections, (current) => {
+              const next = new Map(current);
+              next.delete(key);
+              return next;
+            }),
+        );
+        // Registration races with updates: re-check after registration before using the socket.
+        const authority = yield* getAuthority(session.sessionId, session);
+        if (authority.authorityRevision !== (session.authorityRevision ?? 0)) {
+          yield* Fiber.interrupt(connection);
+          return yield* new SessionTokenRevokedError({
+            sessionId: session.sessionId,
+            revokedAt: yield* DateTime.now,
+          });
+        }
+        yield* Deferred.succeed(ready, undefined);
+        const expiresAt = Math.min(
+          authority.expiresAt.epochMilliseconds,
+          session.expiresAt?.epochMilliseconds ?? Infinity,
+        );
+        const remaining = expiresAt - (yield* DateTime.now).epochMilliseconds;
+        yield* Effect.sleep(Duration.millis(Math.max(0, remaining))).pipe(
+          Effect.andThen(Fiber.interrupt(connection)),
+          Effect.forkScoped,
+        );
+        return yield* Fiber.join(connection);
+      }),
+    );
+
+  const withConnectionStream: SessionStore["Service"]["withConnectionStream"] = (session, stream) =>
+    Stream.callback(
+      (queue) =>
+        withConnection(
+          session,
+          Stream.runForEach(stream, (value) => Queue.offer(queue, value)).pipe(
+            Effect.onInterrupt(() => Queue.shutdown(queue)),
+            Effect.andThen(Queue.end(queue)),
+          ),
+        ),
+      { bufferSize: 1 },
+    );
+
+  const loadActiveSession = (sessionId: AuthSessionId, knownRow?: AuthSessions.AuthSessionRecord) =>
     Effect.gen(function* () {
-      const row = yield* authSessions.getById({ sessionId });
+      const row =
+        knownRow === undefined ? yield* authSessions.getById({ sessionId }) : Option.some(knownRow);
       if (Option.isNone(row) || row.value.revokedAt !== null) {
         return Option.none<AuthClientSession>();
       }
@@ -564,11 +742,27 @@ export const make = Effect.gen(function* () {
       if (!connected && row.value.expiresAt.epochMilliseconds <= now.epochMilliseconds) {
         return Option.none<AuthClientSession>();
       }
+      const authority =
+        row.value.deviceId != null && row.value.deviceId !== row.value.sessionId
+          ? yield* getAuthority(sessionId).pipe(
+              Effect.catchIf(isSessionCredentialInvalidError, () => Effect.void),
+            )
+          : undefined;
+      if (
+        row.value.deviceId != null &&
+        row.value.deviceId !== row.value.sessionId &&
+        authority === undefined
+      )
+        return Option.none<AuthClientSession>();
       return Option.some(
         toAuthClientSession({
           sessionId: row.value.sessionId,
           subject: row.value.subject,
-          scopes: row.value.scopes,
+          scopes: authority?.scopes ?? row.value.scopes,
+          resourceGrant:
+            authority?.resourceGrant ?? intersectResourceGrants(row.value.resourceGrant, undefined),
+          authorityRevision: authority?.authorityRevision ?? row.value.authorityRevision ?? 0,
+          deviceId: AuthSessionId.make(row.value.deviceId ?? row.value.sessionId),
           method: row.value.method,
           client: toClientMetadata(row.value.client),
           issuedAt: row.value.issuedAt,
@@ -665,12 +859,22 @@ export const make = Effect.gen(function* () {
   const issue: SessionStore["Service"]["issue"] = Effect.fn("SessionStore.issue")(
     function* (input) {
       yield* requireUnrestrictedResourceGrant(input?.resourceGrant);
+      const guardReplacement = (row: AuthSessions.AuthSessionRecord) =>
+        Effect.gen(function* () {
+          yield* requireUnrestrictedResourceGrant(row.resourceGrant);
+          if (row.deviceId != null && row.deviceId !== row.sessionId) {
+            const root = yield* authSessions
+              .getById({ sessionId: AuthSessionId.make(row.deviceId) })
+              .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ cause })));
+            if (Option.isSome(root))
+              yield* requireUnrestrictedResourceGrant(root.value.resourceGrant);
+          }
+        });
       if (input?.replaceSessionId !== undefined) {
         const previous = yield* authSessions
           .getById({ sessionId: input.replaceSessionId })
           .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ cause })));
-        if (Option.isSome(previous))
-          yield* requireUnrestrictedResourceGrant(previous.value.resourceGrant);
+        if (Option.isSome(previous)) yield* guardReplacement(previous.value);
       } else if (input?.replaceActiveForSubjectAndMethod) {
         const previous = yield* authSessions
           .listActive({ now: yield* DateTime.now })
@@ -680,10 +884,15 @@ export const make = Effect.gen(function* () {
             row.subject === (input.subject ?? "browser") &&
             row.method === (input.method ?? "browser-session-cookie")
           ) {
-            yield* requireUnrestrictedResourceGrant(row.resourceGrant);
+            yield* guardReplacement(row);
           }
         }
       }
+      const parent =
+        input?.parentSessionId === undefined
+          ? undefined
+          : yield* getAuthority(input.parentSessionId);
+      if (parent) yield* requireUnrestrictedResourceGrant(parent.resourceGrant);
       const sessionId = AuthSessionId.make(
         yield* crypto.randomUUIDv4.pipe(
           Effect.mapError((cause) => new SessionCredentialIssueError({ cause })),
@@ -697,8 +906,11 @@ export const make = Effect.gen(function* () {
         v: 1,
         kind: "session",
         sid: sessionId,
+        did: parent?.deviceId ?? sessionId,
         sub: input?.subject ?? "browser",
-        scopes: input?.scopes ?? AuthStandardClientScopes,
+        scopes: parent
+          ? parent.scopes.filter((scope) => (input?.scopes ?? parent.scopes).includes(scope))
+          : (input?.scopes ?? AuthStandardClientScopes),
         ...(input?.resourceGrant !== undefined ? { resourceGrant: input.resourceGrant } : {}),
         method: input?.method ?? "browser-session-cookie",
         ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
@@ -727,7 +939,11 @@ export const make = Effect.gen(function* () {
         sessionId,
         subject: claims.sub,
         scopes: claims.scopes,
-        resourceGrant: claims.resourceGrant ?? null,
+        resourceGrant: parent
+          ? intersectResourceGrants(parent.resourceGrant, input?.resourceGrant)
+          : (claims.resourceGrant ?? null),
+        authorityRevision: parent ? null : 0,
+        deviceId: parent?.deviceId ?? sessionId,
         method: claims.method,
         client: {
           label: client.label ?? null,
@@ -752,6 +968,7 @@ export const make = Effect.gen(function* () {
           : authSessions.create(sessionRecord).pipe(Effect.as([] as ReadonlyArray<AuthSessionId>))
       ).pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })));
       if (replacedSessionIds.length > 0) {
+        yield* Effect.forEach(replacedSessionIds, invalidateDevice, { discard: true });
         yield* Ref.update(connectedSessionsRef, (current) => {
           const next = new Map(current);
           for (const replacedSessionId of replacedSessionIds) {
@@ -769,6 +986,9 @@ export const make = Effect.gen(function* () {
           sessionId,
           subject: claims.sub,
           scopes: claims.scopes,
+          resourceGrant: intersectResourceGrants(sessionRecord.resourceGrant, undefined),
+          authorityRevision: parent?.authorityRevision ?? 0,
+          deviceId: sessionRecord.deviceId,
           method: claims.method,
           client,
           issuedAt,
@@ -788,6 +1008,7 @@ export const make = Effect.gen(function* () {
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
       } satisfies IssuedSession;
     },
+    (effect) => authorityLock.withPermits(1)(Effect.uninterruptible(effect)),
   );
 
   const verify: SessionStore["Service"]["verify"] = Effect.fn("SessionStore.verify")(
@@ -819,14 +1040,15 @@ export const make = Effect.gen(function* () {
             observedAt,
           });
         }
+        const authority = yield* getAuthority(row.value.sessionId);
         return {
+          ...authority,
           sessionId: row.value.sessionId,
           token,
           method: row.value.method,
           client: toClientMetadata(row.value.client),
           expiresAt: row.value.expiresAt,
           subject: row.value.subject,
-          scopes: row.value.scopes,
         } satisfies VerifiedSession;
       }
       const [encodedPayload, signature] = token.split(".");
@@ -878,14 +1100,25 @@ export const make = Effect.gen(function* () {
         });
       }
 
+      const authority = yield* getAuthority(claims.sid, {
+        // New root credentials track edits, legacy claims and derived credentials stay ceilings.
+        ...(claims.did === claims.sid ? {} : { scopes: claims.scopes }),
+        ...(claims.did === claims.sid || claims.resourceGrant === undefined
+          ? {}
+          : { resourceGrant: claims.resourceGrant }),
+      });
+      yield* requireUnrestrictedResourceGrant(authority.resourceGrant);
       return {
+        ...authority,
         sessionId: claims.sid,
         token,
         method: claims.method,
         client: toClientMetadata(row.value.client),
-        expiresAt: expiresAt.value,
-        subject: claims.sub,
-        scopes: claims.scopes,
+        expiresAt:
+          authority.expiresAt.epochMilliseconds < expiresAt.value.epochMilliseconds
+            ? authority.expiresAt
+            : expiresAt.value,
+        subject: row.value.subject,
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
         ...(claims.rtc ? { runtimeModeCeiling: claims.rtc } : {}),
       } satisfies VerifiedSession;
@@ -900,6 +1133,8 @@ export const make = Effect.gen(function* () {
       .getById({ sessionId })
       .pipe(Effect.mapError((cause) => new WebSocketTokenIssueError({ sessionId, cause })));
     if (Option.isSome(row)) yield* requireUnrestrictedResourceGrant(row.value.resourceGrant);
+    const authority = yield* getAuthority(sessionId, input);
+    yield* requireUnrestrictedResourceGrant(authority.resourceGrant);
     const issuedAt = yield* DateTime.now;
     const expiresAt = DateTime.add(issuedAt, {
       milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_WEBSOCKET_TOKEN_TTL),
@@ -907,6 +1142,8 @@ export const make = Effect.gen(function* () {
     const claims: WebSocketClaims = {
       v: 1,
       kind: "websocket",
+      scopes: authority.scopes,
+      resourceGrant: authority.resourceGrant,
       sid: sessionId,
       iat: issuedAt.epochMilliseconds,
       exp: expiresAt.epochMilliseconds,
@@ -993,14 +1230,15 @@ export const make = Effect.gen(function* () {
       });
     }
 
+    const authority = yield* getAuthority(claims.sid, claims);
+    yield* requireUnrestrictedResourceGrant(authority.resourceGrant);
     return {
+      ...authority,
       sessionId: row.value.sessionId,
       token,
       method: row.value.method,
       client: toClientMetadata(row.value.client),
-      expiresAt: row.value.expiresAt,
       subject: row.value.subject,
-      scopes: row.value.scopes,
     } satisfies VerifiedSession;
   });
 
@@ -1013,79 +1251,138 @@ export const make = Effect.gen(function* () {
         connectedSessionIds: Array.from(connectedSessions.keys()),
       });
 
-      return rows.map((row) =>
-        toAuthClientSession({
-          sessionId: row.sessionId,
-          subject: row.subject,
-          scopes: row.scopes,
-          method: row.method,
-          client: toClientMetadata(row.client),
-          issuedAt: row.issuedAt,
-          expiresAt: row.expiresAt,
-          lastConnectedAt: row.lastConnectedAt,
-          connected: connectedSessions.has(row.sessionId),
-        }),
-      );
+      const clients = yield* Effect.forEach(rows, (row) => loadActiveSession(row.sessionId, row));
+      return clients.flatMap((client) => (Option.isSome(client) ? [client.value] : []));
     },
     Effect.mapError((cause) => new ActiveSessionsListError({ cause })),
   );
 
+  const updateAuthority: SessionStore["Service"]["updateAuthority"] = (input, issuer) =>
+    authorityLock.withPermits(1)(
+      Effect.uninterruptible(
+        Effect.gen(function* () {
+          if (issuer) {
+            const owner = yield* getAuthority(issuer.sessionId, issuer);
+            yield* requireUnrestrictedResourceGrant(owner.resourceGrant);
+            if (
+              !owner.scopes.includes(AuthAccessWriteScope) ||
+              !input.scopes.every((scope) => owner.scopes.includes(scope))
+            )
+              return Option.none();
+          }
+          const current = yield* getAuthority(input.sessionId);
+          yield* requireUnrestrictedResourceGrant(current.resourceGrant);
+          yield* requireUnrestrictedResourceGrant(input.resourceGrant);
+          const updated = yield* authSessions
+            .updateAuthority({ ...input, sessionId: current.deviceId, now: yield* DateTime.now })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new SessionCredentialVerificationError({ sessionId: current.deviceId, cause }),
+              ),
+            );
+          if (!updated) return Option.none();
+          // Commit first, then stop every affected connection and its subscriptions before acknowledgement.
+          yield* invalidateDevice(current.deviceId);
+          const client = yield* loadActiveSession(current.deviceId).pipe(
+            Effect.mapError((cause) => new ActiveSessionsListError({ cause })),
+          );
+          const affected = yield* authSessions
+            .listActive({ now: yield* DateTime.now })
+            .pipe(Effect.mapError((cause) => new ActiveSessionsListError({ cause })));
+          for (const row of affected) {
+            if ((row.deviceId ?? row.sessionId) !== current.deviceId) continue;
+            const view = yield* loadActiveSession(row.sessionId).pipe(
+              Effect.mapError((cause) => new ActiveSessionsListError({ cause })),
+            );
+            if (Option.isSome(view)) yield* emitUpsert(view.value);
+          }
+          return client;
+        }),
+      ),
+    );
+
   const revoke: SessionStore["Service"]["revoke"] = Effect.fn("SessionStore.revoke")(
     function* (sessionId) {
+      const row = yield* authSessions
+        .getById({ sessionId })
+        .pipe(Effect.mapError((cause) => new SessionRevocationError({ sessionId, cause })));
+      const deviceId = Option.isSome(row)
+        ? AuthSessionId.make(row.value.deviceId ?? row.value.sessionId)
+        : sessionId;
       const revokedAt = yield* DateTime.now;
+      const rows = yield* authSessions
+        .listActive({
+          now: revokedAt,
+          connectedSessionIds: [...(yield* Ref.get(connectedSessionsRef)).keys()],
+        })
+        .pipe(Effect.mapError((cause) => new SessionRevocationError({ sessionId, cause })));
+      const affectedIds = rows
+        .filter((row) => (row.deviceId ?? row.sessionId) === deviceId)
+        .map((row) => row.sessionId);
       const revoked = yield* authSessions
         .revoke({
-          sessionId,
+          sessionId: deviceId,
           revokedAt,
         })
         .pipe(Effect.mapError((cause) => new SessionRevocationError({ sessionId, cause })));
       if (revoked) {
+        yield* invalidateDevice(deviceId);
         yield* Ref.update(connectedSessionsRef, (current) => {
           const next = new Map(current);
-          next.delete(sessionId);
+          for (const id of affectedIds) next.delete(id);
           return next;
         });
-        yield* emitRemoved(sessionId);
+        yield* Effect.forEach(affectedIds, emitRemoved, { discard: true });
       }
       return revoked;
     },
+    (effect) => authorityLock.withPermits(1)(Effect.uninterruptible(effect)),
   );
 
   const revokeAllExcept: SessionStore["Service"]["revokeAllExcept"] = Effect.fn(
     "SessionStore.revokeAllExcept",
-  )(function* (sessionId) {
-    const revokedAt = yield* DateTime.now;
-    const revokedSessionIds = yield* authSessions
-      .revokeAllExcept({
-        currentSessionId: sessionId,
-        revokedAt,
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) => new OtherSessionsRevocationError({ currentSessionId: sessionId, cause }),
-        ),
-      );
-    if (revokedSessionIds.length > 0) {
-      yield* Ref.update(connectedSessionsRef, (current) => {
-        const next = new Map(current);
-        for (const revokedSessionId of revokedSessionIds) {
-          next.delete(revokedSessionId);
-        }
-        return next;
-      });
-      yield* Effect.forEach(
-        revokedSessionIds,
-        (revokedSessionId) => emitRemoved(revokedSessionId),
-        {
-          concurrency: "unbounded",
-          discard: true,
-        },
-      );
-    }
-    return revokedSessionIds.length;
-  });
+  )(
+    function* (sessionId) {
+      const revokedAt = yield* DateTime.now;
+      const revokedSessionIds = yield* authSessions
+        .revokeAllExcept({
+          currentSessionId: sessionId,
+          revokedAt,
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) => new OtherSessionsRevocationError({ currentSessionId: sessionId, cause }),
+          ),
+        );
+      if (revokedSessionIds.length > 0) {
+        yield* Effect.forEach(revokedSessionIds, invalidateDevice, { discard: true });
+        yield* Ref.update(connectedSessionsRef, (current) => {
+          const next = new Map(current);
+          for (const revokedSessionId of revokedSessionIds) {
+            next.delete(revokedSessionId);
+          }
+          return next;
+        });
+        yield* Effect.forEach(
+          revokedSessionIds,
+          (revokedSessionId) => emitRemoved(revokedSessionId),
+          {
+            concurrency: "unbounded",
+            discard: true,
+          },
+        );
+      }
+      return revokedSessionIds.length;
+    },
+    (effect) => authorityLock.withPermits(1)(Effect.uninterruptible(effect)),
+  );
 
   return SessionStore.of({
+    getAuthority,
+    updateAuthority,
+    withConnection,
+    withConnectionStream,
     cookieName,
     legacyCookieName,
     issue,

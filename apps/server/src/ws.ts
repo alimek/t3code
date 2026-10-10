@@ -28,6 +28,9 @@ import {
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
   AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  EnvironmentAuthInvalidError,
+  EnvironmentInternalError,
   type AuthEnvironmentScope,
   type ScheduledTaskListResult,
   AuthSessionId,
@@ -3166,66 +3169,96 @@ export const layer = Layer.unwrap(
         const clientAnalyticsProps = readClientAnalyticsProps(request);
         yield* sessions.recordClientConnection(session.sessionId, clientOrigin);
         yield* analytics.record("client.connected", clientAnalyticsProps);
-        const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
-          const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
-          yield* RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
-            Effect.provideService(RpcServer.Protocol, withTerminalOutputWindow(protocol)),
-            Effect.provide(
-              Layer.merge(RpcAuthorization.layer(session.scopes), rpcInstrumentationLayer),
-            ),
-            Effect.forkScoped,
-          );
-          // @effect-diagnostics-next-line returnEffectInGen:off
-          return httpEffect;
-        }).pipe(
-          Effect.provide(
-            layerWsRpc(
-              session,
-              clientOrigin,
-              clientAnalyticsProps,
-              previewAutomationBroker,
-              serverBrowser,
-            ).pipe(
-              Layer.provideMerge(RpcSerialization.layerJson),
-              // Request fibers run in the handlers' context, so this reporter sees
-              // their defects, not the rest of the server's.
-              Layer.provide(DefectReporter.layer),
-              Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
-              Layer.provide(AgentSessionScanner.layer),
-              Layer.provide(ProviderMaintenanceRunner.layer),
-              Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
-              // One server-lifetime service means clients share the same PR caches, and a WS
-              // mutation invalidates the HTTP diff cache that every client reads from.
-              Layer.provide(Layer.succeed(PullRequestService.PullRequestService, pullRequests)),
-              Layer.provide(
-                SourceControlDiscovery.layer.pipe(
-                  Layer.provide(
-                    SourceControlProviderRegistry.layer.pipe(
-                      Layer.provide(
-                        Layer.mergeAll(
-                          AzureDevOpsCli.layer,
-                          BitbucketApi.layer,
-                          GitHubApi.layerWithDependencies,
-                          GitLabCli.layer,
-                          ForgejoCli.layer,
+        return yield* sessions
+          .withConnection(
+            session,
+            Effect.gen(function* () {
+              const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
+                const { protocol, httpEffect } =
+                  yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
+                yield* RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
+                  Effect.provideService(RpcServer.Protocol, withTerminalOutputWindow(protocol)),
+                  Effect.provide(
+                    Layer.merge(
+                      RpcAuthorization.layer(
+                        session.scopes,
+                        sessions.getAuthority(session.sessionId, session).pipe(
+                          Effect.map((authority) => authority.scopes),
+                          Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationReadScope)),
                         ),
                       ),
-                      Layer.provideMerge(GitVcsDriver.layer),
-                      Layer.provide(
-                        VcsDriverRegistry.layer.pipe(Layer.provide(VcsProjectConfig.layer)),
+                      rpcInstrumentationLayer,
+                    ),
+                  ),
+                  Effect.forkScoped,
+                );
+                // @effect-diagnostics-next-line returnEffectInGen:off
+                return httpEffect;
+              }).pipe(
+                Effect.provide(
+                  layerWsRpc(
+                    session,
+                    clientOrigin,
+                    clientAnalyticsProps,
+                    previewAutomationBroker,
+                    serverBrowser,
+                  ).pipe(
+                    Layer.provideMerge(RpcSerialization.layerJson),
+                    // Request fibers run in the handlers' context, so this reporter sees
+                    // their defects, not the rest of the server's.
+                    Layer.provide(DefectReporter.layer),
+                    Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
+                    Layer.provide(AgentSessionScanner.layer),
+                    Layer.provide(ProviderMaintenanceRunner.layer),
+                    Layer.provide(
+                      Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate),
+                    ),
+                    // One server-lifetime service means clients share the same PR caches, and a WS
+                    // mutation invalidates the HTTP diff cache that every client reads from.
+                    Layer.provide(
+                      Layer.succeed(PullRequestService.PullRequestService, pullRequests),
+                    ),
+                    Layer.provide(
+                      SourceControlDiscovery.layer.pipe(
+                        Layer.provide(
+                          SourceControlProviderRegistry.layer.pipe(
+                            Layer.provide(
+                              Layer.mergeAll(
+                                AzureDevOpsCli.layer,
+                                BitbucketApi.layer,
+                                GitHubApi.layerWithDependencies,
+                                GitLabCli.layer,
+                                ForgejoCli.layer,
+                              ),
+                            ),
+                            Layer.provideMerge(GitVcsDriver.layer),
+                            Layer.provide(
+                              VcsDriverRegistry.layer.pipe(Layer.provide(VcsProjectConfig.layer)),
+                            ),
+                          ),
+                        ),
                       ),
                     ),
                   ),
                 ),
-              ),
+              );
+              return yield* Effect.acquireUseRelease(
+                sessions.markConnected(session.sessionId),
+                () => rpcWebSocketHttpEffect,
+                () => sessions.markDisconnected(session.sessionId),
+              );
+            }),
+          )
+          .pipe(
+            Effect.catch(
+              (
+                error,
+              ): Effect.Effect<never, EnvironmentAuthInvalidError | EnvironmentInternalError> =>
+                SessionStore.isSessionCredentialInvalidError(error)
+                  ? failEnvironmentAuthInvalid("invalid_credential")
+                  : failEnvironmentInternal("internal_error", error),
             ),
-          ),
-        );
-        return yield* Effect.acquireUseRelease(
-          sessions.markConnected(session.sessionId),
-          () => rpcWebSocketHttpEffect,
-          () => sessions.markDisconnected(session.sessionId),
-        );
+          );
       }).pipe(
         Effect.catchTags({
           EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,

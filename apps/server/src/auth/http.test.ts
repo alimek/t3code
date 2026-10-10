@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   AuthSessionId,
+  AuthAllResourceGrant,
   AuthTokenExchangeGrantType,
   AuthEnvironmentBootstrapTokenType,
   AuthAccessTokenType,
@@ -155,6 +156,51 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
           expect(restrictedCookies).toHaveLength(1);
           expect(restrictedCookies[0]).toMatch(/^t3_session_/);
           expect(restrictedCookies[0]).not.toContain("t3_dev_session_");
+          const pairedCookie = restrictedCookies[0]!.split(";", 1)[0]!;
+          const selfRequest = new Request("http://127.0.0.1/api/auth/session", {
+            headers: { cookie: pairedCookie },
+          });
+          const self = await environmentA.handler(selfRequest.clone(), requestContext);
+          const metadata = (await self.json()) as { deviceId: string; authorityRevision: number };
+          expect(metadata.authorityRevision).toBe(0);
+          const patch = (cookie: string, body: unknown) =>
+            new Request(`http://127.0.0.1/api/auth/clients/${metadata.deviceId}/grants`, {
+              method: "PATCH",
+              headers: { "content-type": "application/json", cookie },
+              body: encodeJson(body),
+            });
+          const edit = { scopes: [], resourceGrant: AuthAllResourceGrant, authorityRevision: 0 };
+          expect(
+            (await environmentA.handler(patch(pairedCookie, edit), requestContext)).status,
+          ).toBe(403);
+          const cut = await environmentA.handler(patch(devCookieHeader, edit), requestContext);
+          expect(cut.status).toBe(200);
+          expect(await cut.json()).toMatchObject({
+            deviceId: metadata.deviceId,
+            permissions: [],
+            authorityRevision: 1,
+          });
+          const stale = await environmentA.handler(patch(devCookieHeader, edit), requestContext);
+          expect(stale.status).toBe(400);
+          expect(await stale.json()).toMatchObject({ reason: "authority_revision_conflict" });
+          const afterCut = await environmentA.handler(selfRequest.clone(), requestContext);
+          expect(afterCut.status).toBe(200);
+          expect(await afterCut.json()).toMatchObject({
+            authenticated: true,
+            permissions: [],
+            authorityRevision: 1,
+          });
+          const gated = await environmentA.handler(
+            patch(devCookieHeader, {
+              ...edit,
+              authorityRevision: 1,
+              resourceGrant: { ...AuthAllResourceGrant, projects: { mode: "explicit", ids: [] } },
+            }),
+            requestContext,
+          );
+          expect(gated.status).toBe(500);
+          const afterGate = await environmentA.handler(selfRequest.clone(), requestContext);
+          expect(await afterGate.json()).toMatchObject({ authorityRevision: 1 });
         }),
       ([environmentA, environmentB]) =>
         Effect.promise(() => Promise.all([environmentA.dispose(), environmentB.dispose()])),

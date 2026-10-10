@@ -11,6 +11,7 @@ import {
   type AuthClientSession,
   type AuthCreatePairingCredentialInput,
   type AuthResourceGrant,
+  type AuthUpdateClientGrantsInput,
   type AuthEnvironmentScope,
   type AuthMcpClientAccess,
   type AuthPairingLink,
@@ -40,6 +41,7 @@ import * as ServerConfig from "../config.ts";
 import * as EnvironmentAuthPolicy from "./EnvironmentAuthPolicy.ts";
 import * as PairingGrantStore from "./PairingGrantStore.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
+import { requireUnrestrictedResourceGrant } from "./ResourceGrantGuard.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
@@ -94,6 +96,9 @@ export interface McpClientSession {
 }
 
 export interface AuthenticatedSession {
+  readonly deviceId?: AuthSessionId;
+  readonly authorityRevision?: number;
+  readonly resourceGrant?: AuthResourceGrant;
   readonly sessionId: AuthSessionId;
   readonly subject: string;
   readonly method: ServerAuthSessionMethod;
@@ -449,6 +454,22 @@ export class ServerAuthMcpApprovalCodeError extends Schema.TaggedError<ServerAut
   }
 }
 
+export class ServerAuthAuthorityUpdateError extends Schema.TaggedError<ServerAuthAuthorityUpdateError>()(
+  "ServerAuthAuthorityUpdateError",
+  {
+    reason: Schema.Literals([
+      "revision_conflict",
+      "invalid_scope",
+      "not_owner",
+      "cloud_conversion",
+    ]),
+  },
+) {
+  override get message(): string {
+    return "The session authority update was refused.";
+  }
+}
+
 export class ServerAuthForbiddenOperationError extends Schema.TaggedError<ServerAuthForbiddenOperationError>()(
   "ServerAuthForbiddenOperationError",
   {},
@@ -461,6 +482,18 @@ export class ServerAuthForbiddenOperationError extends Schema.TaggedError<Server
 export class EnvironmentAuth extends Context.Service<
   EnvironmentAuth,
   {
+    readonly updateClientGrants: (
+      issuer: AuthenticatedSession,
+      sessionId: AuthSessionId,
+      input: AuthUpdateClientGrantsInput,
+    ) => Effect.Effect<AuthClientSession, ServerAuthAuthorityUpdateError | ServerAuthInternalError>;
+    readonly issueClientPairingCredential: (
+      issuer: AuthenticatedSession,
+      input?: AuthCreatePairingCredentialInput,
+    ) => Effect.Effect<
+      AuthPairingCredentialResult,
+      ServerAuthAuthorityUpdateError | ServerAuthInternalError
+    >;
     readonly getDescriptor: () => Effect.Effect<ServerAuthDescriptor>;
     readonly getSessionState: (
       request: HttpServerRequest.HttpServerRequest,
@@ -497,6 +530,7 @@ export class EnvironmentAuth extends Context.Service<
       readonly subject?: string;
       readonly proofKeyThumbprint?: string;
       readonly purpose?: "startup";
+      readonly issuerSessionId?: AuthSessionId;
     }) => Effect.Effect<IssuedPairingLink, ServerAuthInternalError>;
     readonly issuePairingCredential: (
       input?: AuthCreatePairingCredentialInput,
@@ -543,7 +577,9 @@ export class EnvironmentAuth extends Context.Service<
       request: HttpServerRequest.HttpServerRequest,
     ) => Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError>;
     readonly issueWebSocketTicket: (
-      session: Pick<AuthenticatedSession, "sessionId">,
+      session: Pick<AuthenticatedSession, "sessionId" | "resourceGrant"> & {
+        readonly scopes?: Iterable<AuthEnvironmentScope>;
+      },
     ) => Effect.Effect<AuthWebSocketTicketResult, ServerAuthInternalError>;
     readonly issueStartupPairingUrl: (
       baseUrl: string,
@@ -709,6 +745,11 @@ export const make = Effect.gen(function* () {
       Effect.flatMap(rejectMcpClientAudience),
       Effect.map((session) => ({
         sessionId: session.sessionId,
+        ...(session.deviceId === undefined ? {} : { deviceId: session.deviceId }),
+        ...(session.authorityRevision === undefined
+          ? {}
+          : { authorityRevision: session.authorityRevision }),
+        ...(session.resourceGrant === undefined ? {} : { resourceGrant: session.resourceGrant }),
         subject: session.subject,
         method: session.method,
         scopes: session.scopes,
@@ -778,6 +819,13 @@ export const make = Effect.gen(function* () {
             authenticated: true,
             auth: descriptor,
             ...authScopeResponse(session.scopes),
+            ...(session.deviceId === undefined ? {} : { deviceId: session.deviceId }),
+            ...(session.authorityRevision === undefined
+              ? {}
+              : { authorityRevision: session.authorityRevision }),
+            ...(session.resourceGrant === undefined
+              ? {}
+              : { resourceGrant: session.resourceGrant }),
             sessionMethod: session.method,
             ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
           }) satisfies AuthSessionState,
@@ -825,15 +873,21 @@ export const make = Effect.gen(function* () {
             Effect.catchIf(SessionStore.isSessionCredentialInvalidError, () => Effect.void),
             Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })),
           );
-    const grant = yield* bootstrapCredentials
-      .consume(credential)
-      .pipe(Effect.mapError(toBootstrapExchangeError));
+    const grant = yield* resolveBootstrapGrant(credential).pipe(
+      Effect.catchTags({
+        ServerAuthScopeNotGrantedError: (cause) =>
+          Effect.fail(new ServerAuthInvalidCredentialError({ cause })),
+      }),
+    );
     const session = yield* sessions
       .issue({
         method: "browser-session-cookie",
         subject: grant.subject,
         scopes: grant.scopes,
-        ...(previousSession?.method === "browser-session-cookie"
+        ...(grant.resourceGrant === undefined ? {} : { resourceGrant: grant.resourceGrant }),
+        ...(grant.parentSessionId === undefined ? {} : { parentSessionId: grant.parentSessionId }),
+        ...(grant.parentSessionId === undefined &&
+        previousSession?.method === "browser-session-cookie"
           ? { replaceSessionId: previousSession.sessionId }
           : {}),
         client: {
@@ -855,9 +909,10 @@ export const make = Effect.gen(function* () {
 
   type ResolvedBootstrapGrant = Pick<
     PairingGrantStore.BootstrapGrant,
-    "scopes" | "subject" | "label"
+    "scopes" | "subject" | "label" | "resourceGrant"
   > & {
-    readonly method: PairingGrantStore.BootstrapGrant["method"] | "reusable-dev-token";
+    readonly method: PairingGrantStore.BootstrapGrant["method"] | "reusable-dev-token" | "session";
+    readonly parentSessionId?: AuthSessionId;
   };
   const resolveBootstrapGrant = (
     credential: string,
@@ -869,6 +924,32 @@ export const make = Effect.gen(function* () {
     ResolvedBootstrapGrant,
     ServerAuthInvalidCredentialError | ServerAuthInternalError | ServerAuthScopeNotGrantedError
   > => {
+    if (credential.includes(".") && !devAuth?.matches(credential)) {
+      return sessions.verify(credential).pipe(
+        mapSessionVerificationErrors,
+        Effect.flatMap(rejectMcpClientAudience),
+        Effect.flatMap((session) => {
+          if (
+            session.proofKeyThumbprint &&
+            session.proofKeyThumbprint !== input?.proofKeyThumbprint
+          )
+            return Effect.fail(
+              new ServerAuthInvalidCredentialError({
+                diagnostic: "Proof-bound credentials cannot change proof key.",
+              }),
+            );
+          return Effect.succeed({
+            method: "session" as const,
+            subject: session.subject,
+            scopes: session.scopes,
+            ...(session.resourceGrant === undefined
+              ? {}
+              : { resourceGrant: session.resourceGrant }),
+            parentSessionId: session.sessionId,
+          });
+        }),
+      );
+    }
     if (!devAuth?.matches(credential)) {
       return bootstrapCredentials
         .consume(credential, input)
@@ -913,6 +994,12 @@ export const make = Effect.gen(function* () {
                 method: input?.proofKeyThumbprint ? "dpop-access-token" : "bearer-access-token",
                 subject: grant.subject,
                 scopes: grantedScopes,
+                ...(grant.resourceGrant === undefined
+                  ? {}
+                  : { resourceGrant: grant.resourceGrant }),
+                ...(grant.parentSessionId === undefined
+                  ? {}
+                  : { parentSessionId: grant.parentSessionId }),
                 ...(input?.proofKeyThumbprint
                   ? {
                       proofKeyThumbprint: input.proofKeyThumbprint,
@@ -995,6 +1082,7 @@ export const make = Effect.gen(function* () {
         ...(input?.label ? { label: input.label } : {}),
         ...(input?.proofKeyThumbprint ? { proofKeyThumbprint: input.proofKeyThumbprint } : {}),
         ...(input?.purpose ? { purpose: input.purpose } : {}),
+        ...(input?.issuerSessionId ? { issuerSessionId: input.issuerSessionId } : {}),
       });
       return {
         id: issued.id,
@@ -1091,6 +1179,69 @@ export const make = Effect.gen(function* () {
       ...(input?.label ? { label: input.label } : {}),
     }).pipe(Effect.withSpan("EnvironmentAuth.issuePairingCredential"));
 
+  const requireGrantOwner = Effect.fn("EnvironmentAuth.requireGrantOwner")(function* (
+    issuer: AuthenticatedSession,
+  ) {
+    const authority = yield* sessions
+      .getAuthority(issuer.sessionId, issuer)
+      .pipe(Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })));
+    yield* requireUnrestrictedResourceGrant(authority.resourceGrant).pipe(
+      Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })),
+    );
+    if (!authority.scopes.includes(AuthAccessWriteScope))
+      return yield* new ServerAuthAuthorityUpdateError({ reason: "not_owner" });
+    return authority;
+  });
+
+  const issueClientPairingCredential: EnvironmentAuth["Service"]["issueClientPairingCredential"] =
+    Effect.fn("EnvironmentAuth.issueClientPairingCredential")(function* (issuer, input) {
+      const authority = yield* requireGrantOwner(issuer);
+      const scopes = input?.scopes ?? AuthStandardClientScopes;
+      if (
+        scopes.length === 0 ||
+        new Set(scopes).size !== scopes.length ||
+        !scopes.every((scope) => authority.scopes.includes(scope))
+      )
+        return yield* new ServerAuthAuthorityUpdateError({ reason: "invalid_scope" });
+      return yield* createPairingLink({ ...input, scopes, issuerSessionId: issuer.sessionId }).pipe(
+        Effect.map((issued) => ({
+          id: issued.id,
+          credential: issued.credential,
+          expiresAt: issued.expiresAt,
+          ...(issued.label ? { label: issued.label } : {}),
+        })),
+      );
+    });
+
+  const updateClientGrants: EnvironmentAuth["Service"]["updateClientGrants"] = Effect.fn(
+    "EnvironmentAuth.updateClientGrants",
+  )(function* (issuer, sessionId, input) {
+    const authority = yield* requireGrantOwner(issuer);
+    if (
+      new Set(input.scopes).size !== input.scopes.length ||
+      !input.scopes.every((scope) => authority.scopes.includes(scope))
+    )
+      return yield* new ServerAuthAuthorityUpdateError({ reason: "invalid_scope" });
+    const target = yield* sessions
+      .listActive()
+      .pipe(Effect.mapError((cause) => new ServerAuthSessionsListError({ cause })));
+    if (
+      target.find((session) => session.sessionId === sessionId)?.subject === "cloud-connect" &&
+      (input.resourceGrant.projects.mode !== "all" || input.resourceGrant.providers.mode !== "all")
+    )
+      return yield* new ServerAuthAuthorityUpdateError({ reason: "cloud_conversion" });
+    const updated = yield* sessions
+      .updateAuthority({ ...input, sessionId }, issuer)
+      .pipe(Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })));
+    if (Option.isNone(updated))
+      return yield* new ServerAuthAuthorityUpdateError({ reason: "revision_conflict" });
+    return {
+      ...updated.value,
+      ...authScopeResponse(updated.value.scopes),
+      current: updated.value.deviceId === issuer.deviceId,
+    };
+  });
+
   const issueStartupPairingCredential: EnvironmentAuth["Service"]["issueStartupPairingCredential"] =
     () => {
       const fallback = issuePairingCredentialForSubject({
@@ -1135,7 +1286,12 @@ export const make = Effect.gen(function* () {
   const revokeClientSession: EnvironmentAuth["Service"]["revokeClientSession"] = Effect.fn(
     "EnvironmentAuth.revokeClientSession",
   )(function* (currentSessionId, targetSessionId) {
-    if (currentSessionId === targetSessionId) {
+    const clients = yield* sessions
+      .listActive()
+      .pipe(Effect.mapError((cause) => new ServerAuthSessionsListError({ cause })));
+    const anchor = (id: AuthSessionId) =>
+      clients.find((client) => client.sessionId === id)?.deviceId ?? id;
+    if (anchor(currentSessionId) === anchor(targetSessionId)) {
       return yield* new ServerAuthForbiddenOperationError({});
     }
     return yield* revokeSession(targetSessionId);
@@ -1161,17 +1317,22 @@ export const make = Effect.gen(function* () {
     );
 
   const issueWebSocketTicket: EnvironmentAuth["Service"]["issueWebSocketTicket"] = (session) =>
-    sessions.issueWebSocketToken(session.sessionId).pipe(
-      Effect.mapError((cause) => new ServerAuthWebSocketTokenIssueError({ cause })),
-      Effect.map(
-        (issued) =>
-          ({
-            ticket: issued.token,
-            expiresAt: DateTime.toUtc(issued.expiresAt),
-          }) satisfies AuthWebSocketTicketResult,
-      ),
-      Effect.withSpan("EnvironmentAuth.issueWebSocketTicket"),
-    );
+    sessions
+      .issueWebSocketToken(session.sessionId, {
+        ...(session.scopes === undefined ? {} : { scopes: [...session.scopes] }),
+        ...(session.resourceGrant === undefined ? {} : { resourceGrant: session.resourceGrant }),
+      })
+      .pipe(
+        Effect.mapError((cause) => new ServerAuthWebSocketTokenIssueError({ cause })),
+        Effect.map(
+          (issued) =>
+            ({
+              ticket: issued.token,
+              expiresAt: DateTime.toUtc(issued.expiresAt),
+            }) satisfies AuthWebSocketTicketResult,
+        ),
+        Effect.withSpan("EnvironmentAuth.issueWebSocketTicket"),
+      );
 
   const authenticateHttpRequest: EnvironmentAuth["Service"]["authenticateHttpRequest"] = (
     request,
@@ -1189,6 +1350,13 @@ export const make = Effect.gen(function* () {
             Effect.flatMap(rejectMcpClientAudience),
             Effect.map((session) => ({
               sessionId: session.sessionId,
+              ...(session.deviceId === undefined ? {} : { deviceId: session.deviceId }),
+              ...(session.authorityRevision === undefined
+                ? {}
+                : { authorityRevision: session.authorityRevision }),
+              ...(session.resourceGrant === undefined
+                ? {}
+                : { resourceGrant: session.resourceGrant }),
               subject: session.subject,
               method: session.method,
               scopes: session.scopes,
@@ -1281,6 +1449,8 @@ export const make = Effect.gen(function* () {
     );
 
   return EnvironmentAuth.of({
+    updateClientGrants,
+    issueClientPairingCredential,
     getDescriptor: () =>
       Effect.succeed(descriptor).pipe(Effect.withSpan("EnvironmentAuth.getDescriptor")),
     getSessionState,

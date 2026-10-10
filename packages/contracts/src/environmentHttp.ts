@@ -14,6 +14,7 @@ import {
   AuthBrowserSessionRequest,
   AuthBrowserSessionResult,
   AuthClientSession,
+  AuthUpdateClientGrantsInput,
   AuthCreatePairingCredentialInput,
   AuthMcpApprovalDecisionRequest,
   AuthMcpApprovalDetails,
@@ -89,6 +90,7 @@ const OptionalDpopProofHeaders = Schema.Struct({
 
 export const EnvironmentRequestInvalidReason = Schema.Literals([
   "invalid_scope",
+  "authority_revision_conflict",
   "scope_not_granted",
   "invalid_command",
   "invalid_history_cursor",
@@ -376,6 +378,9 @@ export interface EnvironmentSessionPrincipalShape {
   readonly subject: string;
   readonly method: ServerAuthSessionMethod;
   readonly scopes: ReadonlySet<AuthEnvironmentScope>;
+  readonly deviceId?: AuthSessionId;
+  readonly authorityRevision?: number;
+  readonly resourceGrant?: import("./authResourceAccess.ts").AuthResourceGrant;
   readonly proofKeyThumbprint?: string;
   readonly expiresAt?: DateTime.DateTime;
 }
@@ -510,6 +515,15 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       headers: OptionalBearerHeaders,
       success: Schema.Array(AuthClientSession),
       error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.patch("updateClientGrants", "/api/auth/clients/:sessionId/grants", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ sessionId: AuthSessionId }),
+      payload: AuthUpdateClientGrantsInput,
+      success: AuthClientSession,
+      error: [...EnvironmentScopedOperationErrors, EnvironmentRequestInvalidError],
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(

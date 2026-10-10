@@ -8,6 +8,7 @@ import * as SqlSchema from "effect/sql/SqlSchema";
 
 import {
   AuthEnvironmentScopes,
+  AuthSessionId,
   AuthResourceGrant,
   NonNegativeInt,
   TrimmedNonEmptyString,
@@ -28,6 +29,7 @@ export const AuthPairingLinkRecord = Schema.Struct({
   resourceGrant: Schema.optionalKey(Schema.NullOr(Schema.fromJsonString(AuthResourceGrant))),
   authorityRevision: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
   deviceId: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+  issuerSessionId: Schema.optionalKey(Schema.NullOr(AuthSessionId)),
   subject: Schema.String,
   label: Schema.NullOr(Schema.String),
   proofKeyThumbprint: Schema.NullOr(Schema.String),
@@ -46,6 +48,7 @@ export const CreateAuthPairingLinkInput = Schema.Struct({
   resourceGrant: Schema.optionalKey(Schema.NullOr(AuthResourceGrant)),
   authorityRevision: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
   deviceId: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+  issuerSessionId: Schema.optionalKey(Schema.NullOr(AuthSessionId)),
   subject: Schema.String,
   label: Schema.NullOr(Schema.String),
   proofKeyThumbprint: Schema.NullOr(Schema.String),
@@ -87,6 +90,7 @@ const AuthPairingLinkRawDbRow = Schema.Struct({
   resourceGrant: Schema.Unknown,
   authorityRevision: Schema.Unknown,
   deviceId: Schema.Unknown,
+  issuerSessionId: Schema.Unknown,
   subject: Schema.Unknown,
   label: Schema.Unknown,
   proofKeyThumbprint: Schema.Unknown,
@@ -150,6 +154,7 @@ export const make = Effect.gen(function* () {
           resource_grant,
           authority_revision,
           device_id,
+          issuer_session_id,
           subject,
           label,
           proof_key_thumbprint,
@@ -166,6 +171,7 @@ export const make = Effect.gen(function* () {
           ${input.resourceGrant == null ? null : JSON.stringify(input.resourceGrant)},
           ${input.authorityRevision ?? null},
           ${input.deviceId ?? null},
+          ${input.issuerSessionId ?? null},
           ${input.subject},
           ${input.label},
           ${input.proofKeyThumbprint},
@@ -192,6 +198,24 @@ export const make = Effect.gen(function* () {
             proof_key_thumbprint IS NULL
             OR proof_key_thumbprint = ${proofKeyThumbprint}
           )
+          -- Pending invitations may not outlive the issuer's current authority.
+          AND (issuer_session_id IS NULL OR EXISTS (
+            SELECT 1 FROM auth_sessions AS issuer
+            JOIN auth_sessions AS root ON root.session_id = COALESCE(issuer.device_id, issuer.session_id)
+            WHERE issuer.session_id = auth_pairing_links.issuer_session_id
+              AND issuer.revoked_at IS NULL AND root.revoked_at IS NULL
+              AND issuer.expires_at > ${now} AND root.expires_at > ${now}
+              AND (root.device_id IS NULL OR root.device_id = root.session_id)
+              AND (issuer.resource_grant IS NULL OR (json_extract(issuer.resource_grant, '$.version') = 1 AND json_extract(issuer.resource_grant, '$.projects.mode') = 'all' AND json_extract(issuer.resource_grant, '$.providers.mode') = 'all'))
+              AND (root.resource_grant IS NULL OR (json_extract(root.resource_grant, '$.version') = 1 AND json_extract(root.resource_grant, '$.projects.mode') = 'all' AND json_extract(root.resource_grant, '$.providers.mode') = 'all'))
+              AND EXISTS (SELECT 1 FROM json_each(issuer.scopes) WHERE value = 'access:write')
+              AND EXISTS (SELECT 1 FROM json_each(root.scopes) WHERE value = 'access:write')
+              AND NOT EXISTS (
+                SELECT 1 FROM json_each(auth_pairing_links.scopes) AS granted
+                WHERE granted.value NOT IN (SELECT value FROM json_each(issuer.scopes))
+                  OR granted.value NOT IN (SELECT value FROM json_each(root.scopes))
+              )
+          ))
           AND (${requestedScopes === undefined ? 1 : 0} OR EXISTS (
             SELECT 1
             FROM json_each(${JSON.stringify(requestedScopes ?? [])}) AS requested
@@ -207,6 +231,7 @@ export const make = Effect.gen(function* () {
           resource_grant AS "resourceGrant",
           authority_revision AS "authorityRevision",
           device_id AS "deviceId",
+          issuer_session_id AS "issuerSessionId",
           subject AS "subject",
           label AS "label",
           proof_key_thumbprint AS "proofKeyThumbprint",
@@ -230,6 +255,7 @@ export const make = Effect.gen(function* () {
           resource_grant AS "resourceGrant",
           authority_revision AS "authorityRevision",
           device_id AS "deviceId",
+          issuer_session_id AS "issuerSessionId",
           subject AS "subject",
           label AS "label",
           proof_key_thumbprint AS "proofKeyThumbprint",
@@ -272,6 +298,7 @@ export const make = Effect.gen(function* () {
           resource_grant AS "resourceGrant",
           authority_revision AS "authorityRevision",
           device_id AS "deviceId",
+          issuer_session_id AS "issuerSessionId",
           subject AS "subject",
           label AS "label",
           proof_key_thumbprint AS "proofKeyThumbprint",

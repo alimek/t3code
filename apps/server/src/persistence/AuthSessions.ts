@@ -72,6 +72,15 @@ export const CreateReplacingActiveAuthSessionInput = Schema.Struct({
 export type CreateReplacingActiveAuthSessionInput =
   typeof CreateReplacingActiveAuthSessionInput.Type;
 
+export const UpdateAuthSessionAuthorityInput = Schema.Struct({
+  sessionId: AuthSessionId,
+  scopes: AuthEnvironmentScopes,
+  resourceGrant: AuthResourceGrant,
+  authorityRevision: NonNegativeInt,
+  now: Schema.DateTimeUtcFromString,
+});
+export type UpdateAuthSessionAuthorityInput = typeof UpdateAuthSessionAuthorityInput.Type;
+
 export const GetAuthSessionByIdInput = Schema.Struct({
   sessionId: AuthSessionId,
 });
@@ -111,6 +120,9 @@ export type SetAuthSessionClientConnectionInput = typeof SetAuthSessionClientCon
 export class AuthSessionRepository extends Context.Service<
   AuthSessionRepository,
   {
+    readonly updateAuthority: (
+      input: UpdateAuthSessionAuthorityInput,
+    ) => Effect.Effect<boolean, AuthSessionRepositoryError>;
     readonly create: (
       input: CreateAuthSessionInput,
     ) => Effect.Effect<void, AuthSessionRepositoryError>;
@@ -308,14 +320,13 @@ export const make = Effect.gen(function* () {
       sql`
         UPDATE auth_sessions
         SET revoked_at = ${revokedAt}
-        WHERE ${
-          replaceSessionId === undefined
-            ? sql`subject = ${session.subject}`
-            : sql`session_id = ${replaceSessionId}`
-        }
-          AND method = ${session.method}
+        WHERE COALESCE(device_id, session_id) IN (
+          SELECT COALESCE(device_id, session_id) FROM auth_sessions
+          WHERE ${replaceSessionId === undefined ? sql`subject = ${session.subject}` : sql`session_id = ${replaceSessionId}`}
+            AND method = ${session.method}
+            AND revoked_at IS NULL AND expires_at > ${revokedAt}
+        )
           AND revoked_at IS NULL
-          AND expires_at > ${revokedAt}
         RETURNING session_id AS "sessionId"
       `,
   });
@@ -382,7 +393,7 @@ export const make = Effect.gen(function* () {
       sql`
         UPDATE auth_sessions
         SET revoked_at = ${revokedAt}
-        WHERE session_id = ${sessionId}
+        WHERE COALESCE(device_id, session_id) = ${sessionId}
           AND revoked_at IS NULL
         RETURNING session_id AS "sessionId"
       `,
@@ -395,11 +406,37 @@ export const make = Effect.gen(function* () {
       sql`
         UPDATE auth_sessions
         SET revoked_at = ${revokedAt}
-        WHERE session_id <> ${currentSessionId}
+        WHERE COALESCE(device_id, session_id) <> (SELECT COALESCE(device_id, session_id) FROM auth_sessions WHERE session_id = ${currentSessionId})
           AND revoked_at IS NULL
         RETURNING session_id AS "sessionId"
       `,
   });
+
+  const updateAuthority: AuthSessionRepository["Service"]["updateAuthority"] = (input) =>
+    SqlSchema.findAll({
+      Request: UpdateAuthSessionAuthorityInput,
+      Result: Schema.Struct({ session_id: AuthSessionId }),
+      execute: (input) => sql`
+      UPDATE auth_sessions
+      SET scopes = ${JSON.stringify(input.scopes)},
+          resource_grant = ${JSON.stringify(input.resourceGrant)},
+          authority_revision = COALESCE(authority_revision, 0) + 1
+      WHERE session_id = ${input.sessionId}
+        AND (device_id IS NULL OR device_id = session_id)
+        AND COALESCE(authority_revision, 0) = ${input.authorityRevision}
+        AND revoked_at IS NULL AND expires_at > ${input.now}
+      RETURNING session_id
+    `,
+    })(input).pipe(
+      Effect.map((rows) => rows.length > 0),
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "AuthSessionRepository.updateAuthority:query",
+          "AuthSessionRepository.updateAuthority:decodeRow",
+          { sessionId: input.sessionId },
+        ),
+      ),
+    );
 
   const create: AuthSessionRepository["Service"]["create"] = (input) =>
     createSessionRow(input).pipe(
@@ -544,6 +581,7 @@ export const make = Effect.gen(function* () {
     );
 
   return {
+    updateAuthority,
     create,
     createReplacingActive,
     createIfAbsent,

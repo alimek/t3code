@@ -1,3 +1,5 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect Crypto cannot sign ES256 DPoP fixtures.
+import * as NodeCrypto from "node:crypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   authScopeResponse,
@@ -7,6 +9,13 @@ import {
   AuthStandardClientScopes,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import {
+  computeDpopAccessTokenHash,
+  computeDpopJwkThumbprint,
+  DpopPublicJwk,
+} from "@t3tools/shared/dpop";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
@@ -24,6 +33,7 @@ import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
 
 /** Pinned so dev-mode cookie tests can assert the port-scoped name. */
+const decodeDpopJwk = Schema.decodeUnknownSync(DpopPublicJwk);
 const decodePairingInput = Schema.decodeUnknownEffect(AuthCreatePairingCredentialInput);
 
 const TEST_SERVER_PORT = 13_773;
@@ -86,6 +96,219 @@ const requestMetadata = {
 };
 
 it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
+  it.effect("cookie, bearer, DPoP, refresh and WS reconnect use one current device authority", () =>
+    Effect.gen(function* () {
+      const auth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sessions = yield* SessionStore.SessionStore;
+      const ownerToken = yield* auth.issueSession();
+      const owner = yield* auth.authenticateHttpRequest(makeBearerRequest(ownerToken.token));
+      const pairing = yield* auth.issueClientPairingCredential(owner);
+      const cookie = yield* auth.createBrowserSession(pairing.credential, requestMetadata);
+      const cookieRequest = makeCookieRequest(sessions.cookieName, cookie.sessionToken);
+      const root = yield* auth.authenticateHttpRequest(cookieRequest);
+      const bearer = yield* auth.exchangeBootstrapCredentialForAccessToken(
+        cookie.sessionToken,
+        ["orchestration:read"],
+        requestMetadata,
+      );
+      const derivedCookie = yield* auth.createBrowserSession(bearer.access_token, requestMetadata);
+      const derivedCookieRequest = makeCookieRequest(
+        sessions.cookieName,
+        derivedCookie.sessionToken,
+      );
+      expect((yield* auth.authenticateHttpRequest(derivedCookieRequest)).deviceId).toBe(
+        root.sessionId,
+      );
+      const key = NodeCrypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
+      const jwk = decodeDpopJwk(key.publicKey.export({ format: "jwk" }));
+      const thumbprint = computeDpopJwkThumbprint(jwk);
+      const dpop = yield* auth.exchangeBootstrapCredentialForAccessToken(
+        bearer.access_token,
+        ["orchestration:read", "orchestration:operate"],
+        requestMetadata,
+        { proofKeyThumbprint: thumbprint },
+      );
+      let proofId = 0;
+      const dpopRequest = Effect.gen(function* () {
+        const header = Buffer.from(JSON.stringify({ typ: "dpop+jwt", alg: "ES256", jwk })).toString(
+          "base64url",
+        );
+        const payload = Buffer.from(
+          JSON.stringify({
+            htm: "GET",
+            htu: "http://localhost/api/auth/session",
+            jti: `authority-${++proofId}`,
+            iat: Math.floor((yield* DateTime.now).epochMilliseconds / 1000),
+            ath: computeDpopAccessTokenHash(dpop.access_token),
+          }),
+        ).toString("base64url");
+        const signature = NodeCrypto.sign("sha256", Buffer.from(`${header}.${payload}`), {
+          key: key.privateKey,
+          dsaEncoding: "ieee-p1363",
+        }).toString("base64url");
+        return HttpServerRequest.fromWeb(
+          new Request("http://localhost/api/auth/session", {
+            headers: {
+              authorization: `DPoP ${dpop.access_token}`,
+              dpop: `${header}.${payload}.${signature}`,
+            },
+          }),
+        );
+      });
+      const bound = yield* auth.authenticateHttpRequest(yield* dpopRequest);
+      expect(bound.deviceId).toBe(root.sessionId);
+      expect(bound.scopes).toEqual(["orchestration:read"]);
+      const ticket = yield* auth.issueWebSocketTicket(bound);
+      const wsRequest = HttpServerRequest.fromWeb(
+        new Request(`http://localhost/ws?wsTicket=${ticket.ticket}`),
+      );
+      expect((yield* auth.authenticateWebSocketUpgrade(wsRequest)).deviceId).toBe(root.sessionId);
+      const edit = {
+        scopes: [] as const,
+        resourceGrant: AuthAllResourceGrant,
+        authorityRevision: 0,
+      };
+      const updated = yield* auth.updateClientGrants(owner, root.sessionId, edit);
+      expect(updated.authorityRevision).toBe(1);
+      expect((yield* auth.getSessionState(cookieRequest)).permissions).toEqual([]);
+      expect((yield* auth.getSessionState(derivedCookieRequest)).permissions).toEqual([]);
+      expect(
+        (yield* auth.authenticateHttpRequest(makeBearerRequest(bearer.access_token))).scopes,
+      ).toEqual([]);
+      expect((yield* auth.authenticateHttpRequest(yield* dpopRequest)).scopes).toEqual([]);
+      expect((yield* auth.authenticateWebSocketUpgrade(wsRequest)).scopes).toEqual([]);
+      expect((yield* auth.getSessionState(cookieRequest)).deviceId).toBe(root.sessionId);
+      yield* auth.updateClientGrants(owner, root.sessionId, {
+        ...edit,
+        scopes: [...AuthStandardClientScopes],
+        authorityRevision: 1,
+      });
+      const refreshed = yield* auth.exchangeBootstrapCredentialForAccessToken(
+        dpop.access_token,
+        undefined,
+        requestMetadata,
+        { proofKeyThumbprint: thumbprint },
+      );
+      expect((yield* sessions.verify(refreshed.access_token)).scopes).toEqual([
+        "orchestration:read",
+      ]);
+      expect(
+        (yield* Effect.flip(auth.createBrowserSession(dpop.access_token, requestMetadata)))._tag,
+      ).toBe("ServerAuthInvalidCredentialError");
+      expect(
+        (yield* Effect.flip(
+          auth.exchangeBootstrapCredentialForAccessToken(
+            dpop.access_token,
+            undefined,
+            requestMetadata,
+            { proofKeyThumbprint: "other-key" },
+          ),
+        ))._tag,
+      ).toBe("ServerAuthInvalidCredentialError");
+      yield* auth.revokeSession(bound.sessionId);
+      for (const request of [
+        cookieRequest,
+        derivedCookieRequest,
+        makeBearerRequest(bearer.access_token),
+        yield* dpopRequest,
+      ]) {
+        expect((yield* Effect.flip(auth.authenticateHttpRequest(request)))._tag).toBe(
+          "ServerAuthInvalidCredentialError",
+        );
+      }
+      expect((yield* Effect.flip(auth.authenticateWebSocketUpgrade(wsRequest)))._tag).toBe(
+        "ServerAuthInvalidCredentialError",
+      );
+      expect(
+        (yield* auth.authenticateHttpRequest(makeBearerRequest(ownerToken.token))).scopes,
+      ).toEqual(AuthAdministrativeScopes);
+    }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
+
+  it.effect(
+    "owner checks, pending invitation validity, gate and cloud remint stay inside auth service",
+    () =>
+      Effect.gen(function* () {
+        const auth = yield* EnvironmentAuth.EnvironmentAuth;
+        const sessions = yield* SessionStore.SessionStore;
+        const ownerToken = yield* auth.issueSession();
+        const owner = yield* auth.authenticateHttpRequest(makeBearerRequest(ownerToken.token));
+        const nonOwnerToken = yield* auth.issueSession({ scopes: ["orchestration:read"] });
+        const nonOwner = yield* auth.authenticateHttpRequest(
+          makeBearerRequest(nonOwnerToken.token),
+        );
+        expect((yield* Effect.flip(auth.issueClientPairingCredential(nonOwner)))._tag).toBe(
+          "ServerAuthAuthorityUpdateError",
+        );
+        const limited = yield* auth.issueSession({
+          scopes: ["access:write", "orchestration:read"],
+        });
+        const limitedIssuer = yield* auth.authenticateHttpRequest(makeBearerRequest(limited.token));
+        expect(
+          (yield* Effect.flip(
+            auth.issueClientPairingCredential(limitedIssuer, { scopes: ["orchestration:operate"] }),
+          ))._tag,
+        ).toBe("ServerAuthAuthorityUpdateError");
+        const pending = yield* auth.issueClientPairingCredential(limitedIssuer, {
+          scopes: ["orchestration:read"],
+        });
+        yield* auth.updateClientGrants(owner, limited.sessionId, {
+          scopes: ["access:write"],
+          resourceGrant: AuthAllResourceGrant,
+          authorityRevision: 0,
+        });
+        expect(
+          (yield* Effect.flip(auth.createBrowserSession(pending.credential, requestMetadata)))._tag,
+        ).toBe("ServerAuthInvalidCredentialError");
+        const edit = {
+          scopes: ["orchestration:read"] as const,
+          resourceGrant: AuthAllResourceGrant,
+          authorityRevision: 0,
+        };
+        expect(
+          (yield* Effect.flip(auth.updateClientGrants(nonOwner, nonOwner.sessionId, edit)))._tag,
+        ).toBe("ServerAuthAuthorityUpdateError");
+        const restricted = yield* decodePairingInput({
+          resourceGrant: {
+            version: 1,
+            projects: { mode: "explicit", ids: [] },
+            providers: { mode: "all" },
+          },
+        });
+        const cloud = yield* auth.issueSession({ subject: "cloud-connect" });
+        expect(
+          (yield* Effect.flip(
+            auth.updateClientGrants(owner, cloud.sessionId, {
+              ...edit,
+              resourceGrant: restricted.resourceGrant!,
+            }),
+          ))._tag,
+        ).toBe("ServerAuthAuthorityUpdateError");
+        expect(
+          (yield* Effect.flip(
+            auth.updateClientGrants(owner, nonOwner.sessionId, {
+              ...edit,
+              resourceGrant: restricted.resourceGrant!,
+            }),
+          ))._tag,
+        ).toBe("ServerAuthSessionCredentialValidationError");
+        const remint = yield* auth.issueSession({
+          subject: "cloud-connect",
+          scopes: AuthStandardClientScopes,
+        });
+        expect((yield* sessions.verify(remint.token)).deviceId).toBe(remint.sessionId);
+        expect((yield* sessions.verify(cloud.token)).deviceId).toBe(cloud.sessionId);
+        const revokedLink = yield* auth.issueClientPairingCredential(owner, {
+          scopes: ["orchestration:read"],
+        });
+        yield* auth.revokeSession(owner.sessionId);
+        expect(
+          (yield* Effect.flip(auth.createBrowserSession(revokedLink.credential, requestMetadata)))
+            ._tag,
+        ).toBe("ServerAuthInvalidCredentialError");
+      }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
+
   it.effect("rejects restricted grant requests through every issuance API", () =>
     Effect.gen(function* () {
       const auth = yield* EnvironmentAuth.EnvironmentAuth;
