@@ -1,3 +1,5 @@
+import { type AuthResourceGrant, resourceGrantAllowsProject } from "@t3tools/contracts";
+import { projectCollectionOptions } from "../auth/projectCollectionAccess.ts";
 import {
   canonicalRepositoryKey,
   isSshRemoteUrl,
@@ -205,9 +207,11 @@ export class PullRequestService extends Context.Service<
   {
     readonly list: (
       input: PullRequestListInput,
+      grant?: AuthResourceGrant,
     ) => Effect.Effect<PullRequestListResult, PullRequestError>;
     readonly listStats: (
       input: PullRequestListStatsInput,
+      grant?: AuthResourceGrant,
     ) => Effect.Effect<PullRequestListStatsResult, PullRequestError>;
     readonly routing: (
       input: PullRequestRef,
@@ -781,7 +785,9 @@ export const make = Effect.gen(function* () {
       ? projects.listShells(
           filter.projectIds === undefined ? undefined : { projectIds: filter.projectIds },
         )
-      : projects.getShell(filter.projectId).pipe(Effect.map(Option.toArray))
+      : filter.projectIds !== undefined && !filter.projectIds.includes(filter.projectId)
+        ? Effect.succeed([])
+        : projects.getShell(filter.projectId).pipe(Effect.map(Option.toArray))
     ).pipe(
       Effect.mapError(
         (error) =>
@@ -2548,7 +2554,9 @@ export const make = Effect.gen(function* () {
   const listStatsUncached: PullRequestService["Service"]["listStats"] = (input) =>
     Effect.gen(function* () {
       if (input.refs.length === 0) return { stats: [] };
-      const { supported } = yield* listWorkspaceProjects({});
+      const { supported } = yield* listWorkspaceProjects({
+        projectIds: [...new Set(input.refs.map((ref) => ref.projectId))],
+      });
       const byProject = new Map(supported.map((project) => [project.project.id, project]));
       const wanted = new Map<
         string,
@@ -2943,7 +2951,8 @@ export const make = Effect.gen(function* () {
       timeToLive: (exit) => (Exit.isSuccess(exit) ? LIST_CACHE_TTL : Duration.zero),
     },
   );
-  const list: PullRequestService["Service"]["list"] = (input) => {
+  const list: PullRequestService["Service"]["list"] = (request, grant) => {
+    const input = { ...request, ...projectCollectionOptions(grant, request.projectIds) };
     const key = JSON.stringify([
       listingsEpoch,
       input.state,
@@ -3263,7 +3272,10 @@ export const make = Effect.gen(function* () {
   // Exact batches share in-flight reads; overlapping pages reuse each row already fetched.
   const listStats: PullRequestService["Service"]["listStats"] = Effect.fn(
     "PullRequestService.listStats",
-  )(function* (input: PullRequestListStatsInput) {
+  )(function* (request: PullRequestListStatsInput, grant?: AuthResourceGrant) {
+    const input = {
+      refs: request.refs.filter((ref) => resourceGrantAllowsProject(grant, ref.projectId)),
+    };
     if (input.refs.length === 0) return { stats: [] };
     const now = yield* Clock.currentTimeMillis;
     const held: PullRequestDiffStat[] = [];
@@ -3416,9 +3428,14 @@ export const make = Effect.gen(function* () {
     routingIdentity,
     withRoutingCredential,
     list,
-    listStats: (input) =>
-      Effect.forEach(input.refs, (ref) => canonicalRef(ref).pipe(Effect.option)).pipe(
-        Effect.flatMap((refs) => listStats({ ...input, refs: refs.flatMap(Option.toArray) })),
+    listStats: (input, grant) =>
+      Effect.forEach(
+        input.refs.filter((ref) => resourceGrantAllowsProject(grant, ref.projectId)),
+        (ref) => canonicalRef(ref).pipe(Effect.option),
+      ).pipe(
+        Effect.flatMap((refs) =>
+          listStats({ ...input, refs: refs.flatMap(Option.toArray) }, grant),
+        ),
       ),
     summary: credentialCached(summary),
     stack: credentialCached(stack),

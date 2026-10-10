@@ -7,6 +7,7 @@ import {
   PullRequestLinkedThreadsResult,
   PullRequestOperationError,
   type ThreadPullRequestKey,
+  type ProjectId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -15,7 +16,10 @@ import * as SqlClient from "effect/sql/SqlClient";
 const decodeLinkedThreads = Schema.decodeUnknownEffect(PullRequestLinkedThreadsResult);
 
 export const listLinkedPullRequestThreads = Effect.fn("listLinkedPullRequestThreads")(
-  function* (input: ThreadPullRequestKey) {
+  function* (
+    input: ThreadPullRequestKey,
+    options?: { readonly projectIds?: ReadonlyArray<ProjectId> },
+  ) {
     const key = normalizeThreadPullRequestKey(input);
     const sql = yield* SqlClient.SqlClient;
     const rows = yield* sql<{
@@ -37,6 +41,7 @@ export const listLinkedPullRequestThreads = Effect.fn("listLinkedPullRequestThre
       FROM orchestration_v2_projection_threads AS t
       JOIN json_each(t.payload_json, '$.pullRequests') AS link
       WHERE json_extract(link.value, '$.number') = ${key.number}
+        AND ${options?.projectIds === undefined ? sql`1 = 1` : sql.in("t.project_id", options.projectIds)}
         AND json_extract(link.value, '$.source') != 'stack-dismissed'
         AND t.deleted_at IS NULL
       UNION ALL
@@ -48,6 +53,7 @@ export const listLinkedPullRequestThreads = Effect.fn("listLinkedPullRequestThre
         t.updated_at AS "updatedAt"
       FROM orchestration_v2_projection_threads AS t
       WHERE json_type(t.payload_json, '$.pullRequests') IS NULL
+        AND ${options?.projectIds === undefined ? sql`1 = 1` : sql.in("t.project_id", options.projectIds)}
         AND json_type(t.payload_json, '$.linkedPullRequest') = 'object'
         AND json_extract(t.payload_json, '$.linkedPullRequest.number') = ${key.number}
         AND t.deleted_at IS NULL

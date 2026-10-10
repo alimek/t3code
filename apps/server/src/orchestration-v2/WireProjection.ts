@@ -3,13 +3,63 @@ import type {
   OrchestrationV2ContextHandoff,
   OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
+  OrchestrationV2ThreadShell,
+  ThreadId,
+  AuthResourceGrant,
 } from "@t3tools/contracts";
+import { resourceGrantAllowsProject } from "@t3tools/contracts";
 import {
   compactDynamicToolOutput,
   omitToolOutputImageData,
   toolOutputImages,
   toolOutputIndicatesFailure,
 } from "@t3tools/shared/toolOutput";
+
+/** Preserve permitted lineage, withholding references to other projects. */
+export function projectCollectionThreadShellForWire(
+  shell: OrchestrationV2ThreadShell,
+  permittedThreadIds: ReadonlySet<ThreadId>,
+  permittedForkReferences: ReadonlySet<string>,
+  grant?: AuthResourceGrant,
+): OrchestrationV2ThreadShell {
+  const parentThreadId = shell.lineage.parentThreadId;
+  const parentVisible = parentThreadId === null || permittedThreadIds.has(parentThreadId);
+  return {
+    ...shell,
+    ...(shell.linkedPullRequest != null &&
+    !resourceGrantAllowsProject(grant, shell.linkedPullRequest.projectId)
+      ? { linkedPullRequest: null }
+      : {}),
+    ...(shell.branchPullRequest != null &&
+    !resourceGrantAllowsProject(grant, shell.branchPullRequest.projectId)
+      ? { branchPullRequest: null }
+      : {}),
+    lineage: {
+      parentThreadId: parentVisible ? parentThreadId : null,
+      relationshipToParent: parentVisible ? shell.lineage.relationshipToParent : null,
+      rootThreadId: permittedThreadIds.has(shell.lineage.rootThreadId)
+        ? shell.lineage.rootThreadId
+        : shell.id,
+    },
+    forkedFrom:
+      shell.forkedFrom === null ||
+      (shell.forkedFrom.type === "run"
+        ? permittedThreadIds.has(shell.forkedFrom.threadId)
+        : permittedForkReferences.has(
+            shell.forkedFrom.type === "node"
+              ? `node:${shell.forkedFrom.nodeId}`
+              : `provider_thread:${shell.forkedFrom.providerThreadId}`,
+          ))
+        ? shell.forkedFrom
+        : null,
+    pendingBackgroundTasks: shell.pendingBackgroundTasks?.filter(
+      (task) =>
+        task.kind !== "subagent" ||
+        task.childThreadId === undefined ||
+        permittedThreadIds.has(task.childThreadId),
+    ),
+  };
+}
 
 const MAX_DETAIL_STRING_BYTES = 32_768;
 const MAX_DYNAMIC_VALUE_BYTES = 16_384;

@@ -44,6 +44,97 @@ import {
   FILE_REVISIONS_CACHE_CAPACITY,
   MAX_FILE_REVISION_PATHS,
 } from "./pullRequestViewedFiles.ts";
+import {
+  grantA,
+  grantNone,
+  projectA,
+  projectB,
+} from "../orchestration-v2/projectCollectionTestFixtures.ts";
+
+it.effect(
+  "filters PR collection discovery, request narrowing and cached counts by project grant",
+  () =>
+    Effect.gen(function* () {
+      const a = project({
+        id: projectA,
+        title: "allowed",
+        workspaceRoot: "/a",
+        repository: "acme/a",
+      });
+      const b = project({
+        id: projectB,
+        title: "hidden secret",
+        workspaceRoot: "/b",
+        repository: "acme/b",
+      });
+      const resolved: Array<string> = [];
+      const queried: Array<string> = [];
+      const counted: Array<string> = [];
+      const service = yield* makeService({
+        projects: [
+          { ...a, repositoryIdentity: null },
+          { ...b, repositoryIdentity: null },
+        ],
+        resolveRepositoryIdentity: (root) =>
+          Effect.sync(() => {
+            resolved.push(root);
+            return root === "/a" ? a.repositoryIdentity! : b.repositoryIdentity!;
+          }),
+        providers: [
+          fakeProvider("github", {
+            listChangeRequests: ({ cwd }) =>
+              Effect.sync(() => {
+                queried.push(cwd);
+                return {
+                  items: [changeRequest(1, "2026-07-02T00:00:00Z")],
+                  truncated: false,
+                  continues: true,
+                };
+              }),
+            listChangeRequestStats: ({ changeRequests }) =>
+              Effect.sync(() => {
+                counted.push(...changeRequests.map((ref) => ref.repository));
+                return changeRequests.map((ref) => ({ ...ref, additions: 1, deletions: 2 }));
+              }),
+          }),
+        ],
+      });
+      const restricted = yield* service.list({ state: "open" }, grantA);
+      assert.deepEqual(
+        restricted.entries.map((entry) => entry.projectId),
+        [projectA],
+      );
+      assert.deepEqual(resolved, ["/a"]);
+      assert.deepEqual(queried, ["/a"]);
+      assert.deepEqual(
+        (yield* service.list({ state: "open", projectIds: [projectB] }, grantA)).entries,
+        [],
+      );
+      assert.deepEqual(
+        (yield* service.list({ state: "open", projectId: projectB }, grantA)).entries,
+        [],
+      );
+      assert.deepEqual((yield* service.list({ state: "open" }, grantNone)).entries, []);
+      assert.deepEqual(resolved, ["/a"]);
+      const owner = yield* service.list({ state: "open" });
+      assert.equal(owner.entries.length, 2);
+      assert.deepEqual(
+        (yield* service.list({ state: "open" }, grantA)).entries.map((entry) => entry.projectId),
+        [projectA],
+      );
+      const refs = [
+        { projectId: projectA, repository: "acme/a", number: 1 },
+        { projectId: projectB, repository: "acme/b", number: 1 },
+      ];
+      assert.equal((yield* service.listStats({ refs })).stats.length, 2);
+      assert.deepEqual(
+        (yield* service.listStats({ refs }, grantA)).stats.map((stat) => stat.projectId),
+        [projectA],
+      );
+      assert.deepEqual((yield* service.listStats({ refs }, grantNone)).stats, []);
+      assert.deepEqual(counted.toSorted(), ["acme/a", "acme/b"]);
+    }),
+);
 
 function project(input: {
   readonly id: string;

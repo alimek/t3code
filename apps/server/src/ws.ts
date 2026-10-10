@@ -32,6 +32,8 @@ import {
   EnvironmentAuthInvalidError,
   EnvironmentInternalError,
   type AuthEnvironmentScope,
+  type AuthResourceGrant,
+  resourceGrantAllowsProject,
   type ScheduledTaskListResult,
   AuthSessionId,
   ClientConnectionMethod,
@@ -124,6 +126,10 @@ import * as McpAppRequests from "./mcpApps/McpAppRequests.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
+import {
+  projectCollectionOptions,
+  permittedCollectionThreadIds,
+} from "./auth/projectCollectionAccess.ts";
 import * as IdAllocator from "./orchestration-v2/IdAllocator.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
@@ -135,6 +141,7 @@ import {
   composeShellStreamWithEnrichment,
   dedupeShellEnrichment,
   loadShellSnapshotParts,
+  filterCollectionThreadShellReferences,
   shellStreamItemFromEnrichmentRefresh,
   shellStreamItemFromThreadShell,
   shellStreamItemsFromInitialSnapshot,
@@ -944,10 +951,15 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
 );
 
 export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subscribeShell")(
-  function* (input: {
-    readonly afterSequence?: number;
-    readonly requestCompletionMarker?: boolean;
-  }) {
+  function* (
+    input: {
+      readonly afterSequence?: number;
+      readonly requestCompletionMarker?: boolean;
+    },
+    resourceGrant?: AuthResourceGrant,
+    authorityRevision = 0,
+  ) {
+    const options = projectCollectionOptions(resourceGrant);
     const sql = yield* SqlClient.SqlClient;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
@@ -958,7 +970,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const enrichmentChanges = yield* projectEnrichment.subscribeChanges;
     const loadProjectMetadataSnapshot = Effect.fn("ws.orchestrationV2.loadProjectMetadataSnapshot")(
       function* (snapshotSequence: number) {
-        const enriched = yield* enrichProjectShells(yield* projects.listShells());
+        const enriched = yield* enrichProjectShells(yield* projects.listShells(options));
         return {
           snapshot: {
             schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
@@ -975,8 +987,9 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       const base = buildActiveShellSnapshot(
         yield* loadShellSnapshotParts({
           sql,
-          readThreads: threadManagement.readShellSnapshot({ location: "active" }),
-          listProjects: projects.listShells(),
+          readThreads: threadManagement.readShellSnapshot({ location: "active", ...options }),
+          listProjects: projects.listShells(options),
+          resourceGrant,
           latestSequence: applicationEvents.latestApplicationSequence,
         }),
       );
@@ -1018,17 +1031,38 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projectShellItems = Effect.fn("ws.orchestrationV2.projectShellItems")(function* (
       events: ReadonlyArray<ShellApplicationEvent>,
     ) {
-      return yield* Effect.forEach(
-        coalesceShellApplicationEvents(events),
+      const coalesced = coalesceShellApplicationEvents(events);
+      const allowedThreadIds = yield* permittedCollectionThreadIds(
+        sql,
+        coalesced.flatMap((stored) => ("aggregateKind" in stored ? [] : [stored.event.threadId])),
+        resourceGrant,
+      );
+      const allowedEvents = coalesced.filter((stored) =>
+        "aggregateKind" in stored
+          ? resourceGrantAllowsProject(resourceGrant, stored.aggregateId)
+          : allowedThreadIds.has(stored.event.threadId),
+      );
+      const items = yield* Effect.forEach(
+        allowedEvents,
         (stored) =>
           Effect.gen(function* () {
             if ("aggregateKind" in stored) {
               return yield* projectItem(stored);
             }
-            const shell = yield* threadManagement.getThreadShell(stored.event.threadId);
+            const shell = yield* threadManagement.getThreadShell(stored.event.threadId, options);
             return shellStreamItemFromThreadShell({ stored, shell });
           }),
         { concurrency: 8 },
+      );
+      if (resourceGrant?.projects.mode !== "explicit") return items;
+      const shells = yield* filterCollectionThreadShellReferences(
+        sql,
+        items.flatMap((item) => (item.kind === "thread.updated" ? [item.thread] : [])),
+        resourceGrant,
+      );
+      const byId = new Map(shells.map((shell) => [shell.id, shell]));
+      return items.map((item) =>
+        item.kind === "thread.updated" ? { ...item, thread: byId.get(item.thread.id)! } : item,
       );
     });
 
@@ -1066,7 +1100,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
             ]),
           );
           const snapshotSequence = yield* applicationEvents.latestApplicationSequence;
-          const changedProjects = (yield* projects.listShells()).flatMap((project) =>
+          const changedProjects = (yield* projects.listShells(options)).flatMap((project) =>
             identities.has(project.workspaceRoot)
               ? [{ ...project, repositoryIdentity: identities.get(project.workspaceRoot) ?? null }]
               : [],
@@ -1079,7 +1113,9 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
               threads: [],
               archivedThreads: [],
             } as OrchestrationV2ShellSnapshot,
-            changes: Array.from(changes),
+            changes: Array.from(changes).filter((change) =>
+              changedProjects.some((project) => project.workspaceRoot === change.workspaceRoot),
+            ),
           });
         }),
       ),
@@ -1132,7 +1168,13 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       Stream.concat(completionMarker, liveFrom(afterSequence));
 
     const stream = yield* Effect.gen(function* () {
-      if (input.afterSequence === undefined) {
+      // The wire cursor has no authority revision. An explicit project grant or
+      // edited device must replace cached entitlement with a fresh snapshot.
+      if (
+        input.afterSequence === undefined ||
+        resourceGrant?.projects.mode === "explicit" ||
+        authorityRevision > 0
+      ) {
         const loaded = yield* loadSnapshot();
         return composeShellStreamWithEnrichment({
           initial: initialSnapshotItems(loaded),
@@ -1186,6 +1228,98 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
   },
 );
 
+export const getOrchestrationV2ArchivedShellSnapshot = Effect.fn(
+  "ws.orchestrationV2.archivedShellSnapshot",
+)(
+  function* (resourceGrant: AuthResourceGrant | undefined) {
+    const options = projectCollectionOptions(resourceGrant);
+    const sql = yield* SqlClient.SqlClient;
+    const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+    const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
+    const projectStore = yield* ProjectStore.ProjectStoreV2;
+    const { threads, projects, snapshotSequence } = yield* loadShellSnapshotParts({
+      sql,
+      readThreads: threadManagement.readShellSnapshot({ location: "archive", ...options }),
+      listProjects: projectStore.listShells(options),
+      resourceGrant,
+      latestSequence: applicationEvents.latestApplicationSequence,
+    });
+    return {
+      schemaVersion: threads.schemaVersion,
+      snapshotSequence,
+      projects,
+      threads: threads.archivedThreads,
+    } as const;
+  },
+  Effect.flatMap((snapshot) =>
+    enrichProjectShells(snapshot.projects).pipe(
+      Effect.map(({ projects }) => ({ ...snapshot, projects })),
+    ),
+  ),
+  Effect.mapError(
+    (cause) =>
+      new OrchestrationV2GetShellSnapshotError({
+        message: "Failed to load archived thread snapshot",
+        cause,
+      }),
+  ),
+);
+
+export const subscribeOrchestrationV2ArchivedShell = Effect.fn(
+  "ws.orchestrationV2.subscribeArchivedShell",
+)(function* (resourceGrant?: AuthResourceGrant) {
+  const sql = yield* SqlClient.SqlClient;
+  const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+  const options = projectCollectionOptions(resourceGrant);
+  const snapshot = yield* getOrchestrationV2ArchivedShellSnapshot(resourceGrant);
+  const live = threadManagement
+    .streamStoredEventsFrom({ afterSequence: snapshot.snapshotSequence })
+    .pipe(
+      Stream.groupedWithin(512, Duration.millis(50)),
+      Stream.mapEffect((events) =>
+        Effect.gen(function* () {
+          const coalesced = coalesceStoredThreadEvents(Array.from(events));
+          const allowed = yield* permittedCollectionThreadIds(
+            sql,
+            coalesced.map((stored) => stored.event.threadId),
+            resourceGrant,
+          );
+          const items = yield* Effect.forEach(
+            coalesced.filter((stored) => allowed.has(stored.event.threadId)),
+            (stored) =>
+              threadManagement
+                .getThreadShell(stored.event.threadId, options)
+                .pipe(
+                  Effect.map((shell) => archivedShellStreamItemFromThreadShell({ stored, shell })),
+                ),
+            { concurrency: 8 },
+          );
+          if (resourceGrant?.projects.mode !== "explicit") return items;
+          const shells = yield* filterCollectionThreadShellReferences(
+            sql,
+            items.flatMap((item) => (item?.kind === "thread.updated" ? [item.thread] : [])),
+            resourceGrant,
+          );
+          const byId = new Map(shells.map((shell) => [shell.id, shell]));
+          return items.map((item) =>
+            item?.kind === "thread.updated" ? { ...item, thread: byId.get(item.thread.id)! } : item,
+          );
+        }),
+      ),
+      Stream.flatMap(Stream.fromIterable),
+      Stream.filterMap((item) => (item === null ? Result.failVoid : Result.succeed(item))),
+      (stream) => bufferLiveStream(stream),
+      Stream.mapError(
+        (cause) =>
+          new OrchestrationV2GetShellSnapshotError({
+            message: "Failed while streaming archived threads",
+            cause,
+          }),
+      ),
+    );
+  return Stream.concat(rpcInitialItems([{ kind: "snapshot" as const, snapshot }]), live);
+});
+
 const layerWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientOrigin: OrchestrationClientOrigin,
@@ -1204,7 +1338,6 @@ const layerWsRpc = (
         | FileSystem.FileSystem
         | ServerConfig.ServerConfig
       >();
-      const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
       const projectStore = yield* ProjectStore.ProjectStoreV2;
       const projectService = yield* ProjectService.ProjectService;
       const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
@@ -1323,6 +1456,7 @@ const layerWsRpc = (
       const withPullRequestViewer = pullRequests.withRoutingCredential;
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
       const sessions = yield* SessionStore.SessionStore;
+      const collectionAuthority = sessions.getAuthority(currentSession.sessionId, currentSession);
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const hostResources = yield* HostResources.HostResources;
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
@@ -1746,70 +1880,6 @@ const layerWsRpc = (
           .refreshStatus(cwd)
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
-      const getOrchestrationV2ArchivedShellSnapshot = Effect.gen(function* () {
-        const { threads, projects, snapshotSequence } = yield* loadShellSnapshotParts({
-          sql,
-          readThreads: threadManagement.readShellSnapshot({ location: "archive" }),
-          listProjects: projectStore.listShells(),
-          latestSequence: applicationEvents.latestApplicationSequence,
-        });
-        return {
-          schemaVersion: threads.schemaVersion,
-          snapshotSequence,
-          projects,
-          threads: threads.archivedThreads,
-        } as const;
-      }).pipe(
-        Effect.flatMap((snapshot) =>
-          enrichProjectShells(snapshot.projects).pipe(
-            Effect.map(({ projects }) => ({ ...snapshot, projects })),
-          ),
-        ),
-        Effect.mapError(
-          (cause) =>
-            new OrchestrationV2GetShellSnapshotError({
-              message: "Failed to load archived thread snapshot",
-              cause,
-            }),
-        ),
-      );
-
-      const subscribeOrchestrationV2ArchivedShell = Effect.fn(
-        "ws.orchestrationV2.subscribeArchivedShell",
-      )(function* () {
-        const snapshot = yield* getOrchestrationV2ArchivedShellSnapshot;
-        const live = threadManagement
-          .streamStoredEventsFrom({ afterSequence: snapshot.snapshotSequence })
-          .pipe(
-            Stream.groupedWithin(512, Duration.millis(50)),
-            Stream.mapEffect((events) =>
-              Effect.forEach(
-                coalesceStoredThreadEvents(Array.from(events)),
-                (stored) =>
-                  threadManagement
-                    .getThreadShell(stored.event.threadId)
-                    .pipe(
-                      Effect.map((shell) =>
-                        archivedShellStreamItemFromThreadShell({ stored, shell }),
-                      ),
-                    ),
-                { concurrency: 8 },
-              ),
-            ),
-            Stream.flatMap(Stream.fromIterable),
-            Stream.filterMap((item) => (item === null ? Result.failVoid : Result.succeed(item))),
-            (stream) => bufferLiveStream(stream),
-            Stream.mapError(
-              (cause) =>
-                new OrchestrationV2GetShellSnapshotError({
-                  message: "Failed while streaming archived threads",
-                  cause,
-                }),
-            ),
-          );
-        return Stream.concat(rpcInitialItems([{ kind: "snapshot" as const, snapshot }]), live);
-      });
-
       const mutateProject = Effect.fn("ws.projects.mutate")(function* (mutation: ProjectMutation) {
         const result = yield* projectMutationOperation(projectService, mutation);
         if (mutation.type === "project.delete")
@@ -1909,7 +1979,10 @@ const layerWsRpc = (
             .searchThreadStream(input)
             .pipe(Stream.mapError((cause) => new OrchestrationV2SearchThreadError({ cause }))),
         [ORCHESTRATION_V2_WS_METHODS.searchThreads]: (input) =>
-          threadSearch.search(input).pipe(
+          collectionAuthority.pipe(
+            Effect.flatMap((authority) =>
+              threadSearch.search(input, projectCollectionOptions(authority.resourceGrant)),
+            ),
             Effect.mapError(
               (cause) =>
                 new OrchestrationSearchThreadsError({
@@ -1919,7 +1992,18 @@ const layerWsRpc = (
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot]: (_input) =>
-          getOrchestrationV2ArchivedShellSnapshot,
+          collectionAuthority.pipe(
+            Effect.flatMap((authority) =>
+              getOrchestrationV2ArchivedShellSnapshot(authority.resourceGrant),
+            ),
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationV2GetShellSnapshotError({
+                  message: "Failed to load archived thread snapshot",
+                  cause,
+                }),
+            ),
+          ),
         [ORCHESTRATION_V2_WS_METHODS.getThreadProjection]: (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(
@@ -2034,9 +2118,39 @@ const layerWsRpc = (
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeArchivedShell]: (_input) =>
-          Stream.unwrap(subscribeOrchestrationV2ArchivedShell()),
+          Stream.unwrap(
+            collectionAuthority.pipe(
+              Effect.flatMap((authority) =>
+                subscribeOrchestrationV2ArchivedShell(authority.resourceGrant),
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationV2GetShellSnapshotError({
+                    message: "Failed to prepare archived thread stream",
+                    cause,
+                  }),
+              ),
+            ),
+          ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: (input) =>
-          Stream.unwrap(subscribeOrchestrationV2Shell(input)),
+          Stream.unwrap(
+            collectionAuthority.pipe(
+              Effect.flatMap((authority) =>
+                subscribeOrchestrationV2Shell(
+                  input,
+                  authority.resourceGrant,
+                  authority.authorityRevision,
+                ),
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationV2GetShellSnapshotError({
+                    message: "Failed to prepare the application shell stream",
+                    cause,
+                  }),
+              ),
+            ),
+          ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input) =>
           Stream.unwrap(
             Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
@@ -2463,8 +2577,16 @@ const layerWsRpc = (
                 Effect.forkScoped,
               ),
           ),
-        [WS_METHODS.pullRequestsList]: (input) => pullRequests.list(input),
-        [WS_METHODS.pullRequestsListStats]: (input) => pullRequests.listStats(input),
+        [WS_METHODS.pullRequestsList]: (input) =>
+          collectionAuthority.pipe(
+            Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationReadScope)),
+            Effect.flatMap((authority) => pullRequests.list(input, authority.resourceGrant)),
+          ),
+        [WS_METHODS.pullRequestsListStats]: (input) =>
+          collectionAuthority.pipe(
+            Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationReadScope)),
+            Effect.flatMap((authority) => pullRequests.listStats(input, authority.resourceGrant)),
+          ),
         [WS_METHODS.pullRequestsRoutingIdentity]: (input) => pullRequests.routingIdentity(input),
         [WS_METHODS.pullRequestsRouting]: (input) => pullRequests.routing(input),
         [WS_METHODS.pullRequestsSummary]: (input) =>
@@ -2472,12 +2594,20 @@ const layerWsRpc = (
         [WS_METHODS.pullRequestsStack]: (input) =>
           withPullRequestViewer(input, pullRequests.stack(input)),
         [WS_METHODS.pullRequestsLinkedThreads]: (input) =>
-          resolvePullRequestSyncKey(input).pipe(
-            Effect.flatMap((key) =>
-              key === null
+          collectionAuthority.pipe(
+            Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationReadScope)),
+            Effect.flatMap((authority) =>
+              !resourceGrantAllowsProject(authority.resourceGrant, input.projectId)
                 ? Effect.succeed({ threads: [] })
-                : listLinkedPullRequestThreads(key).pipe(
-                    Effect.provideService(SqlClient.SqlClient, sql),
+                : resolvePullRequestSyncKey(input).pipe(
+                    Effect.flatMap((key) =>
+                      key === null
+                        ? Effect.succeed({ threads: [] })
+                        : listLinkedPullRequestThreads(
+                            key,
+                            projectCollectionOptions(authority.resourceGrant),
+                          ).pipe(Effect.provideService(SqlClient.SqlClient, sql)),
+                    ),
                   ),
             ),
           ),
@@ -2599,7 +2729,18 @@ const layerWsRpc = (
           projectCloneTracker.cancel(input.projectId).pipe(Effect.map((applied) => ({ applied }))),
         [WS_METHODS.projectCloneRetry]: (input) =>
           projectCloneTracker.retry(input.projectId).pipe(Effect.map((applied) => ({ applied }))),
-        [WS_METHODS.subscribeProjectClones]: () => projectCloneTracker.stream,
+        [WS_METHODS.subscribeProjectClones]: () =>
+          Stream.unwrap(
+            collectionAuthority.pipe(
+              Effect.map((authority) =>
+                ProjectCloneTracker.filterProjectCloneCollection(
+                  projectCloneTracker.stream,
+                  authority.resourceGrant,
+                ),
+              ),
+              Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationReadScope)),
+            ),
+          ),
         [WS_METHODS.sourceControlPublishRepository]: (input) =>
           sourceControlRepositories.publishRepository(input).pipe(
             // A new remote can change the cached identity. Only the `cwd` entry

@@ -1,5 +1,6 @@
 import type {
   ApplicationStoredEvent,
+  AuthResourceGrant,
   OrchestrationProjectShell,
   OrchestrationV2ArchivedShellStreamItem,
   OrchestrationV2ShellSnapshot,
@@ -17,6 +18,51 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
+import { permittedCollectionThreadIds } from "../auth/projectCollectionAccess.ts";
+import { projectCollectionThreadShellForWire } from "./WireProjection.ts";
+
+export const filterCollectionThreadShellReferences = Effect.fnUntraced(function* (
+  sql: SqlClient.SqlClient,
+  shells: ReadonlyArray<OrchestrationV2ThreadShell>,
+  grant?: AuthResourceGrant,
+) {
+  if (grant?.projects.mode !== "explicit") return shells;
+  const references = shells.flatMap((shell) => [
+    shell.lineage.rootThreadId,
+    ...(shell.lineage.parentThreadId === null ? [] : [shell.lineage.parentThreadId]),
+    ...(shell.forkedFrom?.type === "run" ? [shell.forkedFrom.threadId] : []),
+    ...(shell.pendingBackgroundTasks ?? []).flatMap((task) =>
+      task.kind === "subagent" && task.childThreadId !== undefined ? [task.childThreadId] : [],
+    ),
+  ]);
+  const permitted = yield* permittedCollectionThreadIds(sql, references, grant);
+  const permittedForkReferences = new Set<string>();
+  const forks = shells.flatMap((shell) =>
+    shell.forkedFrom !== null && shell.forkedFrom.type !== "run" ? [shell.forkedFrom] : [],
+  );
+  for (let offset = 0; offset < forks.length; offset += 500) {
+    const batch = forks.slice(offset, offset + 500);
+    const nodes = batch.flatMap((fork) => (fork.type === "node" ? [fork.nodeId] : []));
+    const providers = batch.flatMap((fork) =>
+      fork.type === "provider_thread" ? [fork.providerThreadId] : [],
+    );
+    const rows = yield* sql<{ readonly reference_id: string }>`
+      SELECT 'node:' || n.node_id AS reference_id
+      FROM orchestration_v2_projection_nodes n
+      JOIN orchestration_v2_projection_threads t ON t.thread_id = n.thread_id
+      WHERE ${sql.in("n.node_id", nodes)} AND ${sql.in("t.project_id", grant.projects.ids)}
+      UNION ALL
+      SELECT 'provider_thread:' || p.provider_thread_id AS reference_id
+      FROM orchestration_v2_projection_provider_threads p
+      JOIN orchestration_v2_projection_threads t ON t.thread_id = p.thread_id
+      WHERE ${sql.in("p.provider_thread_id", providers)} AND ${sql.in("t.project_id", grant.projects.ids)}
+    `;
+    for (const row of rows) permittedForkReferences.add(row.reference_id);
+  }
+  return shells.map((shell) =>
+    projectCollectionThreadShellForWire(shell, permitted, permittedForkReferences, grant),
+  );
+});
 
 /** Build the regular navigation shell without duplicating the archive dataset. */
 export function buildActiveShellSnapshot(input: {
@@ -44,6 +90,7 @@ export const loadShellSnapshotParts = <E1, E2, E3, E4>(input: {
   readonly readThreads: Effect.Effect<Effect.Effect<OrchestrationV2ThreadShellSnapshot, E2>, E1>;
   readonly listProjects: Effect.Effect<ReadonlyArray<OrchestrationProjectShell>, E3>;
   readonly latestSequence: Effect.Effect<number, E4>;
+  readonly resourceGrant?: AuthResourceGrant | undefined;
 }) =>
   Effect.gen(function* () {
     const read = yield* input.sql.withTransaction(
@@ -53,11 +100,20 @@ export const loadShellSnapshotParts = <E1, E2, E3, E4>(input: {
         snapshotSequence: input.latestSequence,
       }),
     );
-    return {
-      projects: read.projects,
-      threads: yield* read.decodeThreads,
-      snapshotSequence: read.snapshotSequence,
-    };
+    let threads = yield* read.decodeThreads;
+    if (input.resourceGrant?.projects.mode === "explicit") {
+      const shells = yield* filterCollectionThreadShellReferences(
+        input.sql,
+        [...threads.threads, ...threads.archivedThreads],
+        input.resourceGrant,
+      );
+      threads = {
+        ...threads,
+        threads: shells.filter((thread) => thread.archivedAt === null),
+        archivedThreads: shells.filter((thread) => thread.archivedAt !== null),
+      };
+    }
+    return { projects: read.projects, threads, snapshotSequence: read.snapshotSequence };
   });
 
 export type ShellApplicationEvent =

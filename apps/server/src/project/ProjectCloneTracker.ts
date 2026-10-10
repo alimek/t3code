@@ -28,6 +28,19 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
+import { resourceGrantAllowsProject, type AuthResourceGrant } from "@t3tools/contracts";
+
+/** Clone progress is a project collection, including its paths and remote metadata. */
+export function filterProjectCloneCollection<E, R>(
+  stream: Stream.Stream<ReadonlyArray<ProjectCloneSnapshot>, E, R>,
+  grant?: AuthResourceGrant,
+) {
+  return stream.pipe(
+    Stream.map((clones) =>
+      clones.filter((clone) => resourceGrantAllowsProject(grant, clone.projectId)),
+    ),
+  );
+}
 
 /**
  * Runs repository clones that back newly added projects and tracks their

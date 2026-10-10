@@ -318,9 +318,11 @@ export interface ThreadManagementServiceShape {
     readonly threadId: ThreadId;
   }) => Effect.Effect<OrchestrationV2ThreadProjection, ThreadManagementError>;
   readonly getShellSnapshot: (options?: {
+    readonly projectIds?: ReadonlyArray<ProjectId>;
     readonly location?: "active" | "archive";
   }) => Effect.Effect<OrchestrationV2ThreadShellSnapshot, Orchestrator.OrchestratorV2Error>;
   readonly readShellSnapshot: (options?: {
+    readonly projectIds?: ReadonlyArray<ProjectId>;
     readonly location?: "active" | "archive";
   }) => Effect.Effect<
     Effect.Effect<OrchestrationV2ThreadShellSnapshot, Orchestrator.OrchestratorV2Error>,

@@ -349,6 +349,7 @@ export interface OrchestratorV2Shape {
   >;
   readonly getThreadShell: (
     threadId: ThreadId,
+    options?: Pick<ShellSnapshotOptions, "projectIds">,
   ) => Effect.Effect<OrchestrationV2ThreadShell | null, OrchestratorV2Error>;
   readonly getThreadEventSequence: (
     threadId: ThreadId,
@@ -10899,9 +10900,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           Effect.mapError(shellProjectionError),
           Effect.map(Effect.mapError(shellProjectionError)),
         ),
-    getThreadShell: (threadId) =>
+    getThreadShell: (threadId, options) =>
       projectionStore
-        .getThreadShell(threadId)
+        .getThreadShell(threadId, options)
         .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause }))),
     getThreadEventSequence: (threadId) =>
       eventSink

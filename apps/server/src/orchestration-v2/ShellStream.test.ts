@@ -6,7 +6,14 @@ import type {
   OrchestrationV2StoredEvent,
   OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
-import { ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  RunId,
+  NodeId,
+  ProviderThreadId,
+} from "@t3tools/contracts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -29,7 +36,145 @@ import {
   shellStreamItemsFromInitialSnapshot,
   shellStreamItemsFromResumeSnapshot,
   skipUnchangedThreadShells,
+  filterCollectionThreadShellReferences,
 } from "./ShellStream.ts";
+import {
+  collectionStoreLayer,
+  makeCollectionFixture,
+  grantA,
+  activeA,
+  activeB,
+  archiveA,
+  now,
+  projectA,
+  projectB,
+} from "./projectCollectionTestFixtures.ts";
+import {
+  projectCollectionOptions,
+  permittedCollectionThreadIds,
+} from "../auth/projectCollectionAccess.ts";
+
+it.effect(
+  "filters hidden payloads before decoding active/archive shells and preserves global sequence",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeCollectionFixture;
+      const sql = yield* SqlClient.SqlClient;
+      yield* fixture.updateThread("thread.metadata-updated", activeA, {
+        forkedFrom: { type: "run", threadId: activeB, runId: RunId.make("hidden-run") },
+      });
+      // Hidden data must never reach the decoder or fork-source materialization.
+      yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = 'invalid hidden JSON' WHERE project_id <> ${projectA}`;
+      const head = yield* fixture.events.latestApplicationSequence;
+      for (const location of ["active", "archive"] as const) {
+        const parts = yield* loadShellSnapshotParts({
+          sql,
+          readThreads: fixture.projections.readShellSnapshot({
+            location,
+            ...projectCollectionOptions(grantA),
+          }),
+          listProjects: fixture.projects.listShells(projectCollectionOptions(grantA)),
+          latestSequence: fixture.events.latestApplicationSequence,
+          resourceGrant: grantA,
+        });
+        expect(parts.snapshotSequence).toBe(head);
+        expect(
+          [...parts.threads.threads, ...parts.threads.archivedThreads].map((thread) => thread.id),
+        ).toEqual([location === "active" ? activeA : archiveA]);
+      }
+    }).pipe(Effect.provide(collectionStoreLayer), Effect.scoped),
+);
+
+it.effect(
+  "withholds hidden lineage, fork and background references while preserving permitted archived references",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeCollectionFixture;
+      const sql = yield* SqlClient.SqlClient;
+      const hiddenParent = yield* fixture.updateThread("thread.metadata-updated", activeA, {
+        lineage: { parentThreadId: activeB, relationshipToParent: "fork", rootThreadId: activeB },
+        forkedFrom: { type: "run", threadId: activeB, runId: RunId.make("hidden-run") },
+      });
+      const shell = yield* fixture.projections.getThreadShell(
+        activeA,
+        projectCollectionOptions(grantA),
+      );
+      if (shell === null) return yield* Effect.die("Missing shell");
+      const [filtered] = yield* filterCollectionThreadShellReferences(
+        sql,
+        [
+          {
+            ...shell,
+            linkedPullRequest: {
+              projectId: projectB,
+              repository: "secret/b",
+              number: 1,
+              url: "https://secret/b",
+            },
+            branchPullRequest: {
+              projectId: projectB,
+              repository: "secret/b",
+              number: 2,
+              url: "https://secret/b",
+            },
+            pendingBackgroundTasks: [
+              {
+                kind: "subagent",
+                taskId: "hidden-task",
+                description: "b-secret title",
+                childThreadId: activeB,
+              },
+              { kind: "subagent", taskId: "allowed-task", childThreadId: archiveA },
+            ],
+          },
+        ],
+        grantA,
+      );
+      expect(filtered?.lineage).toEqual({
+        parentThreadId: null,
+        relationshipToParent: null,
+        rootThreadId: activeA,
+      });
+      expect(filtered?.forkedFrom).toBeNull();
+      expect(filtered?.linkedPullRequest).toBeNull();
+      expect(filtered?.branchPullRequest).toBeNull();
+      expect(filtered?.pendingBackgroundTasks).toEqual([
+        { kind: "subagent", taskId: "allowed-task", childThreadId: archiveA },
+      ]);
+      expect(JSON.stringify(filtered)).not.toContain("b-secret");
+      // Typed fork references resolve ownership without decoding node/provider payloads.
+      for (const [id, threadId] of [
+        ["allowed", activeA],
+        ["hidden", activeB],
+      ] as const) {
+        yield* sql`INSERT INTO orchestration_v2_projection_nodes
+          (node_id, thread_id, root_node_id, kind, status, payload_json)
+          VALUES (${id}, ${threadId}, ${id}, 'task', 'completed', 'invalid JSON')`;
+        yield* sql`INSERT INTO orchestration_v2_projection_provider_threads
+          (provider_thread_id, thread_id, provider, status, updated_at, payload_json)
+          VALUES (${id}, ${threadId}, 'fixture', 'idle', '2026-10-11T00:00:00Z', 'invalid JSON')`;
+      }
+      for (const id of ["allowed", "hidden"]) {
+        for (const forkedFrom of [
+          { type: "node" as const, nodeId: NodeId.make(id) },
+          { type: "provider_thread" as const, providerThreadId: ProviderThreadId.make(id) },
+        ]) {
+          const [fork] = yield* filterCollectionThreadShellReferences(
+            sql,
+            [{ ...shell, forkedFrom }],
+            grantA,
+          );
+          expect(fork?.forkedFrom).toEqual(id === "allowed" ? forkedFrom : null);
+        }
+      }
+      // Tombstone authority remains available even after a removal no longer has a shell.
+      yield* fixture.updateThread("thread.deleted", activeA, { deletedAt: now });
+      expect([...(yield* permittedCollectionThreadIds(sql, [activeA, activeB], grantA))]).toEqual([
+        activeA,
+      ]);
+      expect(hiddenParent.sequence).toBeGreaterThan(0);
+    }).pipe(Effect.provide(collectionStoreLayer), Effect.scoped),
+);
 
 function project(sequence: number, id: string): ApplicationStoredEvent {
   return {

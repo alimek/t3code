@@ -59,6 +59,7 @@ import {
   MessageId,
   RuntimeRequestId,
   CheckpointScopeId,
+  type ProjectId,
   ThreadId,
   TurnItemId,
   NodeId,
@@ -322,6 +323,7 @@ export interface ProjectionTimelinePage {
 }
 
 export interface ShellSnapshotOptions {
+  readonly projectIds?: ReadonlyArray<ProjectId>;
   readonly location?: "active" | "archive";
   /**
    * For background sweeps, not clients: skips settled threads before any of
@@ -385,6 +387,7 @@ export interface ProjectionStoreV2Shape {
   >;
   readonly getThreadShell: (
     threadId: ThreadId,
+    options?: Pick<ShellSnapshotOptions, "projectIds">,
   ) => Effect.Effect<OrchestrationV2ThreadShell | null, ProjectionStoreV2Error>;
   readonly getThread: (
     threadId: ThreadId,
@@ -5090,6 +5093,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       threadId?: ThreadId,
       location?: "active" | "archive",
       unsettledOnly = false,
+      projectIds?: ReadonlyArray<ProjectId>,
     ) =>
       sql<ShellThreadRow>`
             SELECT
@@ -5264,7 +5268,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 candidate.ordinal DESC, candidate.run_id DESC
               LIMIT 1
             ) AND blocked.status = 'failed'
-            WHERE t.deleted_at IS NULL${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${
+            WHERE t.deleted_at IS NULL${projectIds === undefined ? sql`` : sql` AND ${sql.in("t.project_id", projectIds)}`}${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${
               location === "active"
                 ? sql` AND json_extract(t.payload_json, '$.archivedAt') IS NULL`
                 : location === "archive"
@@ -5692,6 +5696,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           undefined,
           options?.location,
           options?.unsettledOnly ?? false,
+          options?.projectIds,
         );
         const targetThreadIds = new Set(
           targetThreadRows.map((row) => ThreadId.make(row.thread_id)),
@@ -5707,7 +5712,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         while (pendingSourceIds.length > 0) {
           const sourceId = pendingSourceIds.pop();
           if (sourceId === undefined || rowsByThreadId.has(sourceId)) continue;
-          const source = (yield* selectShellThreadRows(sourceId))[0];
+          const source = (yield* selectShellThreadRows(
+            sourceId,
+            undefined,
+            false,
+            options?.projectIds,
+          ))[0];
           if (source === undefined) continue;
           rowsByThreadId.set(sourceId, source);
           if (source.forked_from_run_source_thread_id !== null) {
@@ -5716,7 +5726,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         }
         const threadRows = [...rowsByThreadId.values()];
         const threadIds = [...rowsByThreadId.keys()];
-        const forkSourceIds = shellForkSourceIds(threadRows);
+        const forkSourceIds = shellForkSourceIds(threadRows).filter(
+          (id) => options?.projectIds === undefined || rowsByThreadId.has(id),
+        );
         const readForThreadIds = <A>(
           read: (ids: ReadonlyArray<ThreadId>) => Effect.Effect<ReadonlyArray<A>, unknown>,
           ids: ReadonlyArray<ThreadId> = threadIds,
@@ -5806,7 +5818,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     // Per-thread shell for the live shell streams: reads only the target thread
     // plus its fork-source chain instead of materializing every thread. Returns
     // null when the thread is deleted or unknown.
-    const getThreadShell: ProjectionStoreV2Shape["getThreadShell"] = (threadId) =>
+    const getThreadShell: ProjectionStoreV2Shape["getThreadShell"] = (threadId, options) =>
       sql
         .withTransaction(
           Effect.gen(function* () {
@@ -5817,7 +5829,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               if (nextId === undefined || rowsByThreadId.has(nextId)) {
                 continue;
               }
-              const rows = yield* selectShellThreadRows(nextId);
+              const rows = yield* selectShellThreadRows(
+                nextId,
+                undefined,
+                false,
+                options?.projectIds,
+              );
               const row = rows[0];
               if (row === undefined) {
                 continue;
@@ -5832,7 +5849,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             }
 
             const threadIds = [...rowsByThreadId.keys()];
-            const forkSourceIds = shellForkSourceIds([...rowsByThreadId.values()]);
+            const forkSourceIds = shellForkSourceIds([...rowsByThreadId.values()]).filter(
+              (id) => options?.projectIds === undefined || rowsByThreadId.has(id),
+            );
             const [runRows, itemCountRows, providerThreadRows, pendingTurnItemRows] =
               yield* Effect.all([
                 forkSourceIds.length === 0
@@ -5921,6 +5940,43 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
     const replayState = yield* Ref.make(makeProjectionReplayState());
     const sequence = yield* Ref.make(0);
 
+    const readMemoryProjection = (threadId: ThreadId, projectIds?: ReadonlyArray<ProjectId>) =>
+      Effect.gen(function* () {
+        const existing = (yield* Ref.get(replayState)).projections;
+        const readProjection = (
+          targetThreadId: ThreadId,
+          seenThreadIds: ReadonlySet<ThreadId>,
+        ): OrchestrationV2ThreadProjection | null => {
+          const projection = existing.get(targetThreadId);
+          if (
+            !projection ||
+            (projectIds !== undefined && !projectIds.includes(projection.thread.projectId))
+          ) {
+            return null;
+          }
+          const forkedFrom = projection.thread.forkedFrom;
+          if (forkedFrom?.type !== "run" || seenThreadIds.has(forkedFrom.threadId)) {
+            return withLocalVisibleTurnItems(projection);
+          }
+          const sourceProjection = readProjection(
+            forkedFrom.threadId,
+            new Set([...seenThreadIds, targetThreadId]),
+          );
+          return {
+            ...projection,
+            visibleTurnItems: buildVisibleTurnItems({
+              projection,
+              sourceProjection,
+            }),
+          };
+        };
+        const projection = readProjection(threadId, new Set());
+        if (!projection) {
+          return yield* new ProjectionStoreThreadNotFoundError({ threadId });
+        }
+        return projection;
+      });
+
     const service: ProjectionStoreV2Shape = {
       apply: (event) =>
         Effect.gen(function* () {
@@ -5949,6 +6005,11 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           const selectedThreadIds = [...existing.entries()]
             .filter(([, projection]) => {
               if (
+                options?.projectIds !== undefined &&
+                !options.projectIds.includes(projection.thread.projectId)
+              )
+                return false;
+              if (
                 options?.unsettledOnly &&
                 (projection.thread.settledAt !== null ||
                   projection.thread.settledOverride === "settled")
@@ -5963,7 +6024,9 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
           const shells = yield* Effect.forEach(
             selectedThreadIds.toSorted((left, right) => String(left).localeCompare(String(right))),
             (threadId) =>
-              service.getThreadProjection(threadId).pipe(Effect.map(threadShellFromProjection)),
+              readMemoryProjection(threadId, options?.projectIds).pipe(
+                Effect.map(threadShellFromProjection),
+              ),
           );
           const visible = shells.filter((thread) => thread.deletedAt === null);
           return {
@@ -5975,15 +6038,20 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         }),
       readShellSnapshot: (options) =>
         service.getShellSnapshot(options).pipe(Effect.map(Effect.succeed)),
-      getThreadShell: (threadId) =>
+      getThreadShell: (threadId, options) =>
         Effect.gen(function* () {
           const existing = (yield* Ref.get(replayState)).projections;
-          if (!existing.has(threadId)) {
+          const projection = existing.get(threadId);
+          if (
+            projection === undefined ||
+            projection.thread.deletedAt !== null ||
+            (options?.projectIds !== undefined &&
+              !options.projectIds.includes(projection.thread.projectId))
+          )
             return null;
-          }
-          const shell = yield* service
-            .getThreadProjection(threadId)
-            .pipe(Effect.map(threadShellFromProjection));
+          const shell = yield* readMemoryProjection(threadId, options?.projectIds).pipe(
+            Effect.map(threadShellFromProjection),
+          );
           return shell.deletedAt === null ? shell : null;
         }),
       getThread: (threadId) =>
@@ -6389,39 +6457,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
             )
           );
         }),
-      getThreadProjection: (threadId) =>
-        Effect.gen(function* () {
-          const existing = (yield* Ref.get(replayState)).projections;
-          const readProjection = (
-            targetThreadId: ThreadId,
-            seenThreadIds: ReadonlySet<ThreadId>,
-          ): OrchestrationV2ThreadProjection | null => {
-            const projection = existing.get(targetThreadId);
-            if (!projection) {
-              return null;
-            }
-            const forkedFrom = projection.thread.forkedFrom;
-            if (forkedFrom?.type !== "run" || seenThreadIds.has(forkedFrom.threadId)) {
-              return withLocalVisibleTurnItems(projection);
-            }
-            const sourceProjection = readProjection(
-              forkedFrom.threadId,
-              new Set([...seenThreadIds, targetThreadId]),
-            );
-            return {
-              ...projection,
-              visibleTurnItems: buildVisibleTurnItems({
-                projection,
-                sourceProjection,
-              }),
-            };
-          };
-          const projection = readProjection(threadId, new Set());
-          if (!projection) {
-            return yield* new ProjectionStoreThreadNotFoundError({ threadId });
-          }
-          return projection;
-        }),
+      getThreadProjection: readMemoryProjection,
       getTurnStartContext: (threadId, runId) =>
         service.getThreadProjection(threadId).pipe(
           Effect.map((projection) => ({

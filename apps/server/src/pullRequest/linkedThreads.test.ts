@@ -5,6 +5,49 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { listLinkedPullRequestThreads } from "./linkedThreads.ts";
+import {
+  collectionStoreLayer,
+  makeCollectionFixture,
+  projectA,
+  projectB,
+  activeA,
+  activeB,
+  archiveA,
+  archiveB,
+} from "../orchestration-v2/projectCollectionTestFixtures.ts";
+
+it.effect("filters active, archived and legacy linked thread references in SQL", () =>
+  Effect.gen(function* () {
+    const fixture = yield* makeCollectionFixture;
+    for (const [id, projectId] of [
+      [activeA, projectA],
+      [activeB, projectB],
+      [archiveA, projectA],
+      [archiveB, projectB],
+    ] as const) {
+      yield* fixture.updateThread("thread.metadata-updated", id, {
+        linkedPullRequest: {
+          projectId,
+          repository: "acme/shared",
+          number: 7,
+          url: "https://github.com/acme/shared/pull/7",
+        },
+      });
+    }
+    const sql = yield* SqlClient.SqlClient;
+    // Exercise the modern array and the legacy single-link branch together.
+    yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = json_set(payload_json, '$.pullRequests', json('[{"host":"github.com","repository":"acme/shared","number":7,"url":"https://github.com/acme/shared/pull/7","source":"manual"}]')) WHERE thread_id IN (${activeA}, ${activeB})`;
+    const key = { host: "github.com", repository: "acme/shared", number: 7 };
+    const restricted = yield* listLinkedPullRequestThreads(key, { projectIds: [projectA] });
+    assert.deepEqual(
+      restricted.threads.map((thread) => thread.id).toSorted(),
+      [activeA, archiveA].toSorted(),
+    );
+    assert.notInclude(JSON.stringify(restricted), "b-secret");
+    assert.deepEqual((yield* listLinkedPullRequestThreads(key, { projectIds: [] })).threads, []);
+    assert.equal((yield* listLinkedPullRequestThreads(key)).threads.length, 4);
+  }).pipe(Effect.provide(collectionStoreLayer), Effect.scoped),
+);
 
 const encodePayload = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 

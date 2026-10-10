@@ -2,6 +2,7 @@ import {
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
   type OrchestrationProjectShell,
+  type AuthResourceGrant,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Predicate from "effect/Predicate";
@@ -15,6 +16,7 @@ import {
   failEnvironmentNotFound,
   requireEnvironmentScope,
 } from "../auth/http.ts";
+import { projectCollectionOptions } from "../auth/projectCollectionAccess.ts";
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
@@ -75,12 +77,16 @@ export const layer = HttpApiBuilder.group(
         ),
     );
 
-    const loadShellSnapshot = Effect.fn("http.orchestration.loadShellSnapshot")(function* () {
+    const loadShellSnapshot = Effect.fn("http.orchestration.loadShellSnapshot")(function* (
+      resourceGrant?: AuthResourceGrant,
+    ) {
+      const options = projectCollectionOptions(resourceGrant);
       const base = buildActiveShellSnapshot(
         yield* loadShellSnapshotParts({
           sql,
-          readThreads: threadManagement.readShellSnapshot({ location: "active" }),
-          listProjects: projectStore.listShells(),
+          readThreads: threadManagement.readShellSnapshot({ location: "active", ...options }),
+          listProjects: projectStore.listShells(options),
+          resourceGrant,
           latestSequence: applicationEvents.latestApplicationSequence,
         }),
       );
@@ -153,8 +159,8 @@ export const layer = HttpApiBuilder.group(
         "shellSnapshot",
         Effect.fn("environment.orchestration.shellSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          return yield* loadShellSnapshot().pipe(
+          const principal = yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          return yield* loadShellSnapshot(principal.resourceGrant).pipe(
             traceLocalHandlerWork,
             Effect.catch((cause) =>
               failEnvironmentInternal("orchestration_snapshot_failed", cause),

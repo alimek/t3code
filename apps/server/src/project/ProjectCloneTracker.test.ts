@@ -14,6 +14,56 @@ import * as TestClock from "effect/testing/TestClock";
 import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
 import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
 import { parseGitCloneProgressLine } from "./gitCloneProgress.ts";
+import {
+  grantA,
+  grantNone,
+  projectA,
+  projectB,
+} from "../orchestration-v2/projectCollectionTestFixtures.ts";
+
+it.effect("filters clone snapshot and live collection paths and remote metadata", () =>
+  Effect.gen(function* () {
+    const harness = makeHarness({ clone: () => Effect.never });
+    yield* Effect.gen(function* () {
+      const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+      for (const id of [projectA, projectB])
+        yield* tracker.start(
+          {
+            ...startInput,
+            projectId: id,
+            destinationPath: `/work/${id}`,
+            remoteUrl: `https://github.com/fixture/${id}`,
+          },
+          harness.hooks,
+        );
+      const ready = yield* Deferred.make<void>();
+      const fiber = yield* ProjectCloneTracker.filterProjectCloneCollection(
+        tracker.stream,
+        grantA,
+      ).pipe(
+        Stream.tap(() => Deferred.succeed(ready, undefined)),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* Deferred.await(ready);
+      yield* tracker.cancel(projectB);
+      const snapshots = yield* Fiber.join(fiber);
+      expect(snapshots.map((clones) => clones.map((clone) => clone.projectId))).toEqual([
+        [projectA],
+        [projectA],
+      ]);
+      expect(JSON.stringify(snapshots)).not.toContain("b-secret");
+      const empty = yield* ProjectCloneTracker.filterProjectCloneCollection(
+        tracker.stream,
+        grantNone,
+      ).pipe(Stream.take(1), Stream.runCollect);
+      expect(empty).toEqual([[]]);
+      const owner = yield* tracker.stream.pipe(Stream.take(1), Stream.runCollect);
+      expect(owner[0]?.length).toBe(2);
+    }).pipe(Effect.provide(harness.layer));
+  }).pipe(Effect.scoped),
+);
 
 const projectId = ProjectId.make("project-1");
 const startInput = {

@@ -12,6 +12,7 @@ import {
   failEnvironmentInvalidRequest,
   requireEnvironmentScope,
 } from "../auth/http.ts";
+import { projectCollectionOptions } from "../auth/projectCollectionAccess.ts";
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ProjectService from "./ProjectService.ts";
@@ -42,11 +43,13 @@ export const layer = HttpApiBuilder.group(
         "snapshot",
         Effect.fn("environment.projects.snapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          return yield* projects.snapshot.pipe(
-            traceLocalHandlerWork,
-            Effect.catch((cause) => failEnvironmentInternal("project_snapshot_failed", cause)),
-          );
+          const principal = yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          return yield* projects
+            .getSnapshot(projectCollectionOptions(principal.resourceGrant))
+            .pipe(
+              traceLocalHandlerWork,
+              Effect.catch((cause) => failEnvironmentInternal("project_snapshot_failed", cause)),
+            );
         }),
       )
       .handle(

@@ -26,7 +26,11 @@ export class ThreadSearchError extends Schema.TaggedError<ThreadSearchError>()(
   }
 }
 
-const SearchRequest = Schema.Struct({ pattern: Schema.String, limit: Schema.Int });
+const SearchRequest = Schema.Struct({
+  pattern: Schema.String,
+  limit: Schema.Int,
+  projectIds: Schema.optionalKey(Schema.Array(ProjectId)),
+});
 const SearchRow = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
@@ -70,6 +74,7 @@ export class ThreadSearch extends Context.Service<
   {
     readonly search: (
       input: OrchestrationSearchThreadsInput,
+      options?: { readonly projectIds?: ReadonlyArray<ProjectId> },
     ) => Effect.Effect<OrchestrationSearchThreadsResult, ThreadSearchError>;
   }
 >()("t3/orchestration-v2/ThreadSearch") {}
@@ -83,7 +88,7 @@ export const make = Effect.gen(function* () {
   const searchRows = SqlSchema.findAll({
     Request: SearchRequest,
     Result: SearchRow,
-    execute: ({ pattern, limit }) => sql`
+    execute: ({ pattern, limit, projectIds }) => sql`
       WITH candidate AS (
         SELECT
           threads.thread_id,
@@ -98,7 +103,8 @@ export const make = Effect.gen(function* () {
           ON threads.thread_id = messages.thread_id
         INNER JOIN projection_projects AS projects
           ON projects.project_id = threads.project_id
-        WHERE threads.deleted_at IS NULL
+        WHERE ${projectIds === undefined ? sql`1 = 1` : sql.in("threads.project_id", projectIds)}
+          AND threads.deleted_at IS NULL
           AND threads.archived_at IS NULL
           AND projects.deleted_at IS NULL
           AND messages.streaming = 0
@@ -137,10 +143,11 @@ export const make = Effect.gen(function* () {
   });
 
   const search: ThreadSearch["Service"]["search"] = Effect.fn("ThreadSearch.search")(
-    function* (input) {
+    function* (input, options) {
       const rows = yield* searchRows({
         pattern: `%${escapeLikePattern(input.query)}%`,
         limit: input.limit ?? 50,
+        ...options,
       }).pipe(
         Effect.mapError(
           (cause) =>

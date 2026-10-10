@@ -161,6 +161,7 @@ function makeHarness(options: HarnessOptions = {}) {
               : Option.none(),
         ),
       getByWorkspaceRoot: () => Effect.succeed(Option.some(project)),
+      getSnapshot: () => Effect.die("unused"),
       snapshot: Effect.die("unused"),
       getShell: () => Effect.die("unused"),
       listShells: () => Effect.die("unused"),

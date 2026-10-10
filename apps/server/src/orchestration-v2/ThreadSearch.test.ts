@@ -115,6 +115,64 @@ const message = (
 });
 
 it.layer(layerTest)("ThreadSearch", (it) => {
+  it.effect(
+    "filters project candidates before ranking and limit, including empty and future selections",
+    () =>
+      Effect.gen(function* () {
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const search = yield* ThreadSearch.ThreadSearch;
+        const a = ProjectId.make("project:allowed-search");
+        const b = ProjectId.make("project:hidden-search");
+        const future = ProjectId.make("project:future-search");
+        for (const projectId of [a, b, future]) yield* createProject(projectId);
+        const allowed = ThreadId.make("thread:allowed-search");
+        const hidden = ThreadId.make("thread:hidden-search");
+        const added = ThreadId.make("thread:future-search");
+        const archived = ThreadId.make("thread:allowed-archived-search");
+        for (const event of [
+          thread(allowed, a),
+          message(allowed, "allowed-search", "assistant", "collectionmatch allowed", {
+            minute: 1,
+          }),
+          thread(hidden, b),
+          message(hidden, "hidden-search", "user", "collectionmatch hidden secret", {
+            minute: 5,
+          }),
+          thread(added, future),
+          message(added, "future-search", "user", "collectionmatch future", { minute: 4 }),
+          thread(archived, a, { archivedAt: at(1) }),
+          message(archived, "allowed-archived-search", "user", "collectionmatch archived"),
+        ])
+          yield* projections.apply(event);
+
+        const restricted = yield* search.search(
+          { query: "collectionmatch", limit: 1 },
+          { projectIds: [a] },
+        );
+        assert.deepEqual(
+          restricted.matches.map((match) => match.threadId),
+          [allowed],
+        );
+        assert.equal(restricted.matches[0]?.snippet, "collectionmatch allowed");
+        assert.deepEqual(
+          (yield* search.search({ query: "collectionmatch" }, { projectIds: [] })).matches,
+          [],
+        );
+        assert.deepEqual(
+          (yield* search.search({ query: "collectionmatch" }, { projectIds: [a] })).matches.map(
+            (match) => match.projectId,
+          ),
+          [a],
+        );
+        assert.deepEqual(
+          (yield* search.search({ query: "collectionmatch" })).matches.map(
+            (match) => match.projectId,
+          ),
+          [b, future, a],
+        );
+      }),
+  );
+
   it.effect("returns one finished user or assistant match per active thread", () =>
     Effect.gen(function* () {
       const projections = yield* ProjectionStore.ProjectionStoreV2;

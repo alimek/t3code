@@ -130,6 +130,9 @@ export class ProjectService extends Context.Service<
       options?: { readonly includeDeleted?: boolean },
     ) => Effect.Effect<Option.Option<Project>, ProjectOperationError>;
     readonly snapshot: Effect.Effect<ProjectSnapshot, ProjectOperationError>;
+    readonly getSnapshot: (options?: {
+      readonly projectIds?: ReadonlyArray<ProjectId>;
+    }) => Effect.Effect<ProjectSnapshot, ProjectOperationError>;
     /**
      * An active project's shell with its immediately available repository
      * identity; missing identity resolves in the background.
@@ -539,9 +542,11 @@ export const make = Effect.gen(function* () {
     return yield* Effect.forEach(shells, enrichShell, { concurrency: 16 });
   });
 
-  const snapshot = Effect.gen(function* () {
+  const getSnapshot: ProjectService["Service"]["getSnapshot"] = Effect.fn(
+    "ProjectService.getSnapshot",
+  )(function* (options) {
     const rows = yield* projects
-      .list()
+      .list(options)
       .pipe(
         Effect.mapError(
           (cause) => new ProjectOperationError({ operation: "list-projects", cause }),
@@ -561,7 +566,8 @@ export const make = Effect.gen(function* () {
     delete: deleteProject,
     getById,
     getByWorkspaceRoot,
-    snapshot,
+    snapshot: getSnapshot(),
+    getSnapshot,
     getShell,
     listShells,
   });

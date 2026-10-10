@@ -14,11 +14,53 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import type * as RpcMessage from "effect/rpc/RpcMessage";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it } from "@effect/vitest";
 
 import { buildBoundedThreadStreamSnapshot } from "./ThreadStream.ts";
 import { buildBoundedThreadProjection } from "./threadHistoryPaging.ts";
 import { projectDomainEventForWire } from "./WireProjection.ts";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
+import { subscribeOrchestrationV2Shell } from "../ws.ts";
+import {
+  collectionStoreLayer,
+  makeCollectionFixture,
+  grantA,
+  projectB,
+  threadCreated,
+} from "./projectCollectionTestFixtures.ts";
+
+const encodeShellStreamItem = Schema.encodeSync(
+  Schema.toCodecJson(OrchestrationV2RpcSchemas.subscribeShell.output),
+);
+
+it.effect("keeps restricted shell bytes independent of hidden shell rows", () =>
+  Effect.gen(function* () {
+    const fixture = yield* makeCollectionFixture;
+    for (let index = 0; index < 80; index += 1) {
+      const event = threadCreated(ThreadId.make(`hidden-perf-${index}`), projectB);
+      if (event.type !== "thread.created") return yield* Effect.die("Unexpected fixture");
+      yield* fixture.appendThread({
+        ...event,
+        payload: { ...event.payload, title: "hidden secret".repeat(400) },
+      });
+    }
+    const restricted = yield* subscribeOrchestrationV2Shell({}, grantA).pipe(
+      Effect.flatMap((stream) => stream.pipe(Stream.take(1), Stream.runCollect)),
+      Effect.provide(fixture.services()),
+    );
+    const owner = yield* subscribeOrchestrationV2Shell({}).pipe(
+      Effect.flatMap((stream) => stream.pipe(Stream.take(1), Stream.runCollect)),
+      Effect.provide(fixture.services()),
+    );
+    const restrictedBytes = encodedBytes(encodeShellStreamItem(restricted[0]!));
+    const ownerBytes = encodedBytes(encodeShellStreamItem(owner[0]!));
+    expect(restrictedBytes).toBeLessThan(8_192);
+    expect(ownerBytes).toBeGreaterThan(400_000);
+    expect(JSON.stringify(restricted)).not.toContain("hidden secret");
+    expect(fixture.shellReads).toEqual([]);
+  }).pipe(Effect.provide(collectionStoreLayer), Effect.scoped),
+);
 
 const SNAPSHOT_SEQUENCE = 600;
 const ROW_COUNT = 600;
