@@ -11,6 +11,11 @@ import {
   EnvironmentHttpApi,
   EventId,
   MessageId,
+  NodeId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ProviderThreadId,
+  ProviderTurnId,
   RunId,
   ThreadId,
   TurnItemId,
@@ -55,10 +60,14 @@ const authority: ThreadReadAuthority = {
 const makeFixture = Effect.gen(function* () {
   const fixture = yield* makeCollectionFixture;
   const imported: ThreadId[] = [];
+  const materialized: ThreadId[] = [];
   const p = fixture.projections;
   const reads = Layer.mock(Orchestrator.OrchestratorV2)({
     getThreadProjection: (id) => p.getThreadProjection(id).pipe(Effect.orDie),
-    getThreadSnapshot: (id) => p.getThreadSnapshot(id).pipe(Effect.orDie),
+    getThreadSnapshot: (id) =>
+      Effect.sync(() => {
+        materialized.push(id);
+      }).pipe(Effect.andThen(p.getThreadSnapshot(id)), Effect.orDie),
     getThreadSnapshotWindow: (id, options) =>
       p.getThreadSnapshotWindow(id, options).pipe(Effect.orDie),
     getThreadHistoryPage: (id, ...args) => p.getThreadHistoryPage(id, ...args).pipe(Effect.orDie),
@@ -86,7 +95,7 @@ const makeFixture = Effect.gen(function* () {
       ),
     ),
   );
-  return { ...fixture, threads, imported };
+  return { ...fixture, threads, imported, materialized };
 });
 
 it.effect(
@@ -566,4 +575,272 @@ it.effect("legacy context and provider forks cannot import hidden-source content
     assert.equal((linked.cause as { _tag: string })._tag, "EnvironmentAuthorizationError");
     assert.deepEqual(f.imported, []);
   }).pipe(Effect.provide(collectionStoreLayer)),
+);
+
+const ownerNode = (id: string, threadId: ThreadId) => ({
+  id: NodeId.make(id),
+  threadId,
+  runId: null,
+  parentNodeId: null,
+  rootNodeId: NodeId.make(id),
+  kind: "root_turn" as const,
+  status: "completed" as const,
+  countsForRun: true,
+  providerThreadId: null,
+  providerTurnId: null,
+  nativeItemRef: null,
+  runtimeRequestId: null,
+  checkpointScopeId: null,
+  startedAt: now,
+  completedAt: now,
+});
+const ownerProvider = (id: string, appThreadId: ThreadId | null, ownerNodeId: NodeId | null) => ({
+  id: ProviderThreadId.make(id),
+  driver: ProviderDriverKind.make("codex"),
+  providerInstanceId: ProviderInstanceId.make("codex"),
+  providerSessionId: null,
+  appThreadId,
+  ownerNodeId,
+  nativeThreadRef: null,
+  nativeConversationHeadRef: null,
+  status: "idle" as const,
+  firstRunOrdinal: null,
+  lastRunOrdinal: null,
+  handoffIds: [],
+  forkedFrom: null,
+  nativeMetadata: { title: "provider body" },
+  createdAt: now,
+  updatedAt: now,
+});
+
+it.effect("stored provider owners must resolve before importer or body materialization", () =>
+  Effect.gen(function* () {
+    const f = yield* makeFixture;
+    const sql = yield* SqlClient.SqlClient;
+    for (const threadId of [activeA, activeB]) {
+      yield* f.appendThread({
+        id: EventId.make(`owner:${threadId}`),
+        type: "node.updated",
+        threadId,
+        occurredAt: now,
+        payload: ownerNode(`owner:${threadId}`, threadId),
+      });
+    }
+    const cases = [
+      { owner: null, node: null, exists: true },
+      { owner: null, node: "missing-node", exists: true },
+      { owner: activeA, node: "missing-node", exists: true },
+      { owner: activeA, node: `owner:${activeB}`, exists: true },
+      { owner: activeB, node: `owner:${activeA}`, exists: true },
+      { owner: activeA, node: null, exists: false },
+    ];
+    for (const input of cases) {
+      for (const body of ["{}", "invalid orphan/hidden JSON"]) {
+        if (input.exists)
+          yield* sql`INSERT INTO orchestration_v2_projection_provider_threads
+        (provider_thread_id, thread_id, owner_node_id, provider, status, updated_at, payload_json)
+        VALUES ('owner-probe', ${input.owner}, ${input.node}, 'codex', 'idle', '2026-10-11', ${body})`;
+        yield* sql`INSERT INTO orchestration_v2_projection_subagents
+        (subagent_id, thread_id, parent_node_id, provider, driver, provider_instance_id, provider_thread_id, origin, status, updated_at, payload_json)
+        VALUES ('owner-link', ${activeA}, ${`owner:${activeA}`}, 'codex', 'codex', 'codex', 'owner-probe', 'provider_native', 'completed', '2026-10-11', '{}')`;
+        const error = yield* Effect.flip(f.threads.getThreadSnapshot(authority, activeA));
+        assert.equal(
+          (error.cause as { _tag: string })._tag,
+          "EnvironmentAuthorizationError",
+          "valid/malformed bodies must deny by ownership, not JSON error",
+        );
+        assert.deepEqual(f.imported, []);
+        assert.deepEqual(f.materialized, []);
+        yield* sql`DELETE FROM orchestration_v2_projection_subagents WHERE subagent_id = 'owner-link'`;
+        yield* sql`DELETE FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = 'owner-probe'`;
+      }
+    }
+    // A real registered node is enough for native provider ownership; no body-claimed app owner needed.
+    yield* f.appendThread({
+      id: EventId.make("owner-control"),
+      type: "provider-thread.updated",
+      threadId: activeA,
+      occurredAt: now,
+      payload: ownerProvider("owner-control", null, NodeId.make(`owner:${activeA}`)),
+    });
+    const visible = yield* f.threads.getThreadSnapshot(authority, activeA);
+    assert.equal(visible.projection.providerThreads[0]?.nativeMetadata?.title, "provider body");
+    assert.deepEqual(f.imported, [activeA]);
+    assert.deepEqual(f.materialized, [activeA]);
+  }).pipe(Effect.provide(collectionStoreLayer)),
+);
+
+it.effect(
+  "live provider/node participants must have admitted registered owners before any frame emits",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* makeFixture;
+      const sql = yield* SqlClient.SqlClient;
+      for (const threadId of [activeA, activeB]) {
+        yield* f.appendThread({
+          id: EventId.make(`live-owner:${threadId}`),
+          type: "node.updated",
+          threadId,
+          occurredAt: now,
+          payload: ownerNode(`live-owner:${threadId}`, threadId),
+        });
+        yield* f.appendThread({
+          id: EventId.make(`live-provider:${threadId}`),
+          type: "provider-thread.updated",
+          threadId,
+          occurredAt: now,
+          payload: ownerProvider(
+            `live-provider:${threadId}`,
+            threadId,
+            NodeId.make(`live-owner:${threadId}`),
+          ),
+        });
+      }
+      for (const threadId of [activeA, activeB]) {
+        yield* f.appendThread({
+          id: EventId.make(`live-turn:${threadId}`),
+          type: "provider-turn.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: ProviderTurnId.make(`live-turn:${threadId}`),
+            providerThreadId: ProviderThreadId.make(`live-provider:${threadId}`),
+            nodeId: NodeId.make(`live-owner:${threadId}`),
+            runAttemptId: null,
+            nativeTurnRef: null,
+            ordinal: 1,
+            status: "completed",
+            startedAt: now,
+            completedAt: now,
+          },
+        });
+      }
+      // Orphan has no registered association with A; a live body claiming A must not establish ownership.
+      yield* sql`INSERT INTO orchestration_v2_projection_provider_threads
+    (provider_thread_id, provider, status, updated_at, payload_json) VALUES ('live-orphan', 'codex', 'idle', '2026-10-11', '{}')`;
+      const frames = (event: OrchestrationV2DomainEvent) =>
+        subscribeOrchestrationV2Thread(authority, { threadId: activeA }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              f.services(),
+              Layer.succeed(Threads.ThreadManagementService, {
+                ...f.threads,
+                streamStoredEventsFrom: () =>
+                  Stream.make({ sequence: 100, commandId: null, event }),
+              }),
+              Layer.succeed(SqlClient.SqlClient, sql),
+              Layer.succeed(ProjectStore.ProjectStoreV2, f.projects),
+            ),
+          ),
+        );
+      const event = (
+        type: "provider-thread.updated",
+        payload: ReturnType<typeof ownerProvider>,
+      ): OrchestrationV2DomainEvent => ({
+        id: EventId.make(`probe:${payload.id}`),
+        type,
+        threadId: activeA,
+        occurredAt: now,
+        payload,
+      });
+      const badEvents: OrchestrationV2DomainEvent[] = [
+        event(
+          "provider-thread.updated",
+          ownerProvider(`live-provider:${activeA}`, activeA, NodeId.make(`live-owner:${activeB}`)),
+        ),
+        event(
+          "provider-thread.updated",
+          ownerProvider(`live-provider:${activeB}`, activeA, NodeId.make(`live-owner:${activeA}`)),
+        ),
+        event(
+          "provider-thread.updated",
+          ownerProvider("live-orphan", activeA, NodeId.make(`live-owner:${activeA}`)),
+        ),
+        event(
+          "provider-thread.updated",
+          ownerProvider("missing-provider", activeA, NodeId.make(`live-owner:${activeA}`)),
+        ),
+        event(
+          "provider-thread.updated",
+          ownerProvider(`live-provider:${activeA}`, activeA, NodeId.make("missing-node")),
+        ),
+        {
+          id: EventId.make("node-foreign-parent"),
+          type: "node.updated",
+          threadId: activeA,
+          occurredAt: now,
+          payload: {
+            ...ownerNode(`live-owner:${activeA}`, activeA),
+            parentNodeId: NodeId.make(`live-owner:${activeB}`),
+          },
+        },
+        {
+          id: EventId.make("node-hidden-provider"),
+          type: "node.updated",
+          threadId: activeA,
+          occurredAt: now,
+          payload: {
+            ...ownerNode(`live-owner:${activeA}`, activeA),
+            providerThreadId: ProviderThreadId.make(`live-provider:${activeB}`),
+          },
+        },
+        {
+          id: EventId.make("node-hidden-provider-turn"),
+          type: "node.updated",
+          threadId: activeA,
+          occurredAt: now,
+          payload: {
+            ...ownerNode(`live-owner:${activeA}`, activeA),
+            providerThreadId: ProviderThreadId.make(`live-provider:${activeA}`),
+            providerTurnId: ProviderTurnId.make(`live-turn:${activeB}`),
+          },
+        },
+        {
+          id: EventId.make("node-hidden-identity"),
+          type: "node.updated",
+          threadId: activeA,
+          occurredAt: now,
+          payload: ownerNode(`live-owner:${activeB}`, activeA),
+        },
+      ];
+      for (const body of ["{}", "invalid hidden/orphan JSON"]) {
+        yield* sql`UPDATE orchestration_v2_projection_nodes SET payload_json = ${body} WHERE thread_id = ${activeB}`;
+        yield* sql`UPDATE orchestration_v2_projection_provider_threads SET payload_json = ${body}
+      WHERE provider_thread_id IN (${`live-provider:${activeB}`}, 'live-orphan')`;
+        yield* sql`UPDATE orchestration_v2_projection_provider_turns SET payload_json = ${body} WHERE thread_id = ${activeB}`;
+        for (const denied of badEvents) {
+          const emitted: string[] = [];
+          const error = yield* frames(denied).pipe(
+            Effect.flatMap((stream) =>
+              stream.pipe(
+                Stream.tap((frame) =>
+                  Effect.sync(() => {
+                    emitted.push(frame.kind);
+                  }),
+                ),
+                Stream.runDrain,
+              ),
+            ),
+            Effect.flip,
+          );
+          assert.equal(error._tag, "OrchestrationV2GetThreadProjectionError");
+          assert.include(JSON.stringify(error), "EnvironmentAuthorizationError");
+          assert.deepEqual(
+            emitted,
+            ["snapshot"],
+            "hidden/orphan participant frame must never emit",
+          );
+        }
+      }
+      const visible = yield* frames(
+        event(
+          "provider-thread.updated",
+          ownerProvider(`live-provider:${activeA}`, activeA, NodeId.make(`live-owner:${activeA}`)),
+        ),
+      ).pipe(Effect.flatMap(Stream.runCollect));
+      assert.deepEqual(
+        visible.map((frame) => frame.kind),
+        ["snapshot", "event"],
+      );
+    }).pipe(Effect.scoped, Effect.provide(collectionStoreLayer)),
 );
