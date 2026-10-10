@@ -309,6 +309,74 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
       }).pipe(Effect.provide(layerEnvironmentAuth())),
   );
 
+  it.effect.each(
+    (["issuer", "root"] as const).flatMap((target) =>
+      [
+        {
+          column: "resource_grant",
+          value: JSON.stringify({
+            version: true,
+            projects: { mode: "all" },
+            providers: { mode: "all" },
+          }),
+        },
+        { column: "scopes", value: JSON.stringify({ x: "access:write", y: "orchestration:read" }) },
+        { column: "authority_revision", value: -1 },
+        { column: "method", value: "invalid-auth-method" },
+      ].flatMap((corruption) =>
+        (["cookie", "token"] as const).map((transport) => ({ target, transport, ...corruption })),
+      ),
+    ),
+  )(
+    "pending invitations fail closed on malformed $target $column via $transport",
+    ({ target, transport, column, value }) =>
+      Effect.gen(function* () {
+        const auth = yield* EnvironmentAuth.EnvironmentAuth;
+        const sessions = yield* SessionStore.SessionStore;
+        const sql = yield* SqlClient.SqlClient;
+        const root = yield* auth.issueSession();
+        const derived = yield* sessions.issue({
+          parentSessionId: root.sessionId,
+          scopes: AuthAdministrativeScopes,
+        });
+        const issuer = yield* auth.authenticateHttpRequest(makeBearerRequest(derived.token));
+        const invite = yield* auth.issueClientPairingCredential(issuer, {
+          scopes: ["orchestration:read"],
+        });
+        const originalSessions =
+          yield* sql`SELECT session_id FROM auth_sessions ORDER BY session_id`;
+        const targetId = target === "issuer" ? derived.sessionId : root.sessionId;
+        const previous = yield* sql<{
+          value: string | number | null;
+        }>`SELECT ${sql(column)} AS value FROM auth_sessions WHERE session_id = ${targetId}`;
+        yield* sql`UPDATE auth_sessions SET ${sql(column)} = ${value} WHERE session_id = ${targetId}`;
+        const result = yield* Effect.flip(
+          transport === "cookie"
+            ? auth.createBrowserSession(invite.credential, requestMetadata).pipe(Effect.asVoid)
+            : auth
+                .exchangeBootstrapCredentialForAccessToken(
+                  invite.credential,
+                  ["orchestration:read"],
+                  requestMetadata,
+                )
+                .pipe(Effect.asVoid),
+        );
+        expect(result._tag).toBe("ServerAuthBootstrapCredentialValidationError");
+        expect(yield* sql`SELECT session_id FROM auth_sessions ORDER BY session_id`).toEqual(
+          originalSessions,
+        );
+        expect(
+          yield* sql`SELECT consumed_at FROM auth_pairing_links WHERE id = ${invite.id}`,
+        ).toEqual([{ consumed_at: null }]);
+        // Rollback preserves the invitation; repairing authority permits exactly one subsequent exchange.
+        yield* sql`UPDATE auth_sessions SET ${sql(column)} = ${previous[0]!.value} WHERE session_id = ${targetId}`;
+        yield* auth.createBrowserSession(invite.credential, requestMetadata);
+        expect(yield* sql`SELECT session_id FROM auth_sessions`).toHaveLength(
+          originalSessions.length + 1,
+        );
+      }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
+
   it.effect("rejects restricted grant requests through every issuance API", () =>
     Effect.gen(function* () {
       const auth = yield* EnvironmentAuth.EnvironmentAuth;

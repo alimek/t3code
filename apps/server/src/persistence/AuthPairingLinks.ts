@@ -1,5 +1,6 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -7,12 +8,16 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 
 import {
+  AuthAccessWriteScope,
+  AuthAllResourceGrant,
   AuthEnvironmentScopes,
   AuthSessionId,
   AuthResourceGrant,
   NonNegativeInt,
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
+
+import * as AuthSessions from "./AuthSessions.ts";
 
 import {
   type AuthPairingLinkRepositoryError,
@@ -141,6 +146,7 @@ function toPersistenceSqlOrDecodeError(
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const sessions = yield* AuthSessions.AuthSessionRepository;
 
   const createPairingLinkRow = SqlSchema.void({
     Request: CreateAuthPairingLinkInput,
@@ -198,24 +204,6 @@ export const make = Effect.gen(function* () {
             proof_key_thumbprint IS NULL
             OR proof_key_thumbprint = ${proofKeyThumbprint}
           )
-          -- Pending invitations may not outlive the issuer's current authority.
-          AND (issuer_session_id IS NULL OR EXISTS (
-            SELECT 1 FROM auth_sessions AS issuer
-            JOIN auth_sessions AS root ON root.session_id = COALESCE(issuer.device_id, issuer.session_id)
-            WHERE issuer.session_id = auth_pairing_links.issuer_session_id
-              AND issuer.revoked_at IS NULL AND root.revoked_at IS NULL
-              AND issuer.expires_at > ${now} AND root.expires_at > ${now}
-              AND (root.device_id IS NULL OR root.device_id = root.session_id)
-              AND (issuer.resource_grant IS NULL OR (json_extract(issuer.resource_grant, '$.version') = 1 AND json_extract(issuer.resource_grant, '$.projects.mode') = 'all' AND json_extract(issuer.resource_grant, '$.providers.mode') = 'all'))
-              AND (root.resource_grant IS NULL OR (json_extract(root.resource_grant, '$.version') = 1 AND json_extract(root.resource_grant, '$.projects.mode') = 'all' AND json_extract(root.resource_grant, '$.providers.mode') = 'all'))
-              AND EXISTS (SELECT 1 FROM json_each(issuer.scopes) WHERE value = 'access:write')
-              AND EXISTS (SELECT 1 FROM json_each(root.scopes) WHERE value = 'access:write')
-              AND NOT EXISTS (
-                SELECT 1 FROM json_each(auth_pairing_links.scopes) AS granted
-                WHERE granted.value NOT IN (SELECT value FROM json_each(issuer.scopes))
-                  OR granted.value NOT IN (SELECT value FROM json_each(root.scopes))
-              )
-          ))
           AND (${requestedScopes === undefined ? 1 : 0} OR EXISTS (
             SELECT 1
             FROM json_each(${JSON.stringify(requestedScopes ?? [])}) AS requested
@@ -323,30 +311,71 @@ export const make = Effect.gen(function* () {
     );
 
   const consumeAvailable: AuthPairingLinkRepository["Service"]["consumeAvailable"] = (input) =>
-    consumeAvailablePairingLinkRow(input).pipe(
-      Effect.mapError(
-        toPersistenceSqlOrDecodeError(
-          "AuthPairingLinkRepository.consumeAvailable:query",
-          "AuthPairingLinkRepository.consumeAvailable:decodeRow",
-        ),
-      ),
-      Effect.flatMap((rowOption) =>
-        Option.match(rowOption, {
-          onNone: () => Effect.succeedNone,
-          onSome: (row) =>
-            decodeAuthPairingLinkDbRow(row).pipe(
-              Effect.mapError((cause) =>
-                PersistenceDecodeError.fromSchemaError(
-                  "AuthPairingLinkRepository.consumeAvailable:decodeRow",
-                  cause,
-                  { pairingLinkId: row.id },
-                ),
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const pending = yield* getByCredential({ credential: input.credential });
+          if (Option.isNone(pending)) return pending;
+          if (pending.value.issuerSessionId != null) {
+            // Decode and authorize the same records as session verification, while SQLite's
+            // transaction lock prevents issuer/root changes before consumption commits.
+            const issuer = yield* sessions.getById({ sessionId: pending.value.issuerSessionId });
+            if (Option.isNone(issuer)) return Option.none<AuthPairingLinkRecord>();
+            const root =
+              issuer.value.deviceId == null || issuer.value.deviceId === issuer.value.sessionId
+                ? issuer
+                : yield* sessions.getById({ sessionId: AuthSessionId.make(issuer.value.deviceId) });
+            if (
+              Option.isNone(root) ||
+              (root.value.deviceId != null && root.value.deviceId !== root.value.sessionId)
+            )
+              return Option.none<AuthPairingLinkRecord>();
+            for (const record of [issuer.value, root.value]) {
+              const grant = record.resourceGrant ?? AuthAllResourceGrant;
+              if (
+                record.revokedAt !== null ||
+                DateTime.isGreaterThanOrEqualTo(input.now, record.expiresAt) ||
+                grant.projects.mode !== "all" ||
+                grant.providers.mode !== "all" ||
+                !record.scopes.includes(AuthAccessWriteScope) ||
+                !pending.value.scopes.every((scope) => record.scopes.includes(scope))
+              )
+                return Option.none<AuthPairingLinkRecord>();
+            }
+          }
+          const rowOption = yield* consumeAvailablePairingLinkRow(input).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "AuthPairingLinkRepository.consumeAvailable:query",
+                "AuthPairingLinkRepository.consumeAvailable:decodeRow",
               ),
-              Effect.asSome,
             ),
+          );
+          return yield* Option.match(rowOption, {
+            onNone: () => Effect.succeedNone,
+            onSome: (row) =>
+              decodeAuthPairingLinkDbRow(row).pipe(
+                Effect.mapError((cause) =>
+                  PersistenceDecodeError.fromSchemaError(
+                    "AuthPairingLinkRepository.consumeAvailable:decodeRow",
+                    cause,
+                    { pairingLinkId: row.id },
+                  ),
+                ),
+                Effect.asSome,
+              ),
+          });
         }),
-      ),
-    );
+      )
+      .pipe(
+        Effect.catchTags({
+          SqlError: (cause) =>
+            new PersistenceSqlError({
+              operation: "AuthPairingLinkRepository.consumeAvailable:transaction",
+              cause,
+            }),
+        }),
+      );
 
   const listActive: AuthPairingLinkRepository["Service"]["listActive"] = (input) =>
     listActivePairingLinkRows(input).pipe(
@@ -418,4 +447,6 @@ export const make = Effect.gen(function* () {
   } satisfies AuthPairingLinkRepository["Service"];
 });
 
-export const layer = Layer.effect(AuthPairingLinkRepository, make);
+export const layer = Layer.effect(AuthPairingLinkRepository, make).pipe(
+  Layer.provide(AuthSessions.layer),
+);
