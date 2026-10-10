@@ -2,6 +2,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   authScopeResponse,
   AuthAdministrativeScopes,
+  AuthAllResourceGrant,
+  AuthCreatePairingCredentialInput,
   AuthStandardClientScopes,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
@@ -22,6 +24,8 @@ import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
 
 /** Pinned so dev-mode cookie tests can assert the port-scoped name. */
+const decodePairingInput = Schema.decodeUnknownEffect(AuthCreatePairingCredentialInput);
+
 const TEST_SERVER_PORT = 13_773;
 const isPairingCredentialIssueError = Schema.is(PairingGrantStore.PairingCredentialIssueError);
 const isPersistenceSqlError = Schema.is(PersistenceErrors.PersistenceSqlError);
@@ -82,6 +86,68 @@ const requestMetadata = {
 };
 
 it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
+  it.effect("rejects restricted grant requests through every issuance API", () =>
+    Effect.gen(function* () {
+      const auth = yield* EnvironmentAuth.EnvironmentAuth;
+      const sql = yield* SqlClient.SqlClient;
+      const input = yield* decodePairingInput({
+        resourceGrant: {
+          version: 1,
+          projects: { mode: "explicit", ids: [] },
+          providers: { mode: "all" },
+        },
+      });
+      expect((yield* Effect.flip(auth.issuePairingCredential(input)))._tag).toBe(
+        "ServerAuthPairingLinkCreationError",
+      );
+      expect((yield* Effect.flip(auth.createPairingLink(input)))._tag).toBe(
+        "ServerAuthPairingLinkCreationError",
+      );
+      expect((yield* Effect.flip(auth.issueSession(input)))._tag).toBe(
+        "ServerAuthSessionTokenIssueError",
+      );
+      expect(yield* sql`SELECT id FROM auth_pairing_links`).toEqual([]);
+      expect(yield* sql`SELECT session_id FROM auth_sessions`).toEqual([]);
+      const all = yield* auth.issuePairingCredential({ resourceGrant: AuthAllResourceGrant });
+      const exchanged = yield* auth.createBrowserSession(all.credential, requestMetadata);
+      expect(exchanged.response.permissions).toEqual(AuthStandardClientScopes);
+      expect(exchanged.response).not.toHaveProperty("resourceGrant");
+    }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
+
+  it.effect(
+    "does not convert stored restricted pairing links into cookie, bearer or DPoP sessions",
+    () =>
+      Effect.gen(function* () {
+        const auth = yield* EnvironmentAuth.EnvironmentAuth;
+        const sql = yield* SqlClient.SqlClient;
+        const restricted = JSON.stringify({
+          version: 1,
+          projects: { mode: "all" },
+          providers: { mode: "explicit", instances: [] },
+        });
+        for (const method of ["cookie", "bearer", "dpop"]) {
+          const link = yield* auth.createPairingLink();
+          yield* sql`UPDATE auth_pairing_links SET resource_grant = ${restricted} WHERE id = ${link.id}`;
+          const operation =
+            method === "cookie"
+              ? auth.createBrowserSession(link.credential, requestMetadata).pipe(Effect.asVoid)
+              : auth
+                  .exchangeBootstrapCredentialForAccessToken(
+                    link.credential,
+                    undefined,
+                    requestMetadata,
+                    method === "dpop" ? { proofKeyThumbprint: "proof-key" } : undefined,
+                  )
+                  .pipe(Effect.asVoid);
+          expect((yield* Effect.flip(operation))._tag).toBe(
+            "ServerAuthBootstrapCredentialValidationError",
+          );
+        }
+        expect(yield* sql`SELECT session_id FROM auth_sessions`).toEqual([]);
+      }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
+
   it.effect("uses the reusable dev cookie without overriding a normal scoped cookie", () =>
     Effect.gen(function* () {
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;

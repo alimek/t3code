@@ -3,6 +3,7 @@ import {
   AuthAdministrativeScopes,
   AuthStandardClientScopes,
   AuthEnvironmentScopes,
+  AuthResourceGrant,
   type AuthClientMetadata,
   type AuthClientSession,
   type AuthEnvironmentScope,
@@ -25,6 +26,10 @@ import * as Option from "effect/Option";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as AuthSessions from "../persistence/AuthSessions.ts";
+import {
+  ResourceGrantsNotActivatedError,
+  requireUnrestrictedResourceGrant,
+} from "./ResourceGrantGuard.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import {
   REUSABLE_DEV_SESSION_EXPIRES_AT,
@@ -356,6 +361,7 @@ export const SessionCredentialInternalError = Schema.Union([
   ActiveSessionsListError,
   SessionRevocationError,
   OtherSessionsRevocationError,
+  ResourceGrantsNotActivatedError,
 ]);
 export type SessionCredentialInternalError = typeof SessionCredentialInternalError.Type;
 
@@ -375,6 +381,7 @@ export class SessionStore extends Context.Service<
       readonly subject?: string;
       readonly method?: ServerAuthSessionMethod;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+      readonly resourceGrant?: AuthResourceGrant;
       readonly client?: AuthClientMetadata;
       readonly proofKeyThumbprint?: string;
       readonly runtimeModeCeiling?: RuntimeMode;
@@ -435,6 +442,7 @@ const SessionClaims = Schema.Struct({
   sid: AuthSessionId,
   sub: Schema.String,
   scopes: AuthEnvironmentScopes,
+  resourceGrant: Schema.optionalKey(AuthResourceGrant),
   method: Schema.Literals(["browser-session-cookie", "bearer-access-token", "dpop-access-token"]),
   jkt: Schema.optionalKey(Schema.String),
   rtc: Schema.optionalKey(RuntimeMode),
@@ -656,6 +664,26 @@ export const make = Effect.gen(function* () {
   const encodeClaims = Schema.encodeEffect(Schema.fromJsonString(SessionClaims));
   const issue: SessionStore["Service"]["issue"] = Effect.fn("SessionStore.issue")(
     function* (input) {
+      yield* requireUnrestrictedResourceGrant(input?.resourceGrant);
+      if (input?.replaceSessionId !== undefined) {
+        const previous = yield* authSessions
+          .getById({ sessionId: input.replaceSessionId })
+          .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ cause })));
+        if (Option.isSome(previous))
+          yield* requireUnrestrictedResourceGrant(previous.value.resourceGrant);
+      } else if (input?.replaceActiveForSubjectAndMethod) {
+        const previous = yield* authSessions
+          .listActive({ now: yield* DateTime.now })
+          .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ cause })));
+        for (const row of previous) {
+          if (
+            row.subject === (input.subject ?? "browser") &&
+            row.method === (input.method ?? "browser-session-cookie")
+          ) {
+            yield* requireUnrestrictedResourceGrant(row.resourceGrant);
+          }
+        }
+      }
       const sessionId = AuthSessionId.make(
         yield* crypto.randomUUIDv4.pipe(
           Effect.mapError((cause) => new SessionCredentialIssueError({ cause })),
@@ -671,6 +699,7 @@ export const make = Effect.gen(function* () {
         sid: sessionId,
         sub: input?.subject ?? "browser",
         scopes: input?.scopes ?? AuthStandardClientScopes,
+        ...(input?.resourceGrant !== undefined ? { resourceGrant: input.resourceGrant } : {}),
         method: input?.method ?? "browser-session-cookie",
         ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
         ...(input?.runtimeModeCeiling ? { rtc: input.runtimeModeCeiling } : {}),
@@ -698,6 +727,7 @@ export const make = Effect.gen(function* () {
         sessionId,
         subject: claims.sub,
         scopes: claims.scopes,
+        resourceGrant: claims.resourceGrant ?? null,
         method: claims.method,
         client: {
           label: client.label ?? null,
@@ -774,6 +804,7 @@ export const make = Effect.gen(function* () {
         if (Option.isNone(row)) {
           return yield* new UnknownSessionTokenError({ sessionId: devAuth.sessionId });
         }
+        yield* requireUnrestrictedResourceGrant(row.value.resourceGrant);
         if (row.value.revokedAt !== null) {
           return yield* new SessionTokenRevokedError({
             sessionId: devAuth.sessionId,
@@ -812,6 +843,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError((cause) => new InvalidSessionTokenPayloadError({ cause })),
       );
 
+      yield* requireUnrestrictedResourceGrant(claims.resourceGrant);
       const observedAt = yield* DateTime.now;
       const expiresAt = DateTime.make(claims.exp);
       if (Option.isNone(expiresAt)) {
@@ -838,6 +870,7 @@ export const make = Effect.gen(function* () {
       if (Option.isNone(row)) {
         return yield* new UnknownSessionTokenError({ sessionId: claims.sid });
       }
+      yield* requireUnrestrictedResourceGrant(row.value.resourceGrant);
       if (row.value.revokedAt !== null) {
         return yield* new SessionTokenRevokedError({
           sessionId: claims.sid,
@@ -863,6 +896,10 @@ export const make = Effect.gen(function* () {
   const issueWebSocketToken: SessionStore["Service"]["issueWebSocketToken"] = Effect.fn(
     "SessionStore.issueWebSocketToken",
   )(function* (sessionId, input) {
+    const row = yield* authSessions
+      .getById({ sessionId })
+      .pipe(Effect.mapError((cause) => new WebSocketTokenIssueError({ sessionId, cause })));
+    if (Option.isSome(row)) yield* requireUnrestrictedResourceGrant(row.value.resourceGrant);
     const issuedAt = yield* DateTime.now;
     const expiresAt = DateTime.add(issuedAt, {
       milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_WEBSOCKET_TOKEN_TTL),
@@ -948,6 +985,7 @@ export const make = Effect.gen(function* () {
         observedAt,
       });
     }
+    yield* requireUnrestrictedResourceGrant(row.value.resourceGrant);
     if (row.value.revokedAt !== null) {
       return yield* new WebSocketSessionRevokedError({
         sessionId: claims.sid,

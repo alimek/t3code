@@ -1,5 +1,6 @@
 import * as Schema from "effect/Schema";
 import * as HttpApiSchema from "effect/http-api/HttpApiSchema";
+import { AuthResourceGrant } from "./authResourceAccess.ts";
 
 import {
   AuthSessionId,
@@ -262,6 +263,8 @@ export type ServerAuthDescriptor = typeof ServerAuthDescriptor.Type;
 
 export const AuthBrowserSessionRequest = Schema.Struct({
   credential: TrimmedNonEmptyString,
+  // Exchanges inherit authority from the credential; never discard a submitted grant.
+  resourceGrant: Schema.optionalKey(Schema.Never),
 });
 export type AuthBrowserSessionRequest = typeof AuthBrowserSessionRequest.Type;
 
@@ -301,6 +304,7 @@ export const AuthTokenExchangeRequest = Schema.Struct({
   subject_token_type: Schema.Literal(AuthEnvironmentBootstrapTokenType),
   requested_token_type: Schema.Literal(AuthAccessTokenType),
   scope: Schema.optionalKey(TrimmedNonEmptyString),
+  resourceGrant: Schema.optionalKey(Schema.Never),
   client_label: Schema.optionalKey(TrimmedNonEmptyString),
   client_device_type: Schema.optionalKey(AuthClientMetadataDeviceType),
   client_os: Schema.optionalKey(TrimmedNonEmptyString),
@@ -455,6 +459,7 @@ export type AuthRevokeClientSessionInput = typeof AuthRevokeClientSessionInput.T
 export const AuthCreatePairingCredentialInput = Schema.Struct({
   label: Schema.optionalKey(TrimmedNonEmptyString),
   scopes: Schema.optionalKey(AuthGrantScopes),
+  resourceGrant: Schema.optionalKey(AuthResourceGrant),
 });
 export type AuthCreatePairingCredentialInput = typeof AuthCreatePairingCredentialInput.Type;
 

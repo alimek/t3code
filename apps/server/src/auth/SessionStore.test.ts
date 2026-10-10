@@ -1,11 +1,17 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { AuthStandardClientScopes, EnvironmentId } from "@t3tools/contracts";
+import {
+  AuthAllResourceGrant,
+  AuthResourceGrant,
+  AuthStandardClientScopes,
+  EnvironmentId,
+} from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as Queue from "effect/Queue";
 import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
@@ -21,6 +27,8 @@ import * as AuthSessions from "../persistence/AuthSessions.ts";
 import * as SessionStore from "./SessionStore.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import { base64UrlDecodeUtf8, base64UrlEncode, signPayload } from "./utils.ts";
+
+const decodeResourceGrant = Schema.decodeUnknownEffect(AuthResourceGrant);
 
 const layerServerConfig = (overrides?: Partial<ServerConfig.ServerConfig["Service"]>) =>
   Layer.effect(
@@ -44,8 +52,8 @@ const layerSessionStore = (
   environmentId = EnvironmentId.make("test-environment"),
 ) =>
   SessionStore.layer.pipe(
-    Layer.provide(SqlitePersistence.layerMemory),
-    Layer.provide(ServerSecretStore.layer),
+    Layer.provideMerge(SqlitePersistence.layerMemory),
+    Layer.provideMerge(ServerSecretStore.layer),
     Layer.provide(layerServerEnvironment(environmentId)),
     Layer.provide(layerServerConfig(overrides)),
   );
@@ -106,13 +114,67 @@ const layerFailingSessionLookupCredential = Layer.effect(
   SessionStore.make,
 ).pipe(
   Layer.provide(layerFailingSessionLookupRepository),
-  Layer.provide(ServerSecretStore.layer),
+  Layer.provideMerge(ServerSecretStore.layer),
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerServerEnvironment(EnvironmentId.make("test-environment"))),
   Layer.provide(layerServerConfig()),
 );
 
 it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
+  it.effect(
+    "rejects restricted session issuance, editing, verification and ticket conversion",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const sql = yield* SqlClient.SqlClient;
+        const restricted = yield* decodeResourceGrant({
+          version: 1,
+          projects: { mode: "explicit", ids: [] },
+          providers: { mode: "all" },
+        });
+        expect((yield* Effect.flip(sessions.issue({ resourceGrant: restricted })))._tag).toBe(
+          "ResourceGrantsNotActivatedError",
+        );
+        expect(yield* sql`SELECT session_id FROM auth_sessions`).toEqual([]);
+        const issued = yield* sessions.issue({ resourceGrant: AuthAllResourceGrant });
+        expect((yield* sessions.verify(issued.token)).scopes).toEqual(AuthStandardClientScopes);
+        const ticket = yield* sessions.issueWebSocketToken(issued.sessionId);
+        yield* sql`UPDATE auth_sessions SET resource_grant = ${JSON.stringify(restricted)} WHERE session_id = ${issued.sessionId}`;
+        for (const operation of [
+          sessions.verify(issued.token).pipe(Effect.asVoid),
+          sessions.verifyWebSocketToken(ticket.token).pipe(Effect.asVoid),
+          sessions.issueWebSocketToken(issued.sessionId).pipe(Effect.asVoid),
+          sessions.issue({ replaceSessionId: issued.sessionId }).pipe(Effect.asVoid),
+          sessions.issue({ replaceActiveForSubjectAndMethod: true }).pipe(Effect.asVoid),
+        ]) {
+          expect((yield* Effect.flip(operation))._tag).toBe("ResourceGrantsNotActivatedError");
+        }
+        const rows = yield* sql<{
+          revoked_at: string | null;
+        }>`SELECT revoked_at FROM auth_sessions`;
+        expect(rows).toEqual([{ revoked_at: null }]);
+      }).pipe(Effect.provide(layerSessionStore())),
+  );
+
+  it.effect("rejects a restricted signed claim even when its stored grant is legacy", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const issued = yield* sessions.issue();
+      const payload = JSON.parse(base64UrlDecodeUtf8(issued.token.split(".")[0]!));
+      payload.resourceGrant = {
+        version: 1,
+        projects: { mode: "all" },
+        providers: { mode: "explicit", instances: [] },
+      };
+      const encoded = base64UrlEncode(JSON.stringify(payload));
+      const secret = yield* secrets.getOrCreateRandom("server-signing-key", 32);
+      expect(
+        (yield* Effect.flip(sessions.verify(`${encoded}.${signPayload(encoded, secret)}`)))._tag,
+      ).toBe("ResourceGrantsNotActivatedError");
+    }).pipe(Effect.provide(layerSessionStore())),
+  );
+
   it.effect("keys remote cookies by environment identity instead of state directory", () =>
     Effect.gen(function* () {
       const cookieName = (stateDir: string, environmentId: EnvironmentId) =>
@@ -335,10 +397,19 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
         method: "bearer-access-token",
         subject: "repository-failure",
       });
-      const websocket = yield* sessions.issueWebSocketToken(issued.sessionId);
+      const websocketIssueError = yield* Effect.flip(
+        sessions.issueWebSocketToken(issued.sessionId),
+      );
+      expect(websocketIssueError._tag).toBe("WebSocketTokenIssueError");
+      const secrets = yield* ServerSecretStore.ServerSecretStore;
+      const secret = yield* secrets.getOrCreateRandom("server-signing-key", 32);
+      const payload = JSON.parse(base64UrlDecodeUtf8(issued.token.split(".")[0]!));
+      payload.kind = "websocket";
+      const encoded = base64UrlEncode(JSON.stringify(payload));
+      const websocketToken = `${encoded}.${signPayload(encoded, secret)}`;
 
       const sessionError = yield* Effect.flip(sessions.verify(issued.token));
-      const websocketError = yield* Effect.flip(sessions.verifyWebSocketToken(websocket.token));
+      const websocketError = yield* Effect.flip(sessions.verifyWebSocketToken(websocketToken));
       const revokeError = yield* Effect.flip(sessions.revoke(issued.sessionId));
       const revokeOthersError = yield* Effect.flip(sessions.revokeAllExcept(issued.sessionId));
 

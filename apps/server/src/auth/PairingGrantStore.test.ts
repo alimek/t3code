@@ -1,9 +1,15 @@
-import { AuthAdministrativeScopes, AuthStandardClientScopes } from "@t3tools/contracts";
+import {
+  AuthAdministrativeScopes,
+  AuthAllResourceGrant,
+  AuthResourceGrant,
+  AuthStandardClientScopes,
+} from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Queue from "effect/Queue";
 import * as TestClock from "effect/testing/TestClock";
@@ -17,6 +23,8 @@ import * as AuthPairingLinks from "../persistence/AuthPairingLinks.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as PairingGrantStore from "./PairingGrantStore.ts";
+
+const decodeResourceGrant = Schema.decodeUnknownEffect(AuthResourceGrant);
 
 const layerServerConfig = (
   overrides?: Partial<
@@ -67,6 +75,27 @@ const layerPairingGrantStoreTest = (
   );
 
 it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
+  it.effect("rejects restricted and malformed issuance without persisting a credential", () =>
+    Effect.gen(function* () {
+      const grants = yield* PairingGrantStore.PairingGrantStore;
+      const restricted = yield* decodeResourceGrant({
+        version: 1,
+        projects: { mode: "all" },
+        providers: { mode: "explicit", instances: [] },
+      });
+      expect(
+        (yield* Effect.flip(grants.issueOneTimeToken({ resourceGrant: restricted })))._tag,
+      ).toBe("ResourceGrantsNotActivatedError");
+      expect(
+        (yield* Effect.flip(grants.issueOneTimeToken({ resourceGrant: {} as AuthResourceGrant })))
+          ._tag,
+      ).toBe("ResourceGrantsNotActivatedError");
+      expect(yield* grants.listActive()).toEqual([]);
+      const all = yield* grants.issueOneTimeToken({ resourceGrant: AuthAllResourceGrant });
+      expect((yield* grants.consume(all.credential)).scopes).toEqual(AuthStandardClientScopes);
+    }).pipe(Effect.provide(layerPairingGrantStore())),
+  );
+
   it.effect("issues pairing tokens in a short manual-entry format", () =>
     Effect.gen(function* () {
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;

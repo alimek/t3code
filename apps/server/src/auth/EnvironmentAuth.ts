@@ -10,6 +10,7 @@ import {
   type AuthClientMetadata,
   type AuthClientSession,
   type AuthCreatePairingCredentialInput,
+  type AuthResourceGrant,
   type AuthEnvironmentScope,
   type AuthMcpClientAccess,
   type AuthPairingLink,
@@ -492,6 +493,7 @@ export class EnvironmentAuth extends Context.Service<
       readonly ttl?: Duration.Duration;
       readonly label?: string;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+      readonly resourceGrant?: AuthResourceGrant;
       readonly subject?: string;
       readonly proofKeyThumbprint?: string;
       readonly purpose?: "startup";
@@ -511,6 +513,7 @@ export class EnvironmentAuth extends Context.Service<
       readonly ttl?: Duration.Duration;
       readonly subject?: string;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+      readonly resourceGrant?: AuthResourceGrant;
       readonly label?: string;
     }) => Effect.Effect<IssuedBearerSession, ServerAuthInternalError>;
     readonly listSessions: () => Effect.Effect<
@@ -956,12 +959,14 @@ export const make = Effect.gen(function* () {
 
   const issuePairingCredentialForSubject = (input: {
     readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+    readonly resourceGrant?: AuthResourceGrant;
     readonly subject: string;
     readonly label?: string;
     readonly purpose?: "startup";
   }) =>
     createPairingLink({
       scopes: input.scopes,
+      ...(input.resourceGrant !== undefined ? { resourceGrant: input.resourceGrant } : {}),
       subject: input.subject,
       ...(input.label ? { label: input.label } : {}),
       ...(input.purpose ? { purpose: input.purpose } : {}),
@@ -984,6 +989,7 @@ export const make = Effect.gen(function* () {
       const createdAt = yield* DateTime.now;
       const issued = yield* bootstrapCredentials.issueOneTimeToken({
         scopes: input?.scopes ?? AuthStandardClientScopes,
+        ...(input?.resourceGrant !== undefined ? { resourceGrant: input.resourceGrant } : {}),
         subject: input?.subject ?? "one-time-token",
         ...(input?.ttl ? { ttl: input.ttl } : {}),
         ...(input?.label ? { label: input.label } : {}),
@@ -1032,6 +1038,7 @@ export const make = Effect.gen(function* () {
         subject: input?.subject ?? DEFAULT_SESSION_SUBJECT,
         method: "bearer-access-token",
         scopes: input?.scopes ?? AuthAdministrativeScopes,
+        ...(input?.resourceGrant !== undefined ? { resourceGrant: input.resourceGrant } : {}),
         client: {
           ...(input?.label ? { label: input.label } : {}),
           deviceType: "bot",
@@ -1079,6 +1086,7 @@ export const make = Effect.gen(function* () {
   const issuePairingCredential: EnvironmentAuth["Service"]["issuePairingCredential"] = (input) =>
     issuePairingCredentialForSubject({
       scopes: input?.scopes ?? AuthStandardClientScopes,
+      ...(input?.resourceGrant !== undefined ? { resourceGrant: input.resourceGrant } : {}),
       subject: "one-time-token",
       ...(input?.label ? { label: input.label } : {}),
     }).pipe(Effect.withSpan("EnvironmentAuth.issuePairingCredential"));

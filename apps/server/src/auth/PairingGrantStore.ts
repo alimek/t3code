@@ -1,6 +1,7 @@
 import {
   AuthAdministrativeScopes,
   AuthStandardClientScopes,
+  type AuthResourceGrant,
   type AuthEnvironmentScope,
   type AuthPairingLink,
   type ServerAuthBootstrapMethod,
@@ -23,6 +24,10 @@ import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
 import * as AuthPairingLinks from "../persistence/AuthPairingLinks.ts";
+import {
+  ResourceGrantsNotActivatedError,
+  requireUnrestrictedResourceGrant,
+} from "./ResourceGrantGuard.ts";
 
 export interface BootstrapGrant {
   readonly method: ServerAuthBootstrapMethod;
@@ -176,6 +181,7 @@ export const BootstrapCredentialInternalError = Schema.Union([
   BootstrapCredentialConsumeError,
   BootstrapCredentialConsumeAvailableError,
   BootstrapCredentialLookupError,
+  ResourceGrantsNotActivatedError,
 ]);
 export type BootstrapCredentialInternalError = typeof BootstrapCredentialInternalError.Type;
 export const isBootstrapCredentialInternalError = Schema.is(BootstrapCredentialInternalError);
@@ -211,6 +217,7 @@ export class PairingGrantStore extends Context.Service<
     readonly issueOneTimeToken: (input?: {
       readonly ttl?: Duration.Duration;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+      readonly resourceGrant?: AuthResourceGrant;
       readonly subject?: string;
       readonly label?: string;
       readonly proofKeyThumbprint?: string;
@@ -398,6 +405,7 @@ export const make = Effect.gen(function* () {
   const issueOneTimeToken: PairingGrantStore["Service"]["issueOneTimeToken"] = Effect.fn(
     "PairingGrantStore.issueOneTimeToken",
   )(function* (input) {
+    yield* requireUnrestrictedResourceGrant(input?.resourceGrant);
     const id = yield* crypto.randomUUIDv4.pipe(
       Effect.mapError(
         (cause) => new PairingCredentialRandomGenerationError({ operation: "generate-id", cause }),
@@ -424,6 +432,7 @@ export const make = Effect.gen(function* () {
         credential,
         method: "one-time-token",
         scopes: input?.scopes ?? AuthStandardClientScopes,
+        resourceGrant: input?.resourceGrant ?? null,
         subject,
         label: input?.label ?? null,
         proofKeyThumbprint: input?.proofKeyThumbprint ?? null,
@@ -572,6 +581,7 @@ export const make = Effect.gen(function* () {
         .pipe(Effect.mapError((cause) => new BootstrapCredentialConsumeAvailableError({ cause })));
 
       if (Option.isSome(consumed)) {
+        yield* requireUnrestrictedResourceGrant(consumed.value.resourceGrant);
         yield* emitRemoved(consumed.value.id);
         return {
           method: consumed.value.method,
