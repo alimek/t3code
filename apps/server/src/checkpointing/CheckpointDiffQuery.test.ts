@@ -1,6 +1,15 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it, vi } from "@effect/vitest";
-import { CheckpointRef, CheckpointScopeId, RunId, ThreadId } from "@t3tools/contracts";
+import {
+  AuthAllResourceGrant,
+  AuthOrchestrationReadScope,
+  ProjectId,
+  CheckpointRef,
+  CheckpointScopeId,
+  RunId,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -47,6 +56,7 @@ function makeProjection(): ProjectionCheckpointContext {
 
 function layerFor(input: {
   readonly projection: Effect.Effect<ProjectionCheckpointContext, OrchestratorProjectionError>;
+  readonly roots?: ReadonlyArray<string>;
   readonly diffCheckpoints?: CheckpointStore.CheckpointStore["Service"]["diffCheckpoints"];
 }) {
   return CheckpointDiffQuery.layer.pipe(
@@ -54,6 +64,7 @@ function layerFor(input: {
       Layer.mergeAll(
         Layer.mock(ThreadManagement.ThreadManagementService)({
           getCheckpointContext: () => input.projection,
+          getReadWorkspaceRoots: () => Effect.succeed(input.roots ?? []),
         }),
         Layer.mock(CheckpointStore.CheckpointStore)({
           diffCheckpoints: input.diffCheckpoints ?? (() => Effect.succeed("diff")),
@@ -72,7 +83,10 @@ it.effect("computes V2 run diffs from projected checkpoint scopes", () => {
 
   return Effect.gen(function* () {
     const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
-    const result = yield* query.getFullThreadDiff({ threadId, toTurnCount: 2 });
+    const result = yield* query.getFullThreadDiff(trustedReadAuthority, {
+      threadId,
+      toTurnCount: 2,
+    });
 
     assert.deepEqual(result, {
       threadId,
@@ -101,7 +115,7 @@ it.effect("preserves the typed missing-thread error contract", () => {
   return Effect.gen(function* () {
     const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
     const error = yield* query
-      .getTurnDiff({ threadId, fromTurnCount: 0, toTurnCount: 1 })
+      .getTurnDiff(trustedReadAuthority, { threadId, fromTurnCount: 0, toTurnCount: 1 })
       .pipe(Effect.flip);
 
     assert.instanceOf(error, CheckpointThreadNotFoundError);
@@ -118,7 +132,7 @@ it.effect("preserves the typed unavailable-range error contract", () => {
   return Effect.gen(function* () {
     const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
     const error = yield* query
-      .getTurnDiff({ threadId, fromTurnCount: 0, toTurnCount: 3 })
+      .getTurnDiff(trustedReadAuthority, { threadId, fromTurnCount: 0, toTurnCount: 3 })
       .pipe(Effect.flip);
 
     assert.instanceOf(error, CheckpointTurnRangeUnavailableError);
@@ -156,7 +170,7 @@ it.effect("excludes ready checkpoints from rolled-back runs", () => {
   return Effect.gen(function* () {
     const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
     const error = yield* query
-      .getTurnDiff({ threadId, fromTurnCount: 0, toTurnCount: 2 })
+      .getTurnDiff(trustedReadAuthority, { threadId, fromTurnCount: 0, toTurnCount: 2 })
       .pipe(Effect.flip);
 
     assert.instanceOf(error, CheckpointTurnRangeUnavailableError);
@@ -185,7 +199,7 @@ it.effect("preserves the typed missing-baseline-ref error contract", () => {
   return Effect.gen(function* () {
     const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
     const error = yield* query
-      .getTurnDiff({ threadId, fromTurnCount: 0, toTurnCount: 2 })
+      .getTurnDiff(trustedReadAuthority, { threadId, fromTurnCount: 0, toTurnCount: 2 })
       .pipe(Effect.flip);
 
     assert.instanceOf(error, CheckpointRefUnavailableError);
@@ -194,4 +208,52 @@ it.effect("preserves the typed missing-baseline-ref error contract", () => {
       { checkpoint: "from", turnCount: 0 },
     );
   }).pipe(Effect.provide(layer));
+});
+
+const currentAuthority = {
+  current: Effect.succeed({
+    scopes: [AuthOrchestrationReadScope],
+    resourceGrant: {
+      ...AuthAllResourceGrant,
+      projects: { mode: "explicit" as const, ids: [ProjectId.make("diff-project")] },
+    },
+  }),
+};
+
+it.effect("external empty/full diffs cannot bypass thread admission", () => {
+  const diffCheckpoints = vi.fn(() => Effect.succeed("hidden diff"));
+  return Effect.gen(function* () {
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+    for (const operation of [
+      query.getTurnDiff(currentAuthority, { threadId, fromTurnCount: 0, toTurnCount: 0 }),
+      query.getFullThreadDiff(currentAuthority, { threadId, toTurnCount: 0 }),
+      query.getFullThreadDiff(currentAuthority, { threadId, toTurnCount: 2 }),
+    ]) {
+      assert.instanceOf(yield* Effect.flip(operation), CheckpointThreadNotFoundError);
+    }
+    assert.equal(diffCheckpoints.mock.calls.length, 0);
+  }).pipe(
+    Effect.provide(
+      layerFor({
+        projection: Effect.fail(new OrchestratorProjectionError({ threadId })),
+        diffCheckpoints,
+      }),
+    ),
+  );
+});
+
+it.effect("restricted diffs reject a stored cwd outside registered roots before Git runs", () => {
+  const diffCheckpoints = vi.fn(() => Effect.succeed("hidden diff"));
+  return Effect.gen(function* () {
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+    const error = yield* Effect.flip(
+      query.getFullThreadDiff(currentAuthority, { threadId, toTurnCount: 2 }),
+    );
+    assert.equal(error._tag, "CheckpointWorkspacePathMissingError");
+    assert.equal(diffCheckpoints.mock.calls.length, 0);
+  }).pipe(
+    Effect.provide(
+      layerFor({ projection: Effect.succeed(makeProjection()), roots: ["/tmp"], diffCheckpoints }),
+    ),
+  );
 });

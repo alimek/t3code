@@ -1,3 +1,4 @@
+import * as SessionStore from "../auth/SessionStore.ts";
 import { assert, it } from "@effect/vitest";
 import {
   ProjectId,
@@ -66,6 +67,12 @@ it.effect(
         const routes = HttpApiBuilder.layer(CollectionApi).pipe(
           Layer.provide(ProjectHttp.layer),
           Layer.provide(OrchestrationHttp.layer),
+          Layer.provide(
+            Layer.mock(SessionStore.SessionStore)({
+              cookieName: "fixture",
+              legacyCookieName: undefined,
+            }),
+          ),
           Layer.provide(auth),
           Layer.provide(fixture.services()),
           Layer.provide(Layer.mock(Startup.ServerRuntimeStartup)({})),

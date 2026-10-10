@@ -309,7 +309,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           dispatch,
-          getThreadRecords,
+          getThreadRecords: (_authority, ...args) => getThreadRecords(args[0]),
           sendToThread,
         } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
         Layer.mock(ProjectService.ProjectService)({

@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import {
   CommandId,
   MessageId,
@@ -89,7 +90,7 @@ const make = Effect.gen(function* () {
         );
 
   const loadThread = (scope: McpThreadInvocationScope) =>
-    threadManagement.getThreadRecords(scope.thread.threadId, []).pipe(
+    threadManagement.getThreadRecords(trustedReadAuthority, scope.thread.threadId, []).pipe(
       Effect.mapError((error) =>
         error._tag === "OrchestratorProjectionError"
           ? failure("thread_not_found", `Thread '${scope.thread.threadId}' was not found.`)

@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
@@ -95,6 +96,7 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
     const threads = yield* ThreadManagementService.ThreadManagementService;
     const messageId = MessageId.make(`message:restart-continuation:${input.sourceRunId}`);
     const projection = yield* threads.getThreadRecords(
+      trustedReadAuthority,
       input.threadId,
       ["messages", "runs", "providerTurns", "attempts"],
       { messageIds: [messageId] },
@@ -126,6 +128,7 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
       return;
     if (projection.thread.providerInstanceId !== source.providerInstanceId) return;
     const sourceRecords = yield* threads.getThreadRecords(
+      trustedReadAuthority,
       input.threadId,
       ["messages", "turnItems"],
       {

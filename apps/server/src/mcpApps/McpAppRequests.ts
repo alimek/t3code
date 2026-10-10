@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import {
   McpAppRequestError,
   type McpAppCallToolInput,
@@ -98,7 +99,7 @@ const make = Effect.gen(function* () {
   }) {
     const { app, providerThreadId } = yield* resolveApp(input);
     const projection = yield* threadManagement
-      .getThreadRecords(input.threadId, ["providerThreads"])
+      .getThreadRecords(trustedReadAuthority, input.threadId, ["providerThreads"])
       .pipe(Effect.mapError((cause) => fail(input.threadId, "request-failed", cause)));
     const providerThread = projection.providerThreads.find(
       (candidate) => candidate.id === providerThreadId,
@@ -187,7 +188,7 @@ const make = Effect.gen(function* () {
       if (current === ancestorId) return true;
       seen.add(current);
       const records: { readonly thread: OrchestrationV2AppThread } = yield* threadManagement
-        .getThreadRecords(current, [])
+        .getThreadRecords(trustedReadAuthority, current, [])
         .pipe(Effect.mapError((cause) => fail(threadId, "request-failed", cause)));
       const { lineage } = records.thread;
       current = lineage.relationshipToParent === "fork" ? lineage.parentThreadId : null;

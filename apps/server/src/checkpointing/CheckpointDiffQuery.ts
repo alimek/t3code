@@ -1,3 +1,5 @@
+import { requireRegisteredThreadPath } from "../auth/threadWorkspaceAccess.ts";
+import { type ThreadReadAuthority, trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 /**
  * CheckpointDiffQuery - Query interface for computed checkpoint diffs.
  *
@@ -42,6 +44,7 @@ export class CheckpointDiffQuery extends Context.Service<
      * Verifies checkpoint availability in both projection state and filesystem.
      */
     readonly getTurnDiff: (
+      authority: ThreadReadAuthority,
       input: OrchestrationGetTurnDiffInput,
     ) => Effect.Effect<OrchestrationGetTurnDiffResultType, CheckpointServiceError>;
 
@@ -51,6 +54,7 @@ export class CheckpointDiffQuery extends Context.Service<
      * Uses turn-diff semantics with `fromTurnCount = 0`.
      */
     readonly getFullThreadDiff: (
+      authority: ThreadReadAuthority,
       input: OrchestrationGetFullThreadDiffInput,
     ) => Effect.Effect<OrchestrationGetFullThreadDiffResult, CheckpointServiceError>;
   }
@@ -81,7 +85,7 @@ export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
 
   const getTurnDiff: CheckpointDiffQuery["Service"]["getTurnDiff"] = Effect.fn("getTurnDiff")(
-    function* (input) {
+    function* (authority, input) {
       const operation = "CheckpointDiffQuery.getTurnDiff";
       const ignoreWhitespace = input.ignoreWhitespace ?? true;
       yield* Effect.annotateCurrentSpan({
@@ -91,6 +95,18 @@ export const make = Effect.gen(function* () {
         "checkpoint.ignore_whitespace": ignoreWhitespace,
       });
 
+      if (authority === trustedReadAuthority && input.fromTurnCount === input.toTurnCount)
+        return buildTurnDiffResult(input, "");
+      const projection = yield* threads.getCheckpointContext(authority, input.threadId).pipe(
+        Effect.mapError(
+          () =>
+            new CheckpointThreadNotFoundError({
+              operation,
+              threadId: input.threadId,
+            }),
+        ),
+        Effect.withSpan("checkpoint.turnDiff.lookupContext"),
+      );
       if (input.fromTurnCount === input.toTurnCount) {
         const emptyDiff = buildTurnDiffResult(input, "");
         if (!isTurnDiffResult(emptyDiff)) {
@@ -102,16 +118,6 @@ export const make = Effect.gen(function* () {
         return emptyDiff;
       }
 
-      const projection = yield* threads.getCheckpointContext(input.threadId).pipe(
-        Effect.mapError(
-          () =>
-            new CheckpointThreadNotFoundError({
-              operation,
-              threadId: input.threadId,
-            }),
-        ),
-        Effect.withSpan("checkpoint.turnDiff.lookupContext"),
-      );
       const completedRunIds = new Set(
         projection.runs.filter((run) => run.status === "completed").map((run) => run.id),
       );
@@ -182,6 +188,12 @@ export const make = Effect.gen(function* () {
         });
       }
 
+      yield* requireRegisteredThreadPath(authority, input.threadId, toScope.cwd).pipe(
+        Effect.provideService(ThreadManagement.ThreadManagementService, threads),
+        Effect.mapError(
+          () => new CheckpointWorkspacePathMissingError({ operation, threadId: input.threadId }),
+        ),
+      );
       const diff = yield* checkpointStore
         .diffCheckpoints({
           cwd: toScope.cwd,
@@ -206,7 +218,7 @@ export const make = Effect.gen(function* () {
 
   const getFullThreadDiff: CheckpointDiffQuery["Service"]["getFullThreadDiff"] = Effect.fn(
     "CheckpointDiffQuery.getFullThreadDiff",
-  )(function* (input) {
+  )(function* (authority, input) {
     const operation = "CheckpointDiffQuery.getFullThreadDiff";
     const ignoreWhitespace = input.ignoreWhitespace ?? true;
     yield* Effect.annotateCurrentSpan({
@@ -217,25 +229,7 @@ export const make = Effect.gen(function* () {
       "checkpoint.diff_kind": "full-thread",
     });
 
-    if (input.toTurnCount === 0) {
-      const emptyDiff = buildTurnDiffResult(
-        {
-          threadId: input.threadId,
-          fromTurnCount: 0,
-          toTurnCount: 0,
-        },
-        "",
-      );
-      if (!isTurnDiffResult(emptyDiff)) {
-        return yield* new CheckpointDiffResultInvalidError({
-          operation,
-          threadId: input.threadId,
-        });
-      }
-      return emptyDiff satisfies OrchestrationGetFullThreadDiffResult;
-    }
-
-    const turnDiff = yield* getTurnDiff({
+    const turnDiff = yield* getTurnDiff(authority, {
       threadId: input.threadId,
       fromTurnCount: 0,
       toTurnCount: input.toTurnCount,

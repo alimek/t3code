@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 /**
  * SecretRequests - secrets an agent asks the user for.
  *
@@ -102,7 +103,7 @@ const make = Effect.gen(function* () {
         "secret_request.answer": input.answer.type,
       });
       const records = yield* threadManagement
-        .getThreadRecords(input.threadId, ["runs", "turnItems"], {
+        .getThreadRecords(trustedReadAuthority, input.threadId, ["runs", "turnItems"], {
           turnItemTypes: ["secret_request"],
           messageRoles: [],
         })
@@ -171,7 +172,7 @@ const make = Effect.gen(function* () {
       // the checks above and this record, the record changed nothing. Nobody
       // will receive the ref, so the value is deleted rather than left to expire.
       const recorded = yield* threadManagement
-        .getThreadRecords(input.threadId, ["turnItems"], {
+        .getThreadRecords(trustedReadAuthority, input.threadId, ["turnItems"], {
           turnItemTypes: ["secret_request"],
           messageRoles: [],
         })

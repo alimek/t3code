@@ -131,7 +131,7 @@ it("readThread prefers activity-run status over a newer cancelled queued run", a
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
-          getThreadRecords: (threadId) =>
+          getThreadRecords: (_authority, threadId) =>
             threadId === parentThreadId
               ? Effect.succeed(projection)
               : Effect.die(`unexpected thread ${threadId}`),
@@ -196,7 +196,7 @@ it("readThread prefers waiting activity status over a newer cancelled queued run
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
-          getThreadRecords: (threadId) =>
+          getThreadRecords: (_authority, threadId) =>
             threadId === parentThreadId
               ? Effect.succeed(projection)
               : Effect.die(`unexpected thread ${threadId}`),
@@ -318,7 +318,7 @@ it("taskStatus returns task.providerInstanceId rather than the driver kind", asy
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
-          getThreadRecords: (threadId) => {
+          getThreadRecords: (_authority, threadId) => {
             if (threadId === parentThreadId) return Effect.succeed(parentProjection);
             if (threadId === childThreadId) return Effect.succeed(childProjection);
             return Effect.die(`unexpected thread ${threadId}`);
@@ -415,7 +415,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
-          getThreadRecords: (threadId) => {
+          getThreadRecords: (_authority, threadId) => {
             if (threadId === parentThreadId) return Effect.succeed(parentProjection);
             if (threadId === foreignThreadId) return Effect.succeed(foreignProjection(threadId));
             return Effect.die(`unexpected thread ${threadId}`);
@@ -426,7 +426,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
                 ? (foreignProjection(threadId).thread as unknown as OrchestrationV2ThreadShell)
                 : null,
             ),
-          getTimelinePage: (threadId) =>
+          getTimelinePage: (_authority, threadId) =>
             Effect.succeed({
               items: foreignProjection(threadId).visibleTurnItems,
               totalItems: 1,

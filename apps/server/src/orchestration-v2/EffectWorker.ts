@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { CommandId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -217,6 +218,7 @@ export const layerExecutor: Layer.Layer<
                     if (effect.request.type !== "provider-turn.steer") return;
                     const messageId = effect.request.messageId;
                     const projection = yield* threads.getThreadRecords(
+                      trustedReadAuthority,
                       effect.threadId,
                       ["messages", "runs"],
                       { messageIds: [effect.request.messageId] },
@@ -241,6 +243,7 @@ export const layerExecutor: Layer.Layer<
                       return yield* error;
                     }
                     const projection = yield* threads.getThreadRecords(
+                      trustedReadAuthority,
                       effect.threadId,
                       ["messages", "runs"],
                       { messageIds: [effect.request.messageId] },

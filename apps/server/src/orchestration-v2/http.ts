@@ -1,3 +1,5 @@
+import * as SessionStore from "../auth/SessionStore.ts";
+import { threadReadDenied, type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
 import {
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
@@ -38,7 +40,8 @@ function isThreadNotFound(error: unknown): boolean {
   return (
     Predicate.hasProperty(error, "cause") &&
     Predicate.hasProperty(error.cause, "_tag") &&
-    error.cause._tag === "ProjectionStoreThreadNotFoundError"
+    (error.cause._tag === "ProjectionStoreThreadNotFoundError" ||
+      error.cause._tag === "EnvironmentAuthorizationError")
   );
 }
 
@@ -53,6 +56,7 @@ export const layer = HttpApiBuilder.group(
   "orchestration",
   Effect.fnUntraced(function* (handlers) {
     const sql = yield* SqlClient.SqlClient;
+    const sessions = yield* SessionStore.SessionStore;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
@@ -95,13 +99,14 @@ export const layer = HttpApiBuilder.group(
     });
 
     const loadThreadSnapshot = Effect.fn("http.orchestration.loadThreadSnapshot")(function* (
-      threadId: Parameters<typeof threadManagement.getThreadSnapshot>[0],
+      authority: ThreadReadAuthority,
+      threadId: Parameters<typeof threadManagement.getThreadSnapshot>[1],
       failureReason:
         | "orchestration_thread_snapshot_failed"
         | "orchestration_thread_bounded_snapshot_failed"
         | "orchestration_thread_history_failed",
     ) {
-      return yield* threadManagement.getThreadSnapshot(threadId).pipe(
+      return yield* threadManagement.getThreadSnapshot(authority, threadId).pipe(
         Effect.map((snapshot) => ({
           ...snapshot,
           projection: projectThreadProjectionForWire(snapshot.projection),
@@ -119,16 +124,17 @@ export const layer = HttpApiBuilder.group(
 
     const loadThreadSnapshotWindow = Effect.fn("http.orchestration.loadThreadSnapshotWindow")(
       function* (
-        threadId: Parameters<typeof threadManagement.getThreadSnapshot>[0],
+        authority: ThreadReadAuthority,
+        threadId: Parameters<typeof threadManagement.getThreadSnapshot>[1],
         anchorItemId?: Parameters<
           typeof threadManagement.getThreadSnapshotWindow
-        >[1]["anchorItemId"],
+        >[2]["anchorItemId"],
         anchorThreadId?: Parameters<
           typeof threadManagement.getThreadSnapshotWindow
-        >[1]["anchorThreadId"],
+        >[2]["anchorThreadId"],
       ) {
         return yield* threadManagement
-          .getThreadSnapshotWindow(threadId, {
+          .getThreadSnapshotWindow(authority, threadId, {
             rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
             userTurnLimit:
               anchorItemId === undefined
@@ -172,8 +178,17 @@ export const layer = HttpApiBuilder.group(
         "threadSnapshot",
         Effect.fn("environment.orchestration.threadSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const principal = yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const authority: ThreadReadAuthority = {
+            current: sessions
+              .getAuthority(principal.sessionId, {
+                ...principal,
+                scopes: [...principal.scopes],
+              })
+              .pipe(Effect.mapError(() => threadReadDenied())),
+          };
           const snapshot = yield* loadThreadSnapshot(
+            authority,
             args.params.threadId,
             "orchestration_thread_snapshot_failed",
           ).pipe(traceLocalHandlerWork);
@@ -187,8 +202,16 @@ export const layer = HttpApiBuilder.group(
         "threadBoundedSnapshot",
         Effect.fn("environment.orchestration.threadBoundedSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          const snapshot = yield* loadThreadSnapshotWindow(args.params.threadId).pipe(
+          const principal = yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const authority: ThreadReadAuthority = {
+            current: sessions
+              .getAuthority(principal.sessionId, {
+                ...principal,
+                scopes: [...principal.scopes],
+              })
+              .pipe(Effect.mapError(() => threadReadDenied())),
+          };
+          const snapshot = yield* loadThreadSnapshotWindow(authority, args.params.threadId).pipe(
             traceLocalHandlerWork,
           );
           const bounded = buildBoundedThreadProjection({
@@ -208,7 +231,15 @@ export const layer = HttpApiBuilder.group(
         "threadHistoryPage",
         Effect.fn("environment.orchestration.threadHistoryPage")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const principal = yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const authority: ThreadReadAuthority = {
+            current: sessions
+              .getAuthority(principal.sessionId, {
+                ...principal,
+                scopes: [...principal.scopes],
+              })
+              .pipe(Effect.mapError(() => threadReadDenied())),
+          };
           try {
             decodeThreadHistoryCursor(args.query.cursor);
           } catch (cause) {
@@ -218,6 +249,7 @@ export const layer = HttpApiBuilder.group(
           }
           return yield* threadManagement
             .getThreadHistoryPage(
+              authority,
               args.params.threadId,
               args.query.cursor,
               args.query.throughEntryId,

@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { assert, describe, it, vi } from "@effect/vitest";
 import {
   type ChatAttachment,
@@ -54,7 +55,10 @@ function makeHarness(
     layerRegistry,
     { databaseLayer: layerDatabase, runEffectWorker: false },
   );
-  const layerThreadManagement = ThreadManagement.layer.pipe(Layer.provide(layerOrchestrator));
+  const layerThreadManagement = ThreadManagement.layer.pipe(
+    Layer.provide(layerOrchestrator),
+    Layer.provide(layerDatabase),
+  );
   const layerOutbox = EffectOutbox.layer.pipe(Layer.provide(layerDatabase));
   const generateThreadTitle = vi.fn(
     options.generateTitle ?? (() => Effect.succeed({ title: "Generated title" })),
@@ -236,7 +240,7 @@ describe("ThreadTitleRegenerationService", () => {
         });
 
         const firstRequest = yield* armRegeneration({ command: "command:title:arm:1", threadId });
-        const armed = yield* threads.getThreadProjection(threadId);
+        const armed = yield* threads.getThreadProjection(trustedReadAuthority, threadId);
         assert.equal(armed.thread.titleRegeneration?.requestId, firstRequest);
         assert.deepEqual(
           (yield* outbox.listByCommandId(firstRequest)).map((effect) => effect.request),
@@ -249,7 +253,7 @@ describe("ThreadTitleRegenerationService", () => {
           threadId,
           regenerateTitle: false,
         });
-        const abandoned = yield* threads.getThreadProjection(threadId);
+        const abandoned = yield* threads.getThreadProjection(trustedReadAuthority, threadId);
         assert.isNotOk(abandoned.thread.titleRegeneration);
 
         yield* armRegeneration({ command: "command:title:arm:2", threadId });
@@ -259,7 +263,7 @@ describe("ThreadTitleRegenerationService", () => {
           threadId,
           title: "Manual title",
         });
-        const renamed = yield* threads.getThreadProjection(threadId);
+        const renamed = yield* threads.getThreadProjection(trustedReadAuthority, threadId);
         assert.equal(renamed.thread.title, "Manual title");
         assert.isNotOk(renamed.thread.titleRegeneration);
       }).pipe(Effect.provide(harness.layer));
@@ -289,7 +293,7 @@ describe("ThreadTitleRegenerationService", () => {
         });
 
         assert.equal(harness.generateThreadTitle.mock.calls.length, 0);
-        const projection = yield* threads.getThreadProjection(threadId);
+        const projection = yield* threads.getThreadProjection(trustedReadAuthority, threadId);
         assert.equal(projection.thread.title, "Seed title");
         assert.equal(projection.thread.titleRegeneration?.requestId, currentRequest);
       }).pipe(Effect.provide(harness.layer));
@@ -321,7 +325,7 @@ describe("ThreadTitleRegenerationService", () => {
         assert.equal(call?.previousTitle, "Seed title");
         assert.equal(call?.cwd, "/repo");
         assert.include(call?.message, "USER:\nInvestigate the flaky login test");
-        const projection = yield* threads.getThreadProjection(threadId);
+        const projection = yield* threads.getThreadProjection(trustedReadAuthority, threadId);
         assert.equal(projection.thread.title, "Fresh title");
         assert.isNotOk(projection.thread.titleRegeneration);
       }).pipe(Effect.provide(harness.layer));
@@ -349,7 +353,7 @@ describe("ThreadTitleRegenerationService", () => {
 
         yield* titleRegeneration.execute({ threadId, requestId, kind: { type: "regenerate" } });
 
-        const projection = yield* threads.getThreadProjection(threadId);
+        const projection = yield* threads.getThreadProjection(trustedReadAuthority, threadId);
         assert.equal(projection.thread.title, "Seed title");
         assert.isNotOk(projection.thread.titleRegeneration);
       }).pipe(Effect.provide(harness.layer));
@@ -380,7 +384,7 @@ describe("ThreadTitleRegenerationService", () => {
 
         yield* titleRegeneration.execute({ threadId, requestId, kind: { type: "regenerate" } });
 
-        const projection = yield* threads.getThreadProjection(threadId);
+        const projection = yield* threads.getThreadProjection(trustedReadAuthority, threadId);
         assert.equal(projection.thread.title, "Seed title");
         assert.isNotOk(projection.thread.titleRegeneration);
       }).pipe(Effect.provide(harness.layer));
@@ -409,7 +413,7 @@ describe("ThreadTitleRegenerationService", () => {
         yield* titleRegeneration.execute({ threadId, requestId, kind: { type: "regenerate" } });
 
         assert.equal(harness.generateThreadTitle.mock.calls.length, 1);
-        const projection = yield* threads.getThreadProjection(threadId);
+        const projection = yield* threads.getThreadProjection(trustedReadAuthority, threadId);
         assert.equal(projection.thread.title, "Seed title");
         assert.isNotOk(projection.thread.titleRegeneration);
       }).pipe(Effect.provide(harness.layer));
@@ -435,7 +439,7 @@ describe("ThreadTitleRegenerationService", () => {
         });
 
         assert.equal(harness.generateThreadTitle.mock.calls.length, 0);
-        const projection = yield* threads.getThreadProjection(threadId);
+        const projection = yield* threads.getThreadProjection(trustedReadAuthority, threadId);
         assert.equal(projection.thread.title, "Seed title");
         assert.isNotOk(projection.thread.titleRegeneration);
       }).pipe(Effect.provide(harness.layer));
@@ -494,7 +498,7 @@ it.effect.each(["success", "exhausted", "stale", "interrupted"] as const)(
           yield* Fiber.join(fiber);
         }
         assert.equal(attempts, outcome === "success" || outcome === "exhausted" ? 3 : 1);
-        const projection = yield* threads.getThreadProjection(threadId);
+        const projection = yield* threads.getThreadProjection(trustedReadAuthority, threadId);
         assert.equal(
           projection.thread.title,
           outcome === "success"

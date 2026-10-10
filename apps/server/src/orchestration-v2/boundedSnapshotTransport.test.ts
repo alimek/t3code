@@ -1,7 +1,10 @@
+import * as SessionStore from "../auth/SessionStore.ts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { assert, describe, it } from "@effect/vitest";
 import {
   AuthOrchestrationReadScope,
   AuthSessionId,
+  AuthAllResourceGrant,
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
   EnvironmentHttpApi,
@@ -69,8 +72,8 @@ const management = Layer.unwrap(
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     return Layer.mock(ThreadManagementService.ThreadManagementService)({
       ensureLegacyTranscript: () => Effect.void,
-      getThreadSnapshot: (id) => projections.getThreadSnapshot(id).pipe(Effect.orDie),
-      getThreadSnapshotWindow: (id, options) =>
+      getThreadSnapshot: (_authority, id) => projections.getThreadSnapshot(id).pipe(Effect.orDie),
+      getThreadSnapshotWindow: (_authority, id, options) =>
         projections.getThreadSnapshotWindow(id, options).pipe(Effect.orDie),
       streamStoredEventsFrom: () => Stream.empty,
     });
@@ -237,6 +240,20 @@ const withHttp = <A>(use: (get: (path: string) => Promise<Response>) => Promise<
     const context = yield* Effect.context<Layer.Success<typeof TestLayer>>();
     const appLayer = HttpApiBuilder.layer(OrchestrationApi).pipe(
       Layer.provide(OrchestrationHttp.layer),
+      Layer.provide(
+        Layer.mock(SessionStore.SessionStore)({
+          cookieName: "fixture",
+          legacyCookieName: undefined,
+          getAuthority: (_sid, session) =>
+            Effect.succeed({
+              deviceId: AuthSessionId.make("transport-fixture"),
+              authorityRevision: 0,
+              resourceGrant: AuthAllResourceGrant,
+              scopes: session?.scopes ?? [],
+              expiresAt: DateTime.makeUnsafe("2100-01-01T00:00:00Z"),
+            }),
+        }),
+      ),
       Layer.provide(auth),
       Layer.provide(Layer.succeedContext(context)),
       Layer.provide(NodeHttpPlatform.layer),
@@ -261,8 +278,8 @@ const withHttp = <A>(use: (get: (path: string) => Promise<Response>) => Promise<
     );
   });
 
-const firstSnapshot = (input: Parameters<typeof subscribeOrchestrationV2Thread>[0]) =>
-  subscribeOrchestrationV2Thread(input).pipe(
+const firstSnapshot = (input: Parameters<typeof subscribeOrchestrationV2Thread>[1]) =>
+  subscribeOrchestrationV2Thread(trustedReadAuthority, input).pipe(
     Effect.flatMap((stream) => Stream.runHead(stream)),
     Effect.map((head) => {
       if (head._tag !== "Some" || head.value.kind !== "snapshot") throw new Error("No snapshot");

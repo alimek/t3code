@@ -89,7 +89,7 @@ function makeLayer(input: {
           getTurnItem: () => Effect.succeed(input.item),
         }),
         Layer.mock(ThreadManagementService.ThreadManagementService)({
-          getThreadRecords: (id: ThreadId) =>
+          getThreadRecords: (_authority, id: ThreadId) =>
             Effect.succeed({
               // A fork of the app's thread, and an unrelated thread.
               thread: {

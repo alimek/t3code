@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
@@ -117,7 +118,10 @@ function makeHarness(options: HarnessOptions = {}) {
     layerRegistry,
     { databaseLayer: layerDatabase, runEffectWorker: false },
   );
-  const layerThreadManagement = ThreadManagement.layer.pipe(Layer.provide(layerOrchestrator));
+  const layerThreadManagement = ThreadManagement.layer.pipe(
+    Layer.provide(layerOrchestrator),
+    Layer.provide(layerDatabase),
+  );
   const layerReceipts = CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase));
   const layerOutbox = EffectOutbox.layer.pipe(Layer.provide(layerDatabase));
   const createWorktree = vi.fn(
@@ -343,7 +347,7 @@ it.effect.each(
         projectThreads.find((candidate) => candidate.id === existing?.threadId) ??
         projectThreads[0];
       assert.isDefined(thread);
-      const projection = yield* threads.getThreadProjection(thread!.id);
+      const projection = yield* threads.getThreadProjection(trustedReadAuthority, thread!.id);
       // Encoding the persisted projection exercises both message and turn-item wire schemas.
       const wire = yield* encodeThreadProjection(projection);
       assert.equal(wire.messages[0]?.text, task.prompt);
@@ -387,7 +391,7 @@ it.effect("retains automation and sender attribution while a message waits in th
       creationSource: "mcp",
     });
     assert.equal(queued.delivery, "queued");
-    const projection = yield* threads.getThreadProjection(launched.threadId);
+    const projection = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
     const message = projection.messages.find((item) => item.id === queued.message.id);
     assert.equal(message?.scheduledTaskId, scheduledTaskId);
     assert.equal(message?.senderThreadId, senderThreadId);
@@ -433,7 +437,7 @@ it.effect("returns a visible preparing message while provisioning is still block
         "running",
       );
       yield* Deferred.await(worktreeEntered);
-      let current = yield* threads.getThreadProjection(launched.threadId);
+      let current = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
       assert.equal(
         current.turnItems.find((item) => item.type === "command_execution")?.title,
         "Preparing worktree",
@@ -443,12 +447,12 @@ it.effect("returns a visible preparing message while provisioning is still block
         Effect.timeoutOption(Duration.seconds(2)),
       );
       if (Option.isNone(entered)) {
-        current = yield* threads.getThreadProjection(launched.threadId);
+        current = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
         assert.fail(
           `Setup was not reached; run=${current.runs[0]?.status ?? "missing"}, worklog=${current.turnItems.find((item) => item.type === "command_execution")?.title ?? "missing"}.`,
         );
       }
-      current = yield* threads.getThreadProjection(launched.threadId);
+      current = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
       assert.equal(
         current.turnItems.find((item) => item.type === "command_execution")?.title,
         "Starting setup script",
@@ -549,7 +553,10 @@ it.effect("enqueues provider work only after setup has been initiated", () =>
           .listByCommandId(CommandId.make("command:launch:release:release"))
           .pipe(Effect.map((effects) => effects.length === 1)),
       );
-      const projection = yield* threads.getThreadProjection(launched.threadId);
+      const projection = yield* threads.getThreadProjection(
+        trustedReadAuthority,
+        launched.threadId,
+      );
       assert.equal(projection.runs[0]?.status, "starting");
       assert.equal(projection.checkpointScopes[0]?.cwd, "/repo-worktrees/feature");
       assert.equal(
@@ -600,16 +607,17 @@ it.effect(
         assert.equal(followUp.delivery, "queued");
         assert.equal(followUp.run.status, "queued");
         assert.equal(
-          (yield* threads.getThreadRecords(launched.threadId, ["nodes"])).nodes.find(
-            (node) => node.runId === followUp.run.id && node.kind === "root_turn",
-          )?.checkpointScopeId,
+          (yield* threads.getThreadRecords(trustedReadAuthority, launched.threadId, [
+            "nodes",
+          ])).nodes.find((node) => node.runId === followUp.run.id && node.kind === "root_turn")
+            ?.checkpointScopeId,
           null,
         );
 
         yield* Deferred.succeed(failSetup, undefined);
         yield* waitUntil(() =>
           threads
-            .getThreadProjection(launched.threadId)
+            .getThreadProjection(trustedReadAuthority, launched.threadId)
             .pipe(
               Effect.map(
                 (projection) =>
@@ -618,7 +626,10 @@ it.effect(
             ),
         );
 
-        const projection = yield* threads.getThreadProjection(launched.threadId);
+        const projection = yield* threads.getThreadProjection(
+          trustedReadAuthority,
+          launched.threadId,
+        );
         const rootNode = projection.nodes.find(
           (node) => node.runId === followUp.run.id && node.kind === "root_turn",
         );
@@ -650,7 +661,8 @@ it.effect.each([" /COMPACT ", "/logout"])(
           generateTitle: true,
         });
         assert.isUndefined(
-          (yield* threads.getThreadProjection(launched.threadId)).thread.titleRegeneration,
+          (yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId)).thread
+            .titleRegeneration,
         );
         assert.isFalse(
           (yield* outbox.listByCommandId(CommandId.make("compact-title:initial-message"))).some(
@@ -671,8 +683,8 @@ it.effect.each([" /COMPACT ", "/logout"])(
           dispatchMode: { type: "defer_start" },
         });
         assert.equal(
-          (yield* threads.getThreadProjection(launched.threadId)).thread.titleRegeneration
-            ?.requestId,
+          (yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId)).thread
+            .titleRegeneration?.requestId,
           commandId,
         );
         assert.deepEqual(
@@ -737,7 +749,7 @@ it.effect("keeps native maintenance commands out of steering and restart message
             message: scenario.first,
           }),
         );
-        const before = yield* threads.getThreadProjection(launched.threadId);
+        const before = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
         const targetRun = before.runs[0];
         if (targetRun === undefined) return yield* Effect.die("Launch must create a run");
         const commandId = CommandId.make(`${scenario.name}:message`);
@@ -758,7 +770,7 @@ it.effect("keeps native maintenance commands out of steering and restart message
           String(failure.cause).toLowerCase(),
           scenario.name.includes("logout") ? "sign" : "context compaction",
         );
-        const after = yield* threads.getThreadProjection(launched.threadId);
+        const after = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
         assert.deepEqual(after.messages, before.messages);
         assert.deepEqual(after.thread.titleRegeneration, before.thread.titleRegeneration);
         assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
@@ -792,7 +804,10 @@ it.effect("arms durable title generation after accepting the first message", () 
       const launched = yield* launches.launch(input);
       const generationCommandId = CommandId.make("command:launch:title-generation:initial-message");
 
-      const projection = yield* threads.getThreadProjection(launched.threadId);
+      const projection = yield* threads.getThreadProjection(
+        trustedReadAuthority,
+        launched.threadId,
+      );
       assert.equal(projection.thread.title, "Generate my title");
       assert.equal(projection.thread.titleRegeneration?.requestId, generationCommandId);
       assert.deepEqual(
@@ -809,7 +824,7 @@ it.effect("arms durable title generation after accepting the first message", () 
         requestId: generationCommandId,
         kind: { type: "initial", messageId: MessageId.make("Generate my title:id") },
       });
-      const generated = yield* threads.getThreadProjection(launched.threadId);
+      const generated = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
       assert.equal(generated.thread.title, "Generated title");
       assert.deepEqual(
         harness.generateThreadTitle.mock.calls[0]?.[0]?.modelSelection,
@@ -832,7 +847,10 @@ it.effect("arms durable title generation after accepting the first message", () 
         requestId: manualRequestId,
         kind: { type: "regenerate" },
       });
-      const regenerated = yield* threads.getThreadProjection(launched.threadId);
+      const regenerated = yield* threads.getThreadProjection(
+        trustedReadAuthority,
+        launched.threadId,
+      );
       assert.equal(regenerated.thread.title, "Regenerated title");
       assert.equal(
         harness.generateThreadTitle.mock.calls[1]?.[0]?.previousTitle,
@@ -845,7 +863,7 @@ it.effect("arms durable title generation after accepting the first message", () 
         threadId: launched.threadId,
         title: "Keep my title",
       });
-      const renamed = yield* threads.getThreadProjection(launched.threadId);
+      const renamed = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
       yield* TestClock.adjust(Duration.seconds(1));
       yield* threads.dispatch({
         type: "thread.title.regeneration.complete",
@@ -854,7 +872,10 @@ it.effect("arms durable title generation after accepting the first message", () 
         requestId: generationCommandId,
         title: "Stale generated title",
       });
-      const afterStaleCompletion = yield* threads.getThreadProjection(launched.threadId);
+      const afterStaleCompletion = yield* threads.getThreadProjection(
+        trustedReadAuthority,
+        launched.threadId,
+      );
       assert.equal(afterStaleCompletion.thread.title, "Keep my title");
       assert.equal(
         DateTime.toEpochMillis(afterStaleCompletion.thread.updatedAt),
@@ -906,7 +927,7 @@ it.effect("does not update a reused thread title when the initial message is rej
         .pipe(Effect.exit);
 
       assert.isTrue(Exit.isFailure(failed));
-      const projection = yield* threads.getThreadProjection(threadId);
+      const projection = yield* threads.getThreadProjection(trustedReadAuthority, threadId);
       assert.equal(projection.thread.title, "Original title");
       assert.isUndefined(projection.thread.titleRegeneration);
       assert.isEmpty(projection.messages);
@@ -1087,7 +1108,8 @@ it.effect("runs a Scratch thread launched at the root in its own folder", () =>
       assert.isTrue(retried.resumed);
       assert.lengthOf(claimed, 1);
       assert.equal(
-        (yield* threads.getThreadProjection(launched.threadId)).thread.worktreePath,
+        (yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId)).thread
+          .worktreePath,
         "/scratch/folder-1",
       );
 
@@ -1126,7 +1148,7 @@ it.effect("names the worktree itself when the client provides no branch", () =>
       );
       yield* waitUntil(() =>
         threads
-          .getThreadProjection(launched.threadId)
+          .getThreadProjection(trustedReadAuthority, launched.threadId)
           .pipe(Effect.map((projection) => projection.thread.branch === "generated-branch")),
       );
     }).pipe(Effect.provide(harness.layer));
@@ -1163,17 +1185,17 @@ it.effect("renames a temporary t3/<hash> branch off the provisioning critical pa
       assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "t3/abcd1234");
       yield* waitUntil(() =>
         threads
-          .getThreadProjection(launched.threadId)
+          .getThreadProjection(trustedReadAuthority, launched.threadId)
           .pipe(Effect.map((projection) => projection.runs[0]?.status === "starting")),
       );
       assert.equal(
-        (yield* threads.getThreadProjection(launched.threadId)).thread.branch,
+        (yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId)).thread.branch,
         "t3/abcd1234",
       );
       yield* Deferred.succeed(allowBranchName, undefined);
       yield* waitUntil(() =>
         threads
-          .getThreadProjection(launched.threadId)
+          .getThreadProjection(trustedReadAuthority, launched.threadId)
           .pipe(Effect.map((projection) => projection.thread.branch === "generated-branch")),
       );
       assert.deepEqual(harness.renameBranch.mock.calls[0]?.[0], {
@@ -1207,7 +1229,7 @@ it.effect("provisions under t3-<hash> when a plain t3 branch blocks t3/*", () =>
       );
       yield* waitUntil(() =>
         threads
-          .getThreadProjection(launched.threadId)
+          .getThreadProjection(trustedReadAuthority, launched.threadId)
           .pipe(Effect.map((projection) => projection.thread.branch === "generated-branch")),
       );
       assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "t3-abcd1234");
@@ -1260,12 +1282,12 @@ it.effect("keeps the temporary branch when branch generation fails", () =>
       assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "t3/abcd1234");
       yield* waitUntil(() =>
         threads
-          .getThreadProjection(launched.threadId)
+          .getThreadProjection(trustedReadAuthority, launched.threadId)
           .pipe(Effect.map((projection) => projection.runs[0]?.status === "starting")),
       );
       assert.equal(harness.renameBranch.mock.calls.length, 0);
       assert.equal(
-        (yield* threads.getThreadProjection(launched.threadId)).thread.branch,
+        (yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId)).thread.branch,
         "t3/abcd1234",
       );
     }).pipe(Effect.provide(harness.layer));
@@ -1292,7 +1314,7 @@ it.effect("renames a temporary branch on an existing worktree to a generated nam
       );
       yield* waitUntil(() =>
         threads
-          .getThreadProjection(launched.threadId)
+          .getThreadProjection(trustedReadAuthority, launched.threadId)
           .pipe(Effect.map((projection) => projection.thread.branch === "generated-branch")),
       );
       assert.deepEqual(harness.renameBranch.mock.calls[0]?.[0], {
@@ -1336,7 +1358,7 @@ it.effect("shows the fetch diagnosis when preparing a worktree from origin fails
       ),
       Stream.runHead,
     );
-    const projection = yield* threads.getThreadProjection(launched.threadId);
+    const projection = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
     assert.equal(projection.messages[0]?.text, "Start from origin");
     assert.equal(projection.runs[0]?.status, "failed");
     assert.equal(projection.thread.worktreePath, null);
@@ -1383,10 +1405,10 @@ it.effect("retries a failed workspace preparation on the same run", () => {
     );
     yield* waitUntil(() =>
       threads
-        .getThreadProjection(launched.threadId)
+        .getThreadProjection(trustedReadAuthority, launched.threadId)
         .pipe(Effect.map((projection) => projection.runs[0]?.status === "failed")),
     );
-    const failed = yield* threads.getThreadProjection(launched.threadId);
+    const failed = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
     const runId = failed.runs[0]!.id;
     assert.equal(
       failed.turnItems.find((item) => item.type === "error")?.failure.code,
@@ -1404,7 +1426,7 @@ it.effect("retries a failed workspace preparation on the same run", () => {
         .listByCommandId(CommandId.make("command:launch:retry:1:release"))
         .pipe(Effect.map((effects) => effects.length === 1)),
     );
-    const retried = yield* threads.getThreadProjection(launched.threadId);
+    const retried = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
     assert.equal(retried.runs.length, 1);
     assert.equal(retried.runs[0]?.status, "starting");
     assert.equal(retried.thread.worktreePath, "/repo-worktrees/feature");
@@ -1446,7 +1468,7 @@ it.effect("a retry reuses a recorded worktree without undoing its branch rename"
     );
     yield* waitUntil(() =>
       threads
-        .getThreadProjection(launched.threadId)
+        .getThreadProjection(trustedReadAuthority, launched.threadId)
         .pipe(
           Effect.map(
             (projection) =>
@@ -1455,7 +1477,7 @@ it.effect("a retry reuses a recorded worktree without undoing its branch rename"
           ),
         ),
     );
-    const failed = yield* threads.getThreadProjection(launched.threadId);
+    const failed = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
     assert.equal(failed.thread.worktreePath, "/repo-worktrees/feature");
 
     yield* launches.retryPreparation({
@@ -1468,7 +1490,7 @@ it.effect("a retry reuses a recorded worktree without undoing its branch rename"
         .listByCommandId(CommandId.make("command:launch:reuse:retry:release"))
         .pipe(Effect.map((effects) => effects.length === 1)),
     );
-    const retried = yield* threads.getThreadProjection(launched.threadId);
+    const retried = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
     assert.equal(retried.runs[0]?.status, "starting");
     // The retry neither checks out again nor puts back the temporary branch.
     assert.equal(harness.createWorktree.mock.calls.length, 1);
@@ -1506,10 +1528,10 @@ it.effect("removes a worktree that failed before the thread recorded it", () => 
     );
     yield* waitUntil(() =>
       threads
-        .getThreadProjection(launched.threadId)
+        .getThreadProjection(trustedReadAuthority, launched.threadId)
         .pipe(Effect.map((projection) => projection.runs[0]?.status === "failed")),
     );
-    const projection = yield* threads.getThreadProjection(launched.threadId);
+    const projection = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
     // Unrecorded, so a retry would create a second checkout beside it.
     assert.equal(projection.thread.worktreePath, null);
     assert.deepEqual(
@@ -1541,10 +1563,13 @@ it.effect.each(["worktree", "setup"] as const)(
         const launched = yield* launches.launch(input);
         yield* waitUntil(() =>
           threads
-            .getThreadProjection(launched.threadId)
+            .getThreadProjection(trustedReadAuthority, launched.threadId)
             .pipe(Effect.map((projection) => projection.runs[0]?.status === "failed")),
         );
-        const projection = yield* threads.getThreadProjection(launched.threadId);
+        const projection = yield* threads.getThreadProjection(
+          trustedReadAuthority,
+          launched.threadId,
+        );
         assert.equal(projection.messages[0]?.text, `Fail during ${failurePoint}`);
         assert.equal(projection.runs[0]?.status, "failed");
         assert.equal(
@@ -1715,7 +1740,7 @@ it.effect("does not treat an unrelated accepted command receipt as a launch", ()
     assert.equal(failed._tag, "ThreadLaunchError");
     assert.equal(failed.operation, "create-thread");
     assert.include(String(failed.cause), "cannot be replayed");
-    const projection = yield* threads.getThreadProjection(threadId);
+    const projection = yield* threads.getThreadProjection(trustedReadAuthority, threadId);
     assert.equal(projection.messages.length, 0);
     assert.equal(projection.runs.length, 0);
   }).pipe(Effect.provide(harness.layer));
@@ -1768,7 +1793,7 @@ it.effect("bounds concurrent first launches to one thread per command", () =>
         includeSubagents: false,
       });
       assert.equal(projectThreads.length, 1);
-      const projection = yield* threads.getThreadProjection(threadId);
+      const projection = yield* threads.getThreadProjection(trustedReadAuthority, threadId);
       assert.equal(projection.messages.length, 1);
       assert.equal(projection.runs.length, 1);
       yield* Deferred.await(setupEntered);
@@ -1904,7 +1929,7 @@ it.effect("schedules an accepted preparing message exactly once across concurren
         createdBy: input.createdBy,
         creationSource: input.creationSource,
       });
-      const preparing = yield* threads.getThreadProjection(input.threadId);
+      const preparing = yield* threads.getThreadProjection(trustedReadAuthority, input.threadId);
       assert.equal(preparing.runs[0]?.status, "preparing");
 
       const [first, second] = yield* Effect.all([launches.launch(input), launches.launch(input)], {
@@ -2031,7 +2056,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     );
     assert.equal(failed._tag, "ThreadLaunchError");
     // The observer failed, but the real V2 message and its bytes were accepted.
-    const accepted = yield* threads.getThreadProjection(input.threadId);
+    const accepted = yield* threads.getThreadProjection(trustedReadAuthority, input.threadId);
     const stored = accepted.messages.find(
       (message) => message.id === input.initialMessage.messageId,
     );
@@ -2097,7 +2122,10 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     });
     yield* dispatch;
     yield* dispatch;
-    const queuedProjection = yield* threads.getThreadProjection(input.threadId);
+    const queuedProjection = yield* threads.getThreadProjection(
+      trustedReadAuthority,
+      input.threadId,
+    );
     const queuedRun = queuedProjection.runs.find(
       (run) => run.userMessageId === MessageId.make("intake-second"),
     );
@@ -2130,7 +2158,10 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     });
     yield* edit;
     yield* edit;
-    const editedProjection = yield* threads.getThreadProjection(input.threadId);
+    const editedProjection = yield* threads.getThreadProjection(
+      trustedReadAuthority,
+      input.threadId,
+    );
     const editedMessage = editedProjection.messages.find(
       (message) => message.id === queuedRun.userMessageId,
     );
@@ -2171,7 +2202,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     yield* send;
     yield* send;
     assert.equal((yield* claimedFiles).length, 4);
-    const final = yield* threads.getThreadProjection(input.threadId);
+    const final = yield* threads.getThreadProjection(trustedReadAuthority, input.threadId);
     assert.equal(final.messages.length, 3);
     for (const message of final.messages) {
       const path = resolveAttachmentPath({
@@ -2206,7 +2237,10 @@ it.effect("cancels tracked setup before provider work is released", () =>
       assert.equal((yield* tracker.get(launched.threadId))?.phase, "running");
       assert.isTrue(yield* tracker.cancel(launched.threadId));
       assert.equal((yield* tracker.get(launched.threadId))?.phase, "cancelled");
-      const projection = yield* threads.getThreadProjection(launched.threadId);
+      const projection = yield* threads.getThreadProjection(
+        trustedReadAuthority,
+        launched.threadId,
+      );
       assert.equal(projection.runs[0]?.status, "failed");
       assert.isNull(projection.thread.worktreePath);
       assert.isEmpty(yield* outbox.listByCommandId(CommandId.make(`${input.commandId}:release`)));
@@ -2250,7 +2284,7 @@ it.effect.each([0, 1])("releases an async setup before its completion with exit 
         ),
         Stream.runHead,
       );
-      const running = yield* threads.getThreadProjection(launched.threadId);
+      const running = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
       assert.equal(running.runs[0]?.status, "starting");
       assert.equal((yield* tracker.get(launched.threadId))?.phase, "running");
       yield* Deferred.succeed(completion, { exitCode, durationMs: 1 });
@@ -2264,7 +2298,8 @@ it.effect.each([0, 1])("releases an async setup before its completion with exit 
         exitCode === 0 ? "done" : "failed",
       );
       assert.equal(
-        (yield* threads.getThreadProjection(launched.threadId)).runs[0]?.status,
+        (yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId)).runs[0]
+          ?.status,
         "starting",
       );
     }).pipe(Effect.provide(harness.layer));

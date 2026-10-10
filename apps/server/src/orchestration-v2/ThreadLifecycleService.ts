@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import {
   CommandId,
   type ModelSelection,
@@ -83,7 +84,7 @@ const make = Effect.gen(function* () {
     command: Parameters<ThreadManagement.ThreadManagementService["Service"]["dispatch"]>[0],
   ) =>
     threads.dispatch(command).pipe(
-      Effect.andThen(threads.getThreadRecords(threadId, [])),
+      Effect.andThen(threads.getThreadRecords(trustedReadAuthority, threadId, [])),
       Effect.mapError((cause) => new ThreadLifecycleError({ operation, threadId, cause })),
     );
 

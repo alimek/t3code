@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
@@ -66,6 +67,7 @@ const make = Effect.gen(function* () {
       | { readonly type: "stale" }
       | { readonly type: "complete"; readonly title?: string } = yield* Effect.gen(function* () {
       const projection = yield* threads.getThreadRecords(
+        trustedReadAuthority,
         input.threadId,
         ["messages"],
         input.kind.type === "initial"

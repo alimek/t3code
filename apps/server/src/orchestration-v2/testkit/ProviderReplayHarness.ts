@@ -441,8 +441,8 @@ export function layerWithRegistry<Error>(
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       return Layer.mock(ThreadManagementService.ThreadManagementService)({
         dispatch: orchestrator.dispatch,
-        getThreadRecords: orchestrator.getThreadRecords,
-        getThreadProjection: orchestrator.getThreadProjection,
+        getThreadRecords: (_authority, ...args) => orchestrator.getThreadRecords(...args),
+        getThreadProjection: (_authority, threadId) => orchestrator.getThreadProjection(threadId),
         recoverDelegatedTask: orchestrator.recoverDelegatedTask,
         delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
       });

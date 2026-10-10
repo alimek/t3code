@@ -1,3 +1,6 @@
+import { type ThreadId } from "@t3tools/contracts";
+import { type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
+import { requireRegisteredThreadPath } from "../auth/threadWorkspaceAccess.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 /**
  * Read-only access to persisted workflow scripts for the Agents surface's
@@ -26,10 +29,28 @@ function scriptsRoot(): string {
   return NodePath.join(NodeOS.homedir(), ".claude", "projects");
 }
 
-export const readWorkflowScript = Effect.fn("orchestration.readWorkflowScript")(function* (input: {
-  readonly scriptPath: string;
-}) {
+export const readWorkflowScript = Effect.fn("orchestration.readWorkflowScript")(function* (
+  authority: ThreadReadAuthority,
+  input: {
+    readonly threadId: ThreadId;
+    readonly scriptPath: string;
+  },
+) {
   const requested = input.scriptPath;
+  // Native scripts have no persisted per-thread handle. Restricted callers must
+  // use an actual registered workspace; an allowed thread id plus path is insufficient.
+  const authorizePath = (path: string) =>
+    requireRegisteredThreadPath(authority, input.threadId, path).pipe(
+      Effect.mapError(
+        (cause) =>
+          new OrchestrationGetWorkflowScriptError({
+            reason: cause._tag === "OrchestratorProjectionError" ? "not-found" : "outside-root",
+            scriptPath: requested,
+            cause,
+          }),
+      ),
+    );
+  yield* authorizePath(requested);
 
   if (!NodePath.isAbsolute(requested) || NodePath.extname(requested) !== ".js") {
     return yield* new OrchestrationGetWorkflowScriptError({
@@ -59,6 +80,8 @@ export const readWorkflowScript = Effect.fn("orchestration.readWorkflowScript")(
         cause,
       }),
   });
+
+  yield* authorizePath(resolved);
 
   if (resolved !== root && !resolved.startsWith(`${root}${NodePath.sep}`)) {
     return yield* new OrchestrationGetWorkflowScriptError({

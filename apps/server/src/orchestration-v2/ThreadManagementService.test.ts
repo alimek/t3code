@@ -1,3 +1,5 @@
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { expect, it } from "@effect/vitest";
 import {
   CommandId,
@@ -269,6 +271,7 @@ it.effect("classifies projection infrastructure failures separately from a missi
     cause: infrastructureCause,
   });
   const layerTest = ThreadManagementService.layer.pipe(
+    Layer.provide(SqlitePersistence.layerMemory),
     Layer.provide(
       Layer.mock(Orchestrator.OrchestratorV2)({
         getThreadProjection: () => Effect.fail(projectionError),
@@ -302,6 +305,7 @@ it.effect("uses thread-not-found only after a projection loads outside the proje
     },
   } as OrchestrationV2ThreadProjection;
   const layerTest = ThreadManagementService.layer.pipe(
+    Layer.provide(SqlitePersistence.layerMemory),
     Layer.provide(
       Layer.mock(Orchestrator.OrchestratorV2)({
         getThreadProjection: () => Effect.succeed(projection),
@@ -327,6 +331,7 @@ it.effect("preserves failed legacy materialization when reading checkpoint conte
     cause: new Error("checkpoint import failed"),
   });
   const layerTest = ThreadManagementService.layerWithLegacyImporter.pipe(
+    Layer.provide(SqlitePersistence.layerMemory),
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(Orchestrator.OrchestratorV2)({
@@ -341,7 +346,9 @@ it.effect("preserves failed legacy materialization when reading checkpoint conte
   );
   return Effect.gen(function* () {
     const service = yield* ThreadManagementService.ThreadManagementService;
-    const error = yield* service.getCheckpointContext(threadId).pipe(Effect.flip);
+    const error = yield* service
+      .getCheckpointContext(trustedReadAuthority, threadId)
+      .pipe(Effect.flip);
     expect(error).toBeInstanceOf(Orchestrator.OrchestratorProjectionError);
     expect(error).toMatchObject({ threadId, cause: importError });
   }).pipe(Effect.provide(layerTest));
@@ -368,6 +375,7 @@ it.effect.each([
         runs: status === "missing" ? [] : [{ id: runId, status }],
       }) as unknown as OrchestrationV2ThreadProjection;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
           getThreadEventSequence: () => Effect.succeed(0),
@@ -434,6 +442,7 @@ it.effect("waitForThread reads the run again only when the run updates", () =>
     const stored = (sequence: number, event: object) =>
       ({ sequence, event: { threadId, ...event } }) as unknown as OrchestrationV2StoredEvent;
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
           getThreadEventSequence: () => Effect.succeed(0),
@@ -485,6 +494,7 @@ it.effect.each([
     const runId = RunId.make("run:thread-management:settle-after-run");
     const dispatched: Array<string> = [];
     const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(SqlitePersistence.layerMemory),
       Layer.provide(
         Layer.mock(Orchestrator.OrchestratorV2)({
           getThreadEventSequence: () => Effect.succeed(0),

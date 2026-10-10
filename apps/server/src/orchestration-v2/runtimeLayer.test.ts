@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -1626,7 +1627,10 @@ it.layer(layerLegacyImportTest)("OrchestrationV2 legacy import", (it) => {
         threadId: metadataThreadId,
         title: "Updated after import",
       });
-      const updatedProjection = yield* threadManagement.getThreadProjection(metadataThreadId);
+      const updatedProjection = yield* threadManagement.getThreadProjection(
+        trustedReadAuthority,
+        metadataThreadId,
+      );
       assert.equal(updatedProjection.thread.title, "Updated after import");
       assert.deepEqual(
         updatedProjection.messages.map((message) => message.text),
@@ -1638,7 +1642,9 @@ it.layer(layerLegacyImportTest)("OrchestrationV2 legacy import", (it) => {
         RENAME TO projection_thread_messages_unavailable
       `;
       const { projectionFailure, hydrationFailure } = yield* Effect.all({
-        projectionFailure: threadManagement.getThreadProjection(failureThreadId).pipe(Effect.flip),
+        projectionFailure: threadManagement
+          .getThreadProjection(trustedReadAuthority, failureThreadId)
+          .pipe(Effect.flip),
         hydrationFailure: threadManagement
           .dispatch({
             type: "thread.archive",
@@ -1667,7 +1673,10 @@ it.layer(layerLegacyImportTest)("OrchestrationV2 legacy import", (it) => {
         commandId: CommandId.make("runtime-layer-legacy-retried-archive"),
         threadId: failureThreadId,
       });
-      const projectionAfterRetry = yield* threadManagement.getThreadProjection(failureThreadId);
+      const projectionAfterRetry = yield* threadManagement.getThreadProjection(
+        trustedReadAuthority,
+        failureThreadId,
+      );
       assert.isNotNull(projectionAfterRetry.thread.archivedAt);
     }),
   );

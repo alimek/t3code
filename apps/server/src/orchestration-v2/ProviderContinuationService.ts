@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { CommandId, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -83,6 +84,7 @@ export const layer = Layer.effectDiscard(
     const dispatchContinuation = Effect.fn("ProviderContinuationService.dispatchContinuation")(
       function* (request: ProviderContinuationRequests.ProviderContinuationRequest) {
         const projection = yield* threads.getThreadRecords(
+          trustedReadAuthority,
           request.threadId,
           ["messages", "runs", "providerTurns"],
           {
@@ -197,6 +199,7 @@ export const layer = Layer.effectDiscard(
                 yield* Effect.gen(function* () {
                   yield* Effect.sleep(`${retryDelay} millis`);
                   const projection = yield* threads.getThreadRecords(
+                    trustedReadAuthority,
                     request.threadId,
                     ["messages", "runs", "providerTurns"],
                     {

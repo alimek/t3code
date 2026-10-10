@@ -1,3 +1,10 @@
+import { type OrchestrationV2DomainEvent } from "@t3tools/contracts";
+import {
+  authorizeThreadRead,
+  authorizeThreadReadEvent,
+  redactReadThreadMetadata,
+  type ThreadReadAuthority,
+} from "./auth/ResourceAuthorization.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
@@ -755,20 +762,24 @@ const enrichProjectShells = Effect.fn("ws.orchestrationV2.enrichProjectShells")(
 );
 
 export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subscribeThread")(
-  function* (input: {
-    readonly threadId: ThreadId;
-    readonly afterSequence?: number;
-    readonly requestCompletionMarker?: boolean;
-    readonly acceptBoundedSnapshot?: boolean;
-    readonly acceptCompactTurnItems?: boolean;
-  }) {
+  function* (
+    authority: ThreadReadAuthority,
+    input: {
+      readonly threadId: ThreadId;
+      readonly afterSequence?: number;
+      readonly requestCompletionMarker?: boolean;
+      readonly acceptBoundedSnapshot?: boolean;
+      readonly acceptCompactTurnItems?: boolean;
+    },
+  ) {
+    const sql = yield* SqlClient.SqlClient;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
 
     yield* Effect.annotateCurrentSpan({
       "orchestration_v2.thread_id": input.threadId,
     });
-    yield* threadManagement.ensureLegacyTranscript(input.threadId).pipe(
+    yield* threadManagement.ensureLegacyTranscript(authority, input.threadId).pipe(
       Effect.mapError(
         (cause) =>
           new OrchestrationV2GetThreadProjectionError({
@@ -779,6 +790,36 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
       ),
     );
 
+    const authorizeStored = <T extends { readonly event: OrchestrationV2DomainEvent }>(stored: T) =>
+      authorizeThreadReadEvent(sql, authority, stored.event).pipe(
+        Effect.mapError(
+          (cause) =>
+            new OrchestrationV2GetThreadProjectionError({
+              threadId: input.threadId,
+              message: "Thread access is no longer available.",
+              cause,
+            }),
+        ),
+        Effect.andThen(
+          "projectId" in stored.event.payload && "lineage" in stored.event.payload
+            ? redactReadThreadMetadata(sql, authority, { thread: stored.event.payload }).pipe(
+                Effect.map((result) => ({
+                  ...stored,
+                  event: { ...stored.event, payload: result.thread } as OrchestrationV2DomainEvent,
+                })),
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationV2GetThreadProjectionError({
+                      threadId: input.threadId,
+                      message: "Thread access is no longer available.",
+                      cause,
+                    }),
+                ),
+              )
+            : Effect.succeed(stored),
+        ),
+      );
+
     const eventStreamFrom = (afterSequence: number) =>
       threadManagement
         .streamStoredEventsFrom({
@@ -786,6 +827,7 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
           afterSequence,
         })
         .pipe(
+          Stream.mapEffect(authorizeStored),
           Stream.map((stored) => ({
             kind: "event" as const,
             sequence: stored.sequence,
@@ -811,6 +853,7 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
           limit: THREAD_RESUME_MAX_REPLAY_EVENTS + 1,
         })
         .pipe(
+          Stream.mapEffect(authorizeStored),
           Stream.map((stored) => ({
             kind: "event" as const,
             sequence: stored.sequence,
@@ -837,11 +880,11 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
       const useBoundedSnapshot = shouldUseBoundedThreadSnapshot(input);
       const snapshot = yield* (
         useBoundedSnapshot
-          ? threadManagement.getThreadSnapshotWindow(input.threadId, {
+          ? threadManagement.getThreadSnapshotWindow(authority, input.threadId, {
               rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
               userTurnLimit: THREAD_HISTORY_PAGE_POLICY.maxUserTurns,
             })
-          : threadManagement.getThreadSnapshot(input.threadId)
+          : threadManagement.getThreadSnapshot(authority, input.threadId)
       ).pipe(
         Effect.mapError(
           (cause) =>
@@ -876,6 +919,21 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
     // to live events before reading the persisted tail, so no event
     // published during the replay window is lost; overlapping events are
     // deduped by sequence on the client.
+    const current = yield* authorizeThreadRead(sql, authority, input.threadId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new OrchestrationV2GetThreadProjectionError({
+            threadId: input.threadId,
+            message: "Thread access is no longer available.",
+            cause,
+          }),
+      ),
+    );
+    if (
+      current?.resourceGrant?.projects.mode === "explicit" ||
+      (current?.authorityRevision ?? 0) > 0
+    )
+      return yield* snapshotThenLive();
     if (input.afterSequence !== undefined) {
       const highWater = yield* applicationEvents.latestAgentSequence(input.threadId).pipe(
         Effect.mapError(
@@ -1457,6 +1515,11 @@ const layerWsRpc = (
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
       const sessions = yield* SessionStore.SessionStore;
       const collectionAuthority = sessions.getAuthority(currentSession.sessionId, currentSession);
+      const readAuthority: ThreadReadAuthority = {
+        current: collectionAuthority.pipe(
+          Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationReadScope)),
+        ),
+      };
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const hostResources = yield* HostResources.HostResources;
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
@@ -1938,9 +2001,9 @@ const layerWsRpc = (
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: (input) =>
-          readWorkflowScript({ scriptPath: input.scriptPath }),
+          readWorkflowScript(readAuthority, input),
         [ORCHESTRATION_V2_WS_METHODS.getTurnItem]: (input) =>
-          threadManagement.getTurnItem(input).pipe(
+          threadManagement.getTurnItem(readAuthority, input).pipe(
             Effect.mapError(
               (cause) =>
                 new OrchestrationV2GetThreadProjectionError({
@@ -1951,7 +2014,7 @@ const layerWsRpc = (
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.getTurnDiff]: (input) =>
-          checkpointDiffQuery.getTurnDiff(input).pipe(
+          checkpointDiffQuery.getTurnDiff(readAuthority, input).pipe(
             Effect.mapError(
               (cause) =>
                 new OrchestrationGetTurnDiffError({
@@ -1961,7 +2024,7 @@ const layerWsRpc = (
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.getFullThreadDiff]: (input) =>
-          checkpointDiffQuery.getFullThreadDiff(input).pipe(
+          checkpointDiffQuery.getFullThreadDiff(readAuthority, input).pipe(
             Effect.mapError(
               (cause) =>
                 new OrchestrationGetFullThreadDiffError({
@@ -1972,11 +2035,11 @@ const layerWsRpc = (
           ),
         [ORCHESTRATION_V2_WS_METHODS.searchThread]: (input) =>
           threadManagement
-            .searchThread(input)
+            .searchThread(readAuthority, input)
             .pipe(Effect.mapError((cause) => new OrchestrationV2SearchThreadError({ cause }))),
         [ORCHESTRATION_V2_WS_METHODS.searchThreadStream]: (input) =>
           threadManagement
-            .searchThreadStream(input)
+            .searchThreadStream(readAuthority, input)
             .pipe(Stream.mapError((cause) => new OrchestrationV2SearchThreadError({ cause }))),
         [ORCHESTRATION_V2_WS_METHODS.searchThreads]: (input) =>
           collectionAuthority.pipe(
@@ -2010,7 +2073,7 @@ const layerWsRpc = (
               // Pre-pagination clients still call this compatibility endpoint.
               // Keep stale clients from materializing an unbounded transcript.
               threadManagement
-                .getThreadSnapshotWindow(input.threadId, {
+                .getThreadSnapshotWindow(readAuthority, input.threadId, {
                   rowLimit: THREAD_HISTORY_SNAPSHOT_ROW_LIMIT,
                 })
                 .pipe(
@@ -2154,7 +2217,7 @@ const layerWsRpc = (
         [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input) =>
           Stream.unwrap(
             Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
-              Effect.andThen(subscribeOrchestrationV2Thread(input)),
+              Effect.andThen(subscribeOrchestrationV2Thread(readAuthority, input)),
             ),
           ),
         [WS_METHODS.scheduledTasksList]: (_input) =>
@@ -2366,9 +2429,11 @@ const layerWsRpc = (
         [WS_METHODS.mcpAppsReadResource]: (input) => mcpAppRequests.readResource(input),
         [WS_METHODS.providerUploadFeedback]: (input) =>
           Effect.gen(function* () {
-            const projection = yield* threadManagement.getThreadRecords(input.threadId, [
-              "providerThreads",
-            ]);
+            const projection = yield* threadManagement.getThreadRecords(
+              readAuthority,
+              input.threadId,
+              ["providerThreads"],
+            );
             const providerThread =
               projection.providerThreads.find(
                 (candidate) => candidate.id === projection.thread.activeProviderThreadId,
@@ -2894,7 +2959,7 @@ const layerWsRpc = (
               });
             }
             const thread = yield* threadManagement
-              .getThreadRecords(input.resource.threadId, [])
+              .getThreadRecords(readAuthority, input.resource.threadId, [])
               .pipe(
                 Effect.mapError(
                   (cause) =>

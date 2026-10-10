@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
@@ -231,7 +232,7 @@ it.effect("resolves the thread baseline after a second root run replaces scope o
     );
     const result = yield* Effect.gen(function* () {
       const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
-      return yield* query.getFullThreadDiff({ threadId, toTurnCount: 2 });
+      return yield* query.getFullThreadDiff(trustedReadAuthority, { threadId, toTurnCount: 2 });
     }).pipe(Effect.provide(layerQuery));
     assert.equal(result.diff, "two-run diff");
   }).pipe(Effect.provide(layerProjection)),

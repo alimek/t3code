@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
@@ -210,14 +211,14 @@ const make = Effect.gen(function* () {
     threadId: ThreadId,
   ) {
     const projection = yield* threads
-      .getThreadRecords(threadId, ["runs"])
+      .getThreadRecords(trustedReadAuthority, threadId, ["runs"])
       .pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
     if (
       projection.thread.projectId !== input.projectId ||
       projection.thread.archivedAt !== null ||
       projection.thread.deletedAt !== null ||
       (yield* threads
-        .getMessageCount(threadId)
+        .getMessageCount(trustedReadAuthority, threadId)
         .pipe(Effect.mapError(mapError(input, "update-thread", threadId)))) > 0 ||
       projection.runs.length > 0
     ) {
@@ -852,7 +853,7 @@ const make = Effect.gen(function* () {
         }
 
         const projection = yield* threads
-          .getThreadProjection(threadId)
+          .getThreadProjection(trustedReadAuthority, threadId)
           .pipe(Effect.mapError(mapError(input, "create-thread", threadId)));
         const runIsPreparing =
           runId !== null &&
@@ -878,12 +879,18 @@ const make = Effect.gen(function* () {
               const preparationStillRequired =
                 runId === null
                   ? true
-                  : yield* threads.getThreadRecords(threadId, ["runs"], { runIds: [runId] }).pipe(
-                      Effect.map((current) =>
-                        current.runs.some((run) => run.id === runId && run.status === "preparing"),
-                      ),
-                      Effect.mapError(mapError(input, "update-thread", threadId)),
-                    );
+                  : yield* threads
+                      .getThreadRecords(trustedReadAuthority, threadId, ["runs"], {
+                        runIds: [runId],
+                      })
+                      .pipe(
+                        Effect.map((current) =>
+                          current.runs.some(
+                            (run) => run.id === runId && run.status === "preparing",
+                          ),
+                        ),
+                        Effect.mapError(mapError(input, "update-thread", threadId)),
+                      );
               if (preparationStillRequired) {
                 yield* schedulePreparation(
                   { ...input, workspaceStrategy: preparationStrategy },
@@ -920,7 +927,7 @@ const make = Effect.gen(function* () {
     // From here the run is preparing again; anything that stops preparation
     // from being scheduled must fail it, or it would wait in preparing forever.
     const scheduled = yield* Effect.gen(function* () {
-      const projection = yield* threads.getThreadProjection(input.threadId);
+      const projection = yield* threads.getThreadProjection(trustedReadAuthority, input.threadId);
       const run = projection.runs.find((candidate) => candidate.id === input.runId);
       const workspacePreparation = run?.workspacePreparation;
       if (run?.status !== "preparing" || workspacePreparation === undefined) return;

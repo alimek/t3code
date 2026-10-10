@@ -1,3 +1,6 @@
+import * as DateTime from "effect/DateTime";
+import * as SessionStore from "../src/auth/SessionStore.ts";
+import { trustedReadAuthority } from "../src/auth/ResourceAuthorization.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Measures real local HTTP/WebSocket sockets.
 import * as NodeHttp from "node:http";
 import { assert, it } from "@effect/vitest";
@@ -8,6 +11,7 @@ import {
   ORCHESTRATION_PROTOCOL_HEADER,
   ORCHESTRATION_PROTOCOL_VERSION,
   AuthSessionId,
+  AuthAllResourceGrant,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
   EnvironmentAuthenticatedAuth,
@@ -83,8 +87,8 @@ const layerManagement = Layer.unwrap(
     const sink = yield* EventSink.EventSinkV2;
     return Layer.mock(ThreadManagementService.ThreadManagementService)({
       ensureLegacyTranscript: () => Effect.void,
-      getThreadSnapshot: (id) => projections.getThreadSnapshot(id).pipe(Effect.orDie),
-      getThreadSnapshotWindow: (id, options) =>
+      getThreadSnapshot: (_authority, id) => projections.getThreadSnapshot(id).pipe(Effect.orDie),
+      getThreadSnapshotWindow: (_authority, id, options) =>
         projections.getThreadSnapshotWindow(id, options).pipe(Effect.orDie),
       getThreadShell: (id) => projections.getThreadShell(id).pipe(Effect.orDie),
       getShellSnapshot: (options) => projections.getShellSnapshot(options).pipe(Effect.orDie),
@@ -145,13 +149,27 @@ const group = RpcGroup.make(
 );
 const layerHandlers = group.toLayer({
   [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input) =>
-    Stream.unwrap(subscribeOrchestrationV2Thread(input)),
+    Stream.unwrap(subscribeOrchestrationV2Thread(trustedReadAuthority, input)),
   [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: (input) =>
     Stream.unwrap(subscribeOrchestrationV2Shell(input)),
 });
 const layerRoutes = Layer.mergeAll(
   HttpApiBuilder.layer(TransferApi).pipe(
     Layer.provide(OrchestrationHttp.layer),
+    Layer.provide(
+      Layer.mock(SessionStore.SessionStore)({
+        cookieName: "fixture",
+        legacyCookieName: undefined,
+        getAuthority: (_sid, session) =>
+          Effect.succeed({
+            deviceId: AuthSessionId.make("transport-fixture"),
+            authorityRevision: 0,
+            resourceGrant: AuthAllResourceGrant,
+            scopes: session?.scopes ?? [],
+            expiresAt: DateTime.makeUnsafe("2100-01-01T00:00:00Z"),
+          }),
+      }),
+    ),
     Layer.provide(layerAuth),
   ),
   RpcServer.layerHttp({ group, path: "/ws", protocol: "websocket" }).pipe(

@@ -37,6 +37,14 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
+import {
+  authorizeThreadRead,
+  redactReadThreadMetadata,
+  trustedReadAuthority,
+  type ThreadReadAuthority,
+} from "../auth/ResourceAuthorization.ts";
+import { decodeThreadHistoryCursor } from "./threadHistoryPaging.ts";
 
 import * as Orchestrator from "./Orchestrator.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
@@ -274,37 +282,69 @@ export type ThreadManagementError = typeof ThreadManagementError.Type;
 
 type ThreadManagementFailure = ThreadManagementError | Orchestrator.OrchestratorV2Error;
 
+type AuthorizedRead<F> = F extends (...args: infer A) => infer R
+  ? (authority: ThreadReadAuthority, ...args: A) => R
+  : never;
+
 export interface ThreadManagementServiceShape {
   readonly searchThreadStream: (
+    authority: ThreadReadAuthority,
     input: OrchestrationV2SearchThreadInput,
   ) => Stream.Stream<OrchestrationV2SearchThreadResult, Orchestrator.OrchestratorV2Error>;
   readonly searchThread: (
+    authority: ThreadReadAuthority,
     input: OrchestrationV2SearchThreadInput,
   ) => Effect.Effect<OrchestrationV2SearchThreadResult, Orchestrator.OrchestratorV2Error>;
   readonly ensureLegacyTranscript: (
+    authority: ThreadReadAuthority,
     threadId: ThreadId,
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
   readonly dispatch: (
     command: OrchestrationV2ServerCommand,
   ) => Effect.Effect<Orchestrator.OrchestratorV2DispatchResult, Orchestrator.OrchestratorV2Error>;
-  readonly getThreadHistoryPage: Orchestrator.OrchestratorV2["Service"]["getThreadHistoryPage"];
-  readonly getTimelinePage: Orchestrator.OrchestratorV2["Service"]["getTimelinePage"];
-  readonly getMessageCount: Orchestrator.OrchestratorV2["Service"]["getMessageCount"];
+  readonly getThreadHistoryPage: AuthorizedRead<
+    Orchestrator.OrchestratorV2["Service"]["getThreadHistoryPage"]
+  >;
+  readonly getTimelinePage: AuthorizedRead<
+    Orchestrator.OrchestratorV2["Service"]["getTimelinePage"]
+  >;
+  readonly getMessageCount: AuthorizedRead<
+    Orchestrator.OrchestratorV2["Service"]["getMessageCount"]
+  >;
   /**
    * One turn item with the input and output the thread stream withholds,
    * bounded for the wire. Clients fetch it when a tool row is expanded.
    */
-  readonly getTurnItem: (input: {
-    readonly threadId: ThreadId;
-    readonly itemId: TurnItemId;
-  }) => Effect.Effect<OrchestrationV2GetTurnItemResult, Orchestrator.OrchestratorV2Error>;
-  readonly getThreadRecords: Orchestrator.OrchestratorV2["Service"]["getThreadRecords"];
+  readonly getTurnItem: (
+    authority: ThreadReadAuthority,
+    input: {
+      readonly threadId: ThreadId;
+      readonly itemId: TurnItemId;
+    },
+  ) => Effect.Effect<OrchestrationV2GetTurnItemResult, Orchestrator.OrchestratorV2Error>;
+  readonly getThreadRecords: <K extends ProjectionRecordField>(
+    authority: ThreadReadAuthority,
+    threadId: ThreadId,
+    fields: ReadonlyArray<K>,
+    filter?: ProjectionRecordFilter,
+  ) => Effect.Effect<ProjectionRecords<K>, Orchestrator.OrchestratorV2Error>;
+  readonly getReadWorkspaceRoots: (
+    authority: ThreadReadAuthority,
+    threadId: ThreadId,
+  ) => Effect.Effect<ReadonlyArray<string>, Orchestrator.OrchestratorV2Error>;
   readonly getThreadProjection: (
+    authority: ThreadReadAuthority,
     threadId: ThreadId,
   ) => Effect.Effect<OrchestrationV2ThreadProjection, Orchestrator.OrchestratorV2Error>;
-  readonly getCheckpointContext: Orchestrator.OrchestratorV2["Service"]["getCheckpointContext"];
-  readonly getThreadSnapshot: Orchestrator.OrchestratorV2["Service"]["getThreadSnapshot"];
-  readonly getThreadSnapshotWindow: Orchestrator.OrchestratorV2["Service"]["getThreadSnapshotWindow"];
+  readonly getCheckpointContext: AuthorizedRead<
+    Orchestrator.OrchestratorV2["Service"]["getCheckpointContext"]
+  >;
+  readonly getThreadSnapshot: AuthorizedRead<
+    Orchestrator.OrchestratorV2["Service"]["getThreadSnapshot"]
+  >;
+  readonly getThreadSnapshotWindow: AuthorizedRead<
+    Orchestrator.OrchestratorV2["Service"]["getThreadSnapshotWindow"]
+  >;
   readonly getProjectThreadRecords: <K extends ProjectionRecordField>(
     input: { readonly projectId: ProjectId; readonly threadId: ThreadId },
     fields: ReadonlyArray<K>,
@@ -443,10 +483,11 @@ const SETTLE_AFTER_RUN_WAIT_MS = 24 * 60 * 60 * 1_000;
 
 const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
+  const sql = yield* SqlClient.SqlClient;
   const layerScope = yield* Effect.scope;
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
 
-  const ensureLegacyTranscript = Effect.fn(
+  const hydrateLegacyTranscript = Effect.fn(
     "orchestrationV2.threadManagement.ensureLegacyTranscript",
   )(function* (threadId: ThreadId) {
     yield* legacyImporter.ensureTranscript(threadId).pipe(
@@ -460,7 +501,7 @@ const make = Effect.gen(function* () {
   });
 
   const ensureProjectionTranscript = (threadId: ThreadId) =>
-    ensureLegacyTranscript(threadId).pipe(
+    hydrateLegacyTranscript(threadId).pipe(
       Effect.mapError(
         (cause) =>
           new Orchestrator.OrchestratorProjectionError({
@@ -475,7 +516,7 @@ const make = Effect.gen(function* () {
   )(function* (command: OrchestrationV2ServerCommand) {
     yield* Effect.forEach(
       existingThreadIdsForCommand(command),
-      (threadId) => ensureLegacyTranscript(threadId),
+      (threadId) => hydrateLegacyTranscript(threadId),
       { discard: true },
     ).pipe(
       Effect.mapError(
@@ -489,33 +530,94 @@ const make = Effect.gen(function* () {
     );
   });
 
-  const getThreadProjection: ThreadManagementServiceShape["getThreadProjection"] = (threadId) =>
-    ensureProjectionTranscript(threadId).pipe(
-      Effect.andThen(orchestrator.getThreadProjection(threadId)),
-    );
+  const read = <A>(
+    authority: ThreadReadAuthority,
+    threadId: ThreadId,
+    operation: Effect.Effect<A, Orchestrator.OrchestratorV2Error>,
+    anchorThreadId?: ThreadId,
+  ) =>
+    Effect.gen(function* () {
+      const check = authorizeThreadRead(sql, authority, threadId, anchorThreadId).pipe(
+        Effect.mapError(
+          (cause) => new Orchestrator.OrchestratorProjectionError({ threadId, cause }),
+        ),
+      );
+      yield* check;
+      yield* ensureProjectionTranscript(threadId);
+      // Membership and source graph cannot change between final admission and the read.
+      return yield* sql
+        .withTransaction(check.pipe(Effect.andThen(operation)))
+        .pipe(
+          Effect.mapError((cause) =>
+            Schema.is(Orchestrator.OrchestratorProjectionError)(cause)
+              ? cause
+              : new Orchestrator.OrchestratorProjectionError({ threadId, cause }),
+          ),
+        );
+    });
 
-  const getCheckpointContext: ThreadManagementServiceShape["getCheckpointContext"] = (threadId) =>
-    ensureProjectionTranscript(threadId).pipe(
-      Effect.andThen(orchestrator.getCheckpointContext(threadId)),
+  const getThreadProjection: ThreadManagementServiceShape["getThreadProjection"] = (
+    authority,
+    threadId,
+  ) =>
+    read(
+      authority,
+      threadId,
+      orchestrator.getThreadProjection(threadId).pipe(
+        Effect.flatMap((projection) => redactReadThreadMetadata(sql, authority, projection)),
+        Effect.mapError(
+          (cause) => new Orchestrator.OrchestratorProjectionError({ threadId, cause }),
+        ),
+      ),
     );
-
-  const getThreadSnapshot: ThreadManagementServiceShape["getThreadSnapshot"] = (threadId) =>
-    ensureProjectionTranscript(threadId).pipe(
-      Effect.andThen(orchestrator.getThreadSnapshot(threadId)),
+  const getCheckpointContext: ThreadManagementServiceShape["getCheckpointContext"] = (
+    authority,
+    threadId,
+  ) => read(authority, threadId, orchestrator.getCheckpointContext(threadId));
+  const getThreadSnapshot: ThreadManagementServiceShape["getThreadSnapshot"] = (
+    authority,
+    threadId,
+  ) =>
+    read(
+      authority,
+      threadId,
+      orchestrator.getThreadSnapshot(threadId).pipe(
+        Effect.flatMap((snapshot) =>
+          redactReadThreadMetadata(sql, authority, snapshot.projection).pipe(
+            Effect.map((projection) => ({ ...snapshot, projection })),
+          ),
+        ),
+        Effect.mapError(
+          (cause) => new Orchestrator.OrchestratorProjectionError({ threadId, cause }),
+        ),
+      ),
     );
   const getThreadSnapshotWindow: ThreadManagementServiceShape["getThreadSnapshotWindow"] = (
+    authority,
     threadId,
     options,
   ) =>
-    ensureProjectionTranscript(threadId).pipe(
-      Effect.andThen(orchestrator.getThreadSnapshotWindow(threadId, options)),
+    read(
+      authority,
+      threadId,
+      orchestrator.getThreadSnapshotWindow(threadId, options).pipe(
+        Effect.flatMap((snapshot) =>
+          redactReadThreadMetadata(sql, authority, snapshot.projection).pipe(
+            Effect.map((projection) => ({ ...snapshot, projection })),
+          ),
+        ),
+        Effect.mapError(
+          (cause) => new Orchestrator.OrchestratorProjectionError({ threadId, cause }),
+        ),
+      ),
+      options.anchorThreadId,
     );
 
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
     ensureCommandTranscripts(command).pipe(Effect.andThen(orchestrator.dispatch(command)));
 
   const getProjectThread: ThreadManagementServiceShape["getProjectThread"] = (input) =>
-    getThreadProjection(input.threadId).pipe(
+    getThreadProjection(trustedReadAuthority, input.threadId).pipe(
       Effect.mapError(
         (cause) =>
           new ThreadManagementProjectionLoadError({
@@ -871,40 +973,72 @@ const make = Effect.gen(function* () {
     });
 
   return ThreadManagementService.of({
-    ensureLegacyTranscript,
-    searchThreadStream: (input) =>
+    ensureLegacyTranscript: (authority, threadId) =>
+      authorizeThreadRead(sql, authority, threadId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new LegacyV1ThreadImporter.LegacyV1ThreadImportError({
+              threadId,
+              operation: "hydrate transcript for",
+              cause,
+            }),
+        ),
+        Effect.andThen(hydrateLegacyTranscript(threadId)),
+      ),
+    searchThreadStream: (authority, input) =>
       Stream.unwrap(
-        ensureProjectionTranscript(input.threadId).pipe(
-          Effect.as(orchestrator.searchThreadStream(input)),
-        ),
+        read(authority, input.threadId, Effect.succeed(orchestrator.searchThreadStream(input))),
+      ).pipe(
+        // Search may hydrate bodies incrementally after the first result.
+        Stream.mapEffect((result) => read(authority, input.threadId, Effect.succeed(result))),
       ),
-    searchThread: (input) =>
-      ensureProjectionTranscript(input.threadId).pipe(
-        Effect.andThen(orchestrator.searchThread(input)),
-      ),
+    searchThread: (authority, input) =>
+      read(authority, input.threadId, orchestrator.searchThread(input)),
     dispatch,
-    getThreadHistoryPage: (threadId, cursor, throughEntryId, conversationOnly) =>
-      ensureProjectionTranscript(threadId).pipe(
-        Effect.andThen(
-          orchestrator.getThreadHistoryPage(threadId, cursor, throughEntryId, conversationOnly),
+    getThreadHistoryPage: (authority, threadId, cursor, throughEntryId, conversationOnly) =>
+      Effect.try({
+        try: () => ThreadId.make(decodeThreadHistoryCursor(cursor).st),
+        catch: (cause) => new Orchestrator.OrchestratorProjectionError({ threadId, cause }),
+      }).pipe(
+        Effect.flatMap((anchor) =>
+          read(
+            authority,
+            threadId,
+            orchestrator.getThreadHistoryPage(threadId, cursor, throughEntryId, conversationOnly),
+            anchor,
+          ),
         ),
       ),
-    getTimelinePage: (threadId, options) =>
-      ensureProjectionTranscript(threadId).pipe(
-        Effect.andThen(orchestrator.getTimelinePage(threadId, options)),
-      ),
-    getMessageCount: (threadId) =>
-      ensureProjectionTranscript(threadId).pipe(
-        Effect.andThen(orchestrator.getMessageCount(threadId)),
-      ),
-    getTurnItem: (input) =>
-      ensureProjectionTranscript(input.threadId).pipe(
-        Effect.andThen(orchestrator.getTurnItem(input)),
+    getTimelinePage: (authority, threadId, options) =>
+      read(authority, threadId, orchestrator.getTimelinePage(threadId, options)),
+    getMessageCount: (authority, threadId) =>
+      read(authority, threadId, orchestrator.getMessageCount(threadId)),
+    getTurnItem: (authority, input) =>
+      read(authority, input.threadId, orchestrator.getTurnItem(input)).pipe(
         Effect.map((item) => ({ item: item === null ? null : projectTurnItemForDetail(item) })),
       ),
-    getThreadRecords: (threadId, fields, filter) =>
-      ensureProjectionTranscript(threadId).pipe(
-        Effect.andThen(orchestrator.getThreadRecords(threadId, fields, filter)),
+    getThreadRecords: (authority, threadId, fields, filter) =>
+      read(authority, threadId, orchestrator.getThreadRecords(threadId, fields, filter)),
+    getReadWorkspaceRoots: (authority, threadId) =>
+      read(
+        authority,
+        threadId,
+        sql<{ readonly workspace_root: string; readonly worktree_path: string | null }>`
+        SELECT p.workspace_root, json_extract(t.payload_json, '$.worktreePath') AS worktree_path
+        FROM orchestration_v2_projection_threads t JOIN projection_projects p ON p.project_id = t.project_id
+        WHERE t.thread_id = ${threadId} AND p.deleted_at IS NULL
+      `.pipe(
+          Effect.map((rows) =>
+            rows.flatMap((row) =>
+              row.worktree_path === null
+                ? [row.workspace_root]
+                : [row.workspace_root, row.worktree_path],
+            ),
+          ),
+          Effect.mapError(
+            (cause) => new Orchestrator.OrchestratorProjectionError({ threadId, cause }),
+          ),
+        ),
       ),
     getThreadProjection,
     getCheckpointContext,
@@ -941,11 +1075,16 @@ const layerLegacyV1ThreadImporterNoop = Layer.succeed(
   }),
 );
 
-export const layer: Layer.Layer<ThreadManagementService, never, Orchestrator.OrchestratorV2> =
-  Layer.effect(ThreadManagementService, make).pipe(Layer.provide(layerLegacyV1ThreadImporterNoop));
+export const layer: Layer.Layer<
+  ThreadManagementService,
+  never,
+  Orchestrator.OrchestratorV2 | SqlClient.SqlClient
+> = Layer.effect(ThreadManagementService, make).pipe(
+  Layer.provide(layerLegacyV1ThreadImporterNoop),
+);
 
 export const layerWithLegacyImporter: Layer.Layer<
   ThreadManagementService,
   never,
-  LegacyV1ThreadImporter.LegacyV1ThreadImporter | Orchestrator.OrchestratorV2
+  LegacyV1ThreadImporter.LegacyV1ThreadImporter | Orchestrator.OrchestratorV2 | SqlClient.SqlClient
 > = Layer.effect(ThreadManagementService, make);

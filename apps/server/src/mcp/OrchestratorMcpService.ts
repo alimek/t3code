@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import {
   CommandId,
   type RunId,
@@ -878,6 +879,7 @@ const make = Effect.gen(function* () {
   const loadProjection = (threadId: ThreadId) =>
     threadManagement
       .getThreadRecords(
+        trustedReadAuthority,
         threadId,
         [
           "runs",
@@ -1233,6 +1235,7 @@ const make = Effect.gen(function* () {
       }
       const childControls = yield* threadManagement
         .getThreadRecords(
+          trustedReadAuthority,
           task.childThreadId,
           ["runs", "messages", "contextTransfers", "subagents", "providerThreads"],
           { messageRoles: ["user"] },
@@ -1247,7 +1250,7 @@ const make = Effect.gen(function* () {
         ),
       ];
       const resultRecords = yield* threadManagement
-        .getThreadRecords(task.childThreadId, ["messages", "turnItems"], {
+        .getThreadRecords(trustedReadAuthority, task.childThreadId, ["messages", "turnItems"], {
           messageRoles: ["assistant"],
           messageRunIds: resultRunIds,
           turnItemRunIds: resultRunIds,
@@ -1699,7 +1702,7 @@ const make = Effect.gen(function* () {
         const answered = yield* Effect.gen(function* () {
           while (true) {
             const projection = yield* threadManagement
-              .getThreadRecords(threadId, ["runs", "turnItems"], {
+              .getThreadRecords(trustedReadAuthority, threadId, ["runs", "turnItems"], {
                 turnItemTypes: ["secret_request"],
                 messageRoles: [],
               })
@@ -1738,7 +1741,7 @@ const make = Effect.gen(function* () {
         const status = Option.isSome(answered)
           ? answered.value
           : yield* threadManagement
-              .getThreadRecords(threadId, ["turnItems"], {
+              .getThreadRecords(trustedReadAuthority, threadId, ["turnItems"], {
                 turnItemTypes: ["secret_request"],
                 messageRoles: [],
               })
@@ -1964,7 +1967,7 @@ const make = Effect.gen(function* () {
               );
             }
             const { subagents } = yield* threadManagement
-              .getThreadRecords(threadId, ["subagents"])
+              .getThreadRecords(trustedReadAuthority, threadId, ["subagents"])
               .pipe(Effect.mapError(threadManagementFailure));
             for (const task of subagents) {
               if (task.origin === "app_owned" && task.childThreadId !== null) {
@@ -2290,7 +2293,7 @@ const make = Effect.gen(function* () {
         const limit = input.limit ?? DEFAULT_THREAD_READ_LIMIT;
         const maxChars = input.maxCharsPerItem ?? DEFAULT_THREAD_ITEM_MAX_CHARS;
         const timeline = yield* threadManagement
-          .getTimelinePage(input.threadId, {
+          .getTimelinePage(trustedReadAuthority, input.threadId, {
             afterPosition,
             limit,
             view,
@@ -2308,10 +2311,12 @@ const make = Effect.gen(function* () {
         const sourceMessages = yield* Effect.forEach(
           [...messageIdsByThread],
           ([threadId, messageIds]) =>
-            threadManagement.getThreadRecords(threadId, ["messages"], { messageIds }).pipe(
-              Effect.map((records) => [threadId, records.messages] as const),
-              Effect.mapError(threadManagementFailure),
-            ),
+            threadManagement
+              .getThreadRecords(trustedReadAuthority, threadId, ["messages"], { messageIds })
+              .pipe(
+                Effect.map((records) => [threadId, records.messages] as const),
+                Effect.mapError(threadManagementFailure),
+              ),
           { concurrency: 1 },
         );
         const messagesByThreadId = new Map(sourceMessages);
@@ -2331,7 +2336,7 @@ const make = Effect.gen(function* () {
           const resultRunId = transfer?.sourcePoint.runId ?? delegatedTaskRun(target, task)?.id;
           const resultRunIds = resultRunId === undefined ? [] : [resultRunId];
           const resultRecords = yield* threadManagement
-            .getThreadRecords(target.thread.id, ["messages", "turnItems"], {
+            .getThreadRecords(trustedReadAuthority, target.thread.id, ["messages", "turnItems"], {
               messageRoles: ["assistant"],
               messageRunIds: resultRunIds,
               turnItemRunIds: resultRunIds,
