@@ -18,7 +18,7 @@ import {
   RunId,
   RuntimeRequestId,
   NodeId,
-  type ProjectId,
+  ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -57,6 +57,30 @@ export class EventSinkWriteError extends Schema.TaggedError<EventSinkWriteError>
 ) {
   override get message(): string {
     return `Failed to write ${this.eventCount} orchestration V2 event(s).`;
+  }
+}
+
+export class ThreadLiveProjectRequiredError extends Schema.TaggedError<ThreadLiveProjectRequiredError>()(
+  "ThreadLiveProjectRequiredError",
+  {
+    threadId: ThreadId,
+    projectId: ProjectId,
+  },
+) {
+  override get message(): string {
+    return "A live thread requires a live project.";
+  }
+}
+
+export class ProjectCommandEventMismatchError extends Schema.TaggedError<ProjectCommandEventMismatchError>()(
+  "ProjectCommandEventMismatchError",
+  {
+    commandId: CommandId,
+    projectId: ProjectId,
+  },
+) {
+  override get message(): string {
+    return "Project event does not match its command.";
   }
 }
 
@@ -365,14 +389,17 @@ const layerBase: Layer.Layer<
           ),
         );
         for (const threadId of changedThreads) {
-          const invalid = yield* sql`
-            SELECT t.thread_id FROM orchestration_v2_projection_threads t
+          const invalid = yield* sql<{ readonly project: string }>`
+            SELECT t.project_id AS project FROM orchestration_v2_projection_threads t
             LEFT JOIN projection_projects p ON p.project_id = t.project_id
             WHERE t.thread_id = ${threadId} AND t.deleted_at IS NULL
               AND (p.project_id IS NULL OR p.deleted_at IS NOT NULL)
           `;
           if (invalid.length > 0)
-            return yield* Effect.fail("A live thread requires a live project.");
+            return yield* new ThreadLiveProjectRequiredError({
+              threadId,
+              projectId: ProjectId.make(invalid[0]!.project),
+            });
         }
         const sequence = storedEvents.at(-1)?.sequence;
         if (sequence !== undefined) {
@@ -724,7 +751,10 @@ const layerBase: Layer.Layer<
                   "project.delete": "project.deleted",
                 }[admission.command.type]
             )
-              return yield* Effect.fail("Project event does not match its command.");
+              return yield* new ProjectCommandEventMismatchError({
+                commandId: input.commandId,
+                projectId: input.projectId,
+              });
             if (input.event.type === "project.meta-updated")
               yield* authorizeProjectCommand(sql, admission.authority, {
                 ...input.event.payload,

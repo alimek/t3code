@@ -7,7 +7,10 @@ import {
   trustedMutationAuthority,
   type MutationAuthority,
 } from "../auth/CommandAuthorization.ts";
-import { requireRegisteredMutationPath } from "../auth/threadWorkspaceAccess.ts";
+import {
+  admitRegisteredCommandWorkspace,
+  requireRegisteredMutationPath,
+} from "../auth/threadWorkspaceAccess.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
@@ -345,7 +348,11 @@ const make = Effect.gen(function* () {
           }),
         );
     }
-    yield* authorizeCommand(sql, authority, launchCreateCommand(input, threadId));
+    // Source/target admission precedes canonical workspace I/O. The final claim carries the path.
+    yield* authorizeCommand(sql, authority, {
+      ...launchCreateCommand(input, threadId),
+      worktreePath: null,
+    });
     const initialMessage =
       input.initialMessage === undefined
         ? undefined
@@ -364,10 +371,11 @@ const make = Effect.gen(function* () {
       );
     }
     if (input.workspaceStrategy.type === "existing_worktree")
-      yield* requireRegisteredMutationPath(
+      yield* admitRegisteredCommandWorkspace(
         sql,
         authority,
         {
+          commandId: input.commandId,
           threadId,
           projectId: input.projectId,
           allowCreate: input.reuseExistingThread !== true,
@@ -955,6 +963,20 @@ const make = Effect.gen(function* () {
         const initialBranch = workspaceStrategy.branch ?? null;
         const initialWorktreePath =
           workspaceStrategy.type === "existing_worktree" ? workspaceStrategy.worktreePath : null;
+        const claimAuthority =
+          initialWorktreePath === null
+            ? authority
+            : yield* admitRegisteredCommandWorkspace(
+                sql,
+                authority,
+                {
+                  commandId: input.commandId,
+                  projectId: input.projectId,
+                  threadId: candidateThreadId,
+                  allowCreate: input.reuseExistingThread !== true,
+                },
+                initialWorktreePath,
+              ).pipe(Effect.mapError(mapError(input, "create-thread", candidateThreadId)));
         const claimDispatch =
           input.reuseExistingThread === true
             ? threads.dispatch(authority, {
@@ -963,7 +985,7 @@ const make = Effect.gen(function* () {
                 threadId: candidateThreadId,
                 expectedEmpty: true,
               })
-            : threads.dispatch(authority, {
+            : threads.dispatch(claimAuthority, {
                 ...launchCreateCommand(input, candidateThreadId),
                 branch: initialBranch,
                 worktreePath: initialWorktreePath,

@@ -69,6 +69,8 @@ import {
   threadCreated,
 } from "../orchestration-v2/projectCollectionTestFixtures.ts";
 
+const isLiveProjectRequired = Schema.is(Sink.ThreadLiveProjectRequiredError);
+const isProjectCommandMismatch = Schema.is(Sink.ProjectCommandEventMismatchError);
 const authority: MutationAuthority = {
   current: Effect.succeed({ scopes: [AuthOrchestrationOperateScope], resourceGrant: grantA }),
 };
@@ -550,6 +552,8 @@ it.effect.each(["create", "move"] as const)(
       const attempt = threadCreated(ThreadId.make("after-delete"), projectA);
       const failure = yield* Effect.flip(f.sink.write({ events: [attempt] }));
       assert.equal(failure._tag, "EventSinkWriteError");
+      assert.isTrue(isLiveProjectRequired(failure.cause));
+      assert.deepInclude(failure.cause, { threadId: attempt.threadId, projectId: projectA });
       const threadB = yield* f.projections.getThread(activeB);
       yield* Effect.flip(
         f.sink.write({
@@ -928,6 +932,8 @@ it.effect("a forged project event cannot delete a different project with live ch
       ),
     );
     assert.equal(failure._tag, "EventSinkWriteError");
+    assert.isTrue(isProjectCommandMismatch(failure.cause));
+    assert.deepInclude(failure.cause, { commandId: command.commandId, projectId: projectA });
     assert.isNull(Option.getOrThrow(yield* f.projects.get(projectB)).deletedAt);
     assert.lengthOf(
       yield* f.sql`SELECT command_id FROM orchestration_command_receipts WHERE command_id = ${command.commandId}`,

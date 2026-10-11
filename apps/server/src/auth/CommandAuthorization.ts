@@ -32,9 +32,28 @@ import {
 
 /** App-owned work opts in explicitly; external calls must reload device authority. */
 export const trustedMutationAuthority = Symbol("trusted mutation");
+const registeredCommandWorkspace = Symbol("canonical launch workspace");
+type RegisteredCommandWorkspace = {
+  readonly commandId: CommandId;
+  readonly projectId: ProjectId;
+  readonly threadId: ThreadId;
+  readonly path: string;
+  readonly roots: ReadonlyArray<string>;
+};
 export type MutationAuthority =
   | typeof trustedMutationAuthority
-  | Exclude<ThreadReadAuthority, typeof trustedReadAuthority>;
+  | (Exclude<ThreadReadAuthority, typeof trustedReadAuthority> & {
+      readonly [registeredCommandWorkspace]?: RegisteredCommandWorkspace;
+    });
+
+/** Only a canonical-checked launch claim carries this exact command/path association. */
+export const withRegisteredCommandWorkspace = (
+  authority: MutationAuthority,
+  workspace: RegisteredCommandWorkspace,
+): MutationAuthority =>
+  authority === trustedMutationAuthority
+    ? authority
+    : { ...authority, [registeredCommandWorkspace]: workspace };
 export type CommandAdmission =
   | typeof trustedMutationAuthority
   | {
@@ -257,21 +276,36 @@ const requireRegisteredCommandPath = Effect.fnUntraced(function* (
   sql: SqlClient.SqlClient,
   target: { readonly projectId: ProjectId; readonly threadId: ThreadId },
   requested: string,
+  authority: MutationAuthority,
+  commandId: CommandId,
 ) {
   const foreign = yield* sql`SELECT project_id FROM projection_projects
     WHERE workspace_root = ${requested} AND project_id != ${target.projectId} LIMIT 1`;
   if (foreign.length > 0) return yield* mutationDenied();
   const roots = yield* registeredMutationRoots(sql, target);
-  if (!roots.includes(requested)) return yield* mutationDenied();
+  if (roots.includes(requested)) return;
+  const admitted =
+    authority === trustedMutationAuthority ? undefined : authority[registeredCommandWorkspace];
+  if (
+    admitted === undefined ||
+    admitted.commandId !== commandId ||
+    admitted.projectId !== target.projectId ||
+    admitted.threadId !== target.threadId ||
+    admitted.path !== requested ||
+    !admitted.roots.some((root) => roots.includes(root))
+  )
+    return yield* mutationDenied();
 });
 
 /** Direct command bindings use only an already registered root or this thread's workspace.
+ * Launch claims may also carry a canonical-checked child path, tied to current SQL roots.
  * New worktrees are bound by the app-owned preparation path, which opts into trust explicitly.
  */
 const authorizeCommandWorkspace = Effect.fnUntraced(function* (
   sql: SqlClient.SqlClient,
   grant: AuthResourceGrant,
   command: OrchestrationV2ServerCommand,
+  authority: MutationAuthority,
 ) {
   if (grant.projects.mode === "all" && grant.providers.mode === "all") return;
   if (
@@ -300,6 +334,8 @@ const authorizeCommandWorkspace = Effect.fnUntraced(function* (
         sql,
         { projectId: ProjectId.make(owner), threadId: command.threadId },
         path,
+        authority,
+        command.commandId,
       );
 });
 
@@ -640,7 +676,7 @@ export const authorizeCommand = Effect.fn("resourceAuthorization.command")(
           allowCreate: true,
         });
     }
-    yield* authorizeCommandWorkspace(sql, grant, command);
+    yield* authorizeCommandWorkspace(sql, grant, command, authority);
     const runIds = [
       ...("runId" in command ? [command.runId] : []),
       ...("parentRunId" in command ? [command.parentRunId] : []),
@@ -848,6 +884,8 @@ export const authorizeCommandReceipt = Effect.fn("resourceAuthorization.commandR
           sql,
           { projectId: ProjectId.make(path.project), threadId: ThreadId.make(path.thread) },
           path.path,
+          authority,
+          commandId,
         );
     }
     const references = yield* sql<{ readonly kind: string; readonly id: string }>`

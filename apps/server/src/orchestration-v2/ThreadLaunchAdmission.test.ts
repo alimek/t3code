@@ -1,3 +1,4 @@
+import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it, vi } from "@effect/vitest";
 import {
@@ -246,13 +247,12 @@ const message = (id: string, attachments: ReadonlyArray<ChatAttachment> = []) =>
 const isAuthorizationError = Schema.is(EnvironmentAuthorizationError);
 const denied = Effect.fnUntraced(function* <A, E, R>(effect: Effect.Effect<A, E, R>) {
   const error = yield* Effect.flip(effect);
-  assert.isTrue(
-    isAuthorizationError(error) ||
-      (typeof error === "object" &&
-        error !== null &&
-        "cause" in error &&
-        isAuthorizationError(error.cause)),
-  );
+  let cause: unknown = error;
+  while (typeof cause === "object" && cause !== null) {
+    if (isAuthorizationError(cause)) return;
+    cause = "cause" in cause ? cause.cause : undefined;
+  }
+  assert.fail("Expected an authorization error in the domain failure chain.");
 });
 
 it.effect(
@@ -854,4 +854,207 @@ it.effect("claim and folder I/O release the SQL transaction before external work
     assert.equal(f.copyFile.mock.calls.length, 1);
     assert.equal(f.folder.mock.calls.length, 2);
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("restricted launch keeps canonical-admitted existing workspace children", () =>
+  Effect.gen(function* () {
+    const f = yield* makeFixture;
+    const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-review-subdir-" });
+    const child = `${root}/child`;
+    yield* f.fs.makeDirectory(child);
+    yield* f.sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectA}`;
+    const result = yield* f.launches.launch(authority, {
+      ...launchInput("review-subdir"),
+      workspaceStrategy: { type: "existing_worktree", worktreePath: child },
+    });
+    assert.equal(result.threadId, launchInput("review-subdir").threadId);
+    yield* Deferred.await(f.setupStarted);
+    assert.equal((yield* f.threads.getThreadShell(result.threadId))?.worktreePath, child);
+    const replay = yield* f.launches.launch(authority, {
+      ...launchInput("review-subdir"),
+      workspaceStrategy: { type: "existing_worktree", worktreePath: child },
+    });
+    assert.equal(replay.threadId, result.threadId);
+    assert.isTrue(replay.resumed);
+    assert.equal(f.runSetup.mock.calls.length, 1);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("restricted root launch keeps server-created Scratch children", () =>
+  Effect.gen(function* () {
+    const f = yield* makeFixture;
+    const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-review-scratch-" });
+    const child = `${root}/managed-child`;
+    yield* f.sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectA}`;
+    f.folder.mockImplementation(() =>
+      Effect.gen(function* () {
+        assert.isTrue(Option.isNone(yield* Effect.serviceOption(f.sql.transactionService)));
+        yield* f.sql`SELECT 1`;
+        yield* f.fs.makeDirectory(child);
+        return Option.some(child);
+      }).pipe(Effect.orDie),
+    );
+    const result = yield* f.launches.launch(authority, launchInput("review-scratch"));
+    assert.equal(result.threadId, launchInput("review-scratch").threadId);
+    assert.isTrue(yield* f.fs.exists(child));
+    yield* Deferred.await(f.setupStarted);
+    assert.equal((yield* f.threads.getThreadShell(result.threadId))?.worktreePath, child);
+    const replay = yield* f.launches.launch(authority, launchInput("review-scratch"));
+    assert.equal(replay.threadId, result.threadId);
+    assert.isTrue(replay.resumed);
+    assert.equal(f.folder.mock.calls.length, 1);
+    assert.equal(f.runSetup.mock.calls.length, 1);
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "canonical launch admission rejects cross-project workspaces and forged raw child bindings",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* makeFixture;
+      const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-launch-child-" });
+      const outside = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-launch-outside-" });
+      const child = `${root}/own-child`;
+      const foreign = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-launch-foreign-" });
+      yield* f.fs.makeDirectory(child);
+      yield* f.fs.makeDirectory(`${foreign}/child`, { recursive: true });
+      yield* f.sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectA}`;
+      yield* f.sql`UPDATE projection_projects SET workspace_root = ${foreign} WHERE project_id = ${projectB}`;
+      for (const path of [outside, foreign, `${foreign}/child`]) {
+        yield* denied(
+          f.launches.launch(authority, {
+            ...launchInput("foreign-child"),
+            workspaceStrategy: { type: "existing_worktree", worktreePath: path },
+          }),
+        );
+      }
+      const create = {
+        ...provenance,
+        type: "thread.create" as const,
+        ...launchInput("raw-child"),
+        branch: null,
+        worktreePath: child,
+      };
+      for (const path of [child, foreign, `${foreign}/child`, outside]) {
+        yield* denied(
+          f.threads.dispatch(authority, {
+            ...create,
+            threadId: create.threadId!,
+            worktreePath: path,
+          }),
+        );
+        yield* denied(
+          f.threads.dispatch(authority, {
+            type: "thread.metadata.update",
+            commandId: CommandId.make("raw-child-retarget"),
+            threadId: activeA,
+            worktreePath: path,
+          }),
+        );
+      }
+      f.noEffects();
+      assert.isTrue(Option.isNone(yield* f.receipts.getByCommandId(create.commandId)));
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.skipIf(!symlinksSupported)(
+  "canonical launch permits own aliases and rejects symlink escapes",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* makeFixture;
+      const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-launch-symlink-" });
+      const hidden = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-launch-hidden-" });
+      const child = `${root}/own-child`;
+      yield* f.fs.makeDirectory(child);
+      yield* f.fs.symlink(hidden, `${root}/escape`);
+      yield* f.fs.symlink(child, `${root}/alias`);
+      yield* f.sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectA}`;
+      yield* f.sql`UPDATE projection_projects SET workspace_root = ${hidden} WHERE project_id = ${projectB}`;
+      yield* denied(
+        f.launches.launch(authority, {
+          ...launchInput("escape"),
+          workspaceStrategy: { type: "existing_worktree", worktreePath: `${root}/escape` },
+        }),
+      );
+      yield* denied(
+        f.threads.dispatch(authority, {
+          type: "thread.metadata.update",
+          commandId: CommandId.make("raw-escape"),
+          threadId: activeA,
+          worktreePath: `${root}/escape`,
+        }),
+      );
+      f.noEffects();
+      const result = yield* f.launches.launch(authority, {
+        ...launchInput("own-alias"),
+        workspaceStrategy: { type: "existing_worktree", worktreePath: `${root}/alias` },
+      });
+      yield* Deferred.await(f.setupStarted);
+      assert.equal(
+        (yield* f.threads.getThreadShell(result.threadId))?.worktreePath,
+        `${root}/alias`,
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each(["grant", "scope", "root", "foreign-root"] as const)(
+  "canonical-admitted launch rechecks %s at its actual create transaction",
+  (cut) =>
+    Effect.gen(function* () {
+      const f = yield* makeFixture;
+      const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-launch-final-cut-" });
+      const child = `${root}/child`;
+      yield* f.fs.makeDirectory(child);
+      yield* f.sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectA}`;
+      const current = yield* Ref.make({
+        scopes: [AuthOrchestrationOperateScope],
+        resourceGrant: grantA,
+      });
+      const caller: MutationAuthority = { current: Ref.get(current) };
+      const reached = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      const input = {
+        ...launchInput(`canonical-final-cut:${cut}`),
+        workspaceStrategy: { type: "existing_worktree" as const, worktreePath: child },
+      };
+      const commit = f.sink.commitCommand;
+      const spy = vi
+        .spyOn(f.sink, "commitCommand")
+        .mockImplementation((admission, command) =>
+          command.commandId !== input.commandId
+            ? commit(admission, command)
+            : Deferred.succeed(reached, undefined).pipe(
+                Effect.andThen(Deferred.await(resume)),
+                Effect.andThen(commit(admission, command)),
+              ),
+        );
+      try {
+        const pending = yield* f.launches.launch(caller, input).pipe(Effect.forkChild);
+        yield* Deferred.await(reached);
+        if (cut === "grant")
+          yield* Ref.set(current, {
+            scopes: [AuthOrchestrationOperateScope],
+            resourceGrant: grantNone,
+          });
+        if (cut === "scope") yield* Ref.set(current, { scopes: [], resourceGrant: grantA });
+        if (cut === "root")
+          yield* f.sql`UPDATE projection_projects SET workspace_root = '/retargeted' WHERE project_id = ${projectA}`;
+        if (cut === "foreign-root")
+          yield* f.sql`UPDATE projection_projects SET workspace_root = ${child} WHERE project_id = ${projectB}`;
+        yield* Deferred.succeed(resume, undefined);
+        yield* denied(Fiber.join(pending));
+        assert.lengthOf(
+          yield* f.sql`SELECT command_id FROM orchestration_command_receipts WHERE command_id = ${input.commandId}`,
+          0,
+        );
+        assert.lengthOf(
+          yield* f.sql`SELECT sequence FROM orchestration_events WHERE command_id = ${input.commandId}`,
+          0,
+        );
+        assert.isNull(yield* f.threads.getThreadShell(input.threadId!));
+        assert.equal(f.runSetup.mock.calls.length, 0);
+      } finally {
+        spy.mockRestore();
+      }
+    }).pipe(Effect.provide(layerTest)),
 );
