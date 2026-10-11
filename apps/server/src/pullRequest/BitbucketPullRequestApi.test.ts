@@ -303,6 +303,7 @@ layer("BitbucketPullRequestApi.layer", (it) => {
       const error = yield* Effect.flip(
         api.listPullRequests({ repository: "acme/team/web", state: "open", limit: 50 }),
       );
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
       assert.strictEqual(error._tag, "BitbucketRepositoryUnsupportedError");
       assert.strictEqual(mockedRequest.mock.calls.length, 0);
@@ -358,6 +359,7 @@ layer("BitbucketPullRequestApi.layer", (it) => {
           commit: "../../acme/other/diff/deadbeef",
         }),
       );
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
       assert.strictEqual(error._tag, "BitbucketDiffCommitError");
       assert.strictEqual(mockedRequest.mock.calls.length, 0);
@@ -738,6 +740,7 @@ layer("BitbucketPullRequestApi.layer", (it) => {
       const api = yield* BitbucketPullRequestApi.BitbucketPullRequestApi;
 
       const error = yield* Effect.flip(api.getPullRequest({ repository: "acme/web", number: 7 }));
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
       assert.strictEqual(error._tag, "BitbucketPullRequestReadError");
     }),
@@ -757,6 +760,7 @@ layer("BitbucketPullRequestApi.layer", (it) => {
       const api = yield* BitbucketPullRequestApi.BitbucketPullRequestApi;
 
       const error = yield* Effect.flip(api.getViewer());
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
       // The fact only; the provider adds the operation around it.
       assert.strictEqual(error.detail, "Bitbucket returned HTTP 500.");
@@ -769,6 +773,7 @@ layer("BitbucketPullRequestApi.layer", (it) => {
       const api = yield* BitbucketPullRequestApi.BitbucketPullRequestApi;
 
       const error = yield* Effect.flip(api.getViewer());
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
       assert.strictEqual(error._tag, "BitbucketViewerUnavailableError");
     }),
@@ -1050,6 +1055,7 @@ layer("BitbucketPullRequestApi.layer", (it) => {
       const api = yield* BitbucketPullRequestApi.BitbucketPullRequestApi;
 
       const error = yield* Effect.flip(api.getRepositoryPermission({ repository: "acme/web" }));
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
       assert.strictEqual(error._tag, "BitbucketResponseError");
     }),

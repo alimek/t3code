@@ -9,14 +9,60 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Context from "effect/Context";
+import * as Schema from "effect/Schema";
 import * as FileSystem from "effect/FileSystem";
 import * as SqlClient from "effect/sql/SqlClient";
 import { trustedReadAuthority, type ThreadReadAuthority } from "./ResourceAuthorization.ts";
 
+const isEnvironmentAuthorizationError = Schema.is(EnvironmentAuthorizationError);
+
+/** Only service-owned actions install this final-effect check; raw drivers remain internal. */
+export const workspaceEffectAdmission = Context.Reference<WorkspaceActionAdmission | undefined>(
+  "t3/auth/workspaceEffectAdmission",
+  { defaultValue: () => undefined },
+);
+export type WorkspaceActionAdmission = {
+  readonly authority: ThreadReadAuthority;
+  readonly input: WorkspaceReadInput;
+  readonly scope: AuthEnvironmentScope;
+  readonly projectId: ProjectId | undefined;
+  readonly checkSql: Effect.Effect<void, EnvironmentAuthorizationError>;
+  readonly beforeEffect: (
+    cwd: string,
+    scope?: AuthEnvironmentScope,
+  ) => Effect.Effect<void, EnvironmentAuthorizationError>;
+};
+export const beforeWorkspaceEffect = (cwd: string, scope?: AuthEnvironmentScope) =>
+  workspaceEffectAdmission.pipe(
+    Effect.flatMap((admission) =>
+      admission === undefined ? Effect.void : admission.beforeEffect(cwd, scope),
+    ),
+  );
+/** Best-effort Git fallbacks must never turn denied authority into another effect. */
+export const recoverWorkspaceError =
+  <A>(fallback: () => A) =>
+  <B, E, R>(operation: Effect.Effect<B, E, R>) =>
+    Effect.catchIf(
+      operation,
+      (error: E): error is Exclude<E, EnvironmentAuthorizationError> =>
+        !isEnvironmentAuthorizationError(error),
+      () => Effect.succeed(fallback()),
+    );
+export const beforeCurrentWorkspaceEffect = workspaceEffectAdmission.pipe(
+  Effect.flatMap((admission) =>
+    admission === undefined ? Effect.void : admission.beforeEffect(admission.input.cwd),
+  ),
+);
+export type WorkspaceActionCallback<A> = (
+  admission: WorkspaceActionAdmission,
+  result: A,
+) => Effect.Effect<void, EnvironmentAuthorizationError>;
+
 export type WorkspaceReadInput = {
   readonly cwd: string;
-  readonly projectId?: ProjectId;
-  readonly threadId?: ThreadId;
+  readonly projectId?: ProjectId | undefined;
+  readonly threadId?: ThreadId | undefined;
 };
 
 const within = (candidate: string, root: string) => {
@@ -252,10 +298,106 @@ export const make = Effect.gen(function* () {
     operation: Effect.Effect<A, E, R>,
     scope: AuthEnvironmentScope = AuthOrchestrationReadScope,
   ) =>
-    admit(authority, input, scope).pipe(
-      Effect.andThen(operation),
-      Effect.tap(() => admit(authority, input, scope)),
-      Effect.tapError(() => admit(authority, input, scope)),
+    run(
+      authority,
+      input,
+      operation.pipe(Effect.tapError(() => admit(authority, input, scope))),
+      scope,
     );
-  return { admit, read, thread, repository };
+  const capture = Effect.fn("workspaceReadAccess.capture")(function* (
+    authority: ThreadReadAuthority,
+    requestedInput: WorkspaceReadInput,
+    scope: AuthEnvironmentScope,
+  ) {
+    const input = { ...requestedInput };
+    const owners = yield* admit(authority, input, scope);
+    const owner =
+      input.threadId === undefined ? undefined : yield* thread(authority, input.threadId, scope);
+    const projectId = owner === undefined ? owners?.[0]?.project : owner.project;
+    const association =
+      owners === undefined
+        ? []
+        : yield* roots(scope).pipe(
+            Effect.map((rows) =>
+              rows.filter(
+                (r) =>
+                  (r.thread === null && owners.some((o) => o.project === r.project)) ||
+                  owners.some(
+                    (o) => o.project === r.project && o.thread === r.thread && o.root === r.root,
+                  ) ||
+                  (input.threadId !== undefined && r.thread === input.threadId),
+              ),
+            ),
+          );
+    const checkSql = Effect.gen(function* () {
+      const value = yield* current(authority, scope);
+      if (value === undefined) return;
+      if (association.length === 0) return;
+      const live = yield* roots(scope);
+      if (
+        association.some(
+          (r) =>
+            !resourceGrantAllowsProject(value.resourceGrant, ProjectId.make(r.project)) ||
+            !live.some(
+              (l) => l.project === r.project && l.thread === r.thread && l.root === r.root,
+            ),
+        )
+      )
+        return yield* denied(scope);
+      if (owner !== undefined && input.threadId !== undefined) {
+        const actual = yield* thread(authority, input.threadId, scope);
+        if (actual?.project !== owner.project || actual.root !== owner.root)
+          return yield* denied(scope);
+      }
+      yield* current(authority, scope);
+    });
+    const beforeEffect = Effect.fnUntraced(function* (
+      cwd: string,
+      requiredScope: AuthEnvironmentScope = scope,
+    ) {
+      yield* checkSql;
+      yield* repository(authority, input, cwd, requiredScope);
+      yield* checkSql;
+    });
+    const admission: WorkspaceActionAdmission = {
+      authority,
+      input,
+      scope,
+      projectId: projectId === undefined ? undefined : ProjectId.make(projectId),
+      checkSql,
+      beforeEffect,
+    };
+    yield* admission.beforeEffect(input.cwd);
+    return admission;
+  });
+  const run = <A, E, R>(
+    authority: ThreadReadAuthority,
+    input: WorkspaceReadInput,
+    operation: Effect.Effect<A, E, R>,
+    scope: AuthEnvironmentScope,
+    afterSuccess?: WorkspaceActionCallback<A>,
+  ) =>
+    Effect.gen(function* () {
+      const inherited = yield* workspaceEffectAdmission;
+      const admission = yield* capture(authority, input, scope);
+      const checked =
+        inherited === undefined
+          ? admission
+          : {
+              ...admission,
+              beforeEffect: (cwd: string, scope?: AuthEnvironmentScope) =>
+                inherited
+                  .beforeEffect(cwd)
+                  .pipe(Effect.andThen(admission.beforeEffect(cwd, scope))),
+              checkSql: inherited.checkSql.pipe(Effect.andThen(admission.checkSql)),
+            };
+      return yield* operation.pipe(
+        Effect.tap(() => checked.beforeEffect(checked.input.cwd)),
+        Effect.tap((result) =>
+          afterSuccess === undefined ? Effect.void : afterSuccess(checked, result),
+        ),
+        Effect.provideService(workspaceEffectAdmission, checked),
+      );
+    });
+  return { admit, read, thread, repository, capture, run };
 });

@@ -1,3 +1,7 @@
+import { recoverWorkspaceError } from "../auth/workspaceReadAccess.ts";
+import { EnvironmentAuthorizationError, AuthSourceControlWriteScope } from "@t3tools/contracts";
+import type { ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
+import * as WorkspaceReadAccess from "../auth/workspaceReadAccess.ts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -29,6 +33,8 @@ import {
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as BitbucketApi from "./BitbucketApi.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
+
+const isEnvironmentAuthorizationError = Schema.is(EnvironmentAuthorizationError);
 const isSourceControlRepositoryError = Schema.is(SourceControlRepositoryError);
 const isSourceControlProviderError = Schema.is(SourceControlProviderError);
 const isBitbucketRepositoryLocatorError = Schema.is(BitbucketApi.BitbucketRepositoryLocatorError);
@@ -38,7 +44,10 @@ export class SourceControlRepositoryService extends Context.Service<
   {
     readonly lookupRepository: (
       input: SourceControlRepositoryLookupInput,
-    ) => Effect.Effect<SourceControlRepositoryInfo, SourceControlRepositoryError>;
+    ) => Effect.Effect<
+      SourceControlRepositoryInfo,
+      SourceControlRepositoryError | EnvironmentAuthorizationError
+    >;
     /**
      * Everything `cloneRepository` checks before running git: the resolved
      * remote, the normalized destination, and that the destination is empty.
@@ -46,18 +55,29 @@ export class SourceControlRepositoryService extends Context.Service<
      */
     readonly prepareClone: (
       input: SourceControlCloneRepositoryInput,
-    ) => Effect.Effect<SourceControlPreparedClone, SourceControlRepositoryError>;
+    ) => Effect.Effect<
+      SourceControlPreparedClone,
+      SourceControlRepositoryError | EnvironmentAuthorizationError
+    >;
     readonly cloneRepository: (
       input: SourceControlCloneRepositoryInput,
       options?: SourceControlCloneOptions,
-    ) => Effect.Effect<SourceControlCloneRepositoryResult, SourceControlRepositoryError>;
+    ) => Effect.Effect<
+      SourceControlCloneRepositoryResult,
+      SourceControlRepositoryError | EnvironmentAuthorizationError
+    >;
     /** Removes a partial or failed clone so the destination is empty again. */
     readonly discardClone: (
       destinationPath: string,
-    ) => Effect.Effect<void, SourceControlRepositoryError>;
+    ) => Effect.Effect<void, SourceControlRepositoryError | EnvironmentAuthorizationError>;
     readonly publishRepository: (
+      authority: ThreadReadAuthority,
       input: SourceControlPublishRepositoryInput,
-    ) => Effect.Effect<SourceControlPublishRepositoryResult, SourceControlRepositoryError>;
+      afterSuccess?: WorkspaceReadAccess.WorkspaceActionCallback<SourceControlPublishRepositoryResult>,
+    ) => Effect.Effect<
+      SourceControlPublishRepositoryResult,
+      SourceControlRepositoryError | EnvironmentAuthorizationError
+    >;
   }
 >()("t3/sourceControl/SourceControlRepositoryService") {}
 
@@ -91,7 +111,7 @@ const CLONE_ENV = {
 
 function mapRepositoryError(operation: string, provider: SourceControlProviderKind) {
   return Effect.mapError((cause: unknown) =>
-    isSourceControlRepositoryError(cause)
+    isSourceControlRepositoryError(cause) || isEnvironmentAuthorizationError(cause)
       ? cause
       : new SourceControlRepositoryError({
           operation,
@@ -164,6 +184,7 @@ function selectRemoteUrl(
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  const access = yield* WorkspaceReadAccess.make;
   const config = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const git = yield* GitVcsDriver.GitVcsDriver;
@@ -407,12 +428,14 @@ export const make = Effect.gen(function* () {
         provider: input.provider,
       });
       const provider = yield* providers.get(providerKind);
+      yield* WorkspaceReadAccess.beforeWorkspaceEffect(input.cwd);
       const urls = yield* provider.createRepository({
         cwd: input.cwd,
         repository: input.repository.trim(),
         visibility: input.visibility,
       });
       const remoteUrl = selectRemoteUrl(urls, input.protocol);
+      yield* WorkspaceReadAccess.beforeWorkspaceEffect(input.cwd);
       const remoteName = yield* git.ensureRemote({
         cwd: input.cwd,
         preferredName: input.remoteName?.trim() || "origin",
@@ -431,10 +454,10 @@ export const make = Effect.gen(function* () {
         })
         .pipe(
           Effect.map(() => true),
-          Effect.orElseSucceed(() => false),
+          recoverWorkspaceError(() => false),
         );
       if (!hasCommits) {
-        const details = yield* git.statusDetails(input.cwd).pipe(Effect.orElseSucceed(() => null));
+        const details = yield* git.statusDetails(input.cwd).pipe(recoverWorkspaceError(() => null));
         return {
           repository: toRepositoryInfo(providerKind, urls),
           remoteName,
@@ -444,6 +467,7 @@ export const make = Effect.gen(function* () {
         };
       }
 
+      yield* WorkspaceReadAccess.beforeWorkspaceEffect(input.cwd);
       const pushResult = yield* git.pushCurrentBranch(input.cwd, null, { remoteName });
 
       return {
@@ -468,8 +492,14 @@ export const make = Effect.gen(function* () {
       ),
     discardClone: (destinationPath) =>
       discardClone(destinationPath).pipe(mapRepositoryError("discardClone", "unknown")),
-    publishRepository: (input) =>
-      publishRepository(input).pipe(mapRepositoryError("publishRepository", input.provider)),
+    publishRepository: (authority, input, afterSuccess) =>
+      access.run(
+        authority,
+        input,
+        publishRepository(input).pipe(mapRepositoryError("publishRepository", input.provider)),
+        AuthSourceControlWriteScope,
+        afterSuccess,
+      ),
   });
 });
 

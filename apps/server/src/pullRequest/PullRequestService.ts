@@ -803,9 +803,17 @@ export const make = Effect.gen(function* () {
           (project) =>
             project.repositoryIdentity != null
               ? Effect.succeed(project)
-              : repositoryIdentities
-                  .resolve(project.workspaceRoot)
-                  .pipe(Effect.map((repositoryIdentity) => ({ ...project, repositoryIdentity }))),
+              : repositoryIdentities.resolve(project.workspaceRoot).pipe(
+                  Effect.map((repositoryIdentity) => ({ ...project, repositoryIdentity })),
+                  Effect.mapError(
+                    (cause) =>
+                      new PullRequestOperationError({
+                        operation: "listProjects",
+                        detail: "Repository identity could not be read.",
+                        cause,
+                      }),
+                  ),
+                ),
           { concurrency: REPOSITORY_CONCURRENCY },
         ),
       ),

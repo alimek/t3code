@@ -141,6 +141,7 @@ it.effect("includes the request cwd when an unregistered provider is used", () =
     const error = yield* provider
       .getChangeRequest({ cwd: "/repo", reference: "#42" })
       .pipe(Effect.flip);
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.strictEqual(error.provider, "unknown");
     assert.strictEqual(error.operation, "getChangeRequest");
@@ -163,6 +164,7 @@ it.effect("retains VCS detection failures with structured cwd context", () =>
     });
 
     const error = yield* registry.resolve({ cwd: "/repo" }).pipe(Effect.flip);
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.strictEqual(error.provider, "unknown");
     assert.strictEqual(error.operation, "detectProvider");

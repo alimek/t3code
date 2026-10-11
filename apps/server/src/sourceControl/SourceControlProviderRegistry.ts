@@ -1,3 +1,4 @@
+import { type EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -48,19 +49,25 @@ export class SourceControlProviderRegistry extends Context.Service<
       kind: SourceControlProviderKind,
     ) => Effect.Effect<
       SourceControlProvider.SourceControlProvider["Service"],
-      SourceControlProviderError
+      SourceControlProviderError | EnvironmentAuthorizationError
     >;
     readonly resolveHandle: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProvider.SourceControlProviderContext;
-    }) => Effect.Effect<SourceControlProviderHandle, SourceControlProviderError>;
+    }) => Effect.Effect<
+      SourceControlProviderHandle,
+      SourceControlProviderError | EnvironmentAuthorizationError
+    >;
     readonly resolve: (input: {
       readonly cwd: string;
     }) => Effect.Effect<
       SourceControlProvider.SourceControlProvider["Service"],
-      SourceControlProviderError
+      SourceControlProviderError | EnvironmentAuthorizationError
     >;
-    readonly discover: Effect.Effect<ReadonlyArray<SourceControlProviderDiscoveryItem>>;
+    readonly discover: Effect.Effect<
+      ReadonlyArray<SourceControlProviderDiscoveryItem>,
+      EnvironmentAuthorizationError
+    >;
   }
 >()("t3/sourceControl/SourceControlProviderRegistry") {}
 
@@ -215,27 +222,29 @@ export const makeWithProviders = Effect.fn("makeSourceControlProviderRegistryWit
     const detectProviderContext = Effect.fn("SourceControlProviderRegistry.detectProviderContext")(
       function* (cwd: string) {
         const handle = yield* vcsRegistry.resolve({ cwd }).pipe(
-          Effect.mapError(
-            (error) =>
-              new SourceControlProviderError({
-                provider: "unknown",
-                operation: "detectProvider",
-                cwd,
-                detail: "Failed to detect source control provider.",
-                cause: error,
-              }),
+          Effect.mapError((error) =>
+            error._tag === "EnvironmentAuthorizationError"
+              ? error
+              : new SourceControlProviderError({
+                  provider: "unknown",
+                  operation: "detectProvider",
+                  cwd,
+                  detail: "Failed to detect source control provider.",
+                  cause: error,
+                }),
           ),
         );
         const remotes = yield* handle.driver.listRemotes(cwd).pipe(
-          Effect.mapError(
-            (error) =>
-              new SourceControlProviderError({
-                provider: "unknown",
-                operation: "detectProvider",
-                cwd,
-                detail: "Failed to detect source control provider.",
-                cause: error,
-              }),
+          Effect.mapError((error) =>
+            error._tag === "EnvironmentAuthorizationError"
+              ? error
+              : new SourceControlProviderError({
+                  provider: "unknown",
+                  operation: "detectProvider",
+                  cwd,
+                  detail: "Failed to detect source control provider.",
+                  cause: error,
+                }),
           ),
         );
         const context = selectProviderContext(remotes.remotes);
@@ -252,7 +261,7 @@ export const makeWithProviders = Effect.fn("makeSourceControlProviderRegistryWit
     const providerContextCache = yield* Cache.makeWith<
       string,
       SourceControlProvider.SourceControlProviderContext | null,
-      SourceControlProviderError
+      SourceControlProviderError | EnvironmentAuthorizationError
     >(detectProviderContext, {
       capacity: PROVIDER_DETECTION_CACHE_CAPACITY,
       timeToLive: (exit) => (Exit.isSuccess(exit) ? PROVIDER_DETECTION_CACHE_TTL : Duration.zero),

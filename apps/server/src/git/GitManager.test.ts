@@ -238,7 +238,7 @@ function runGit(
     readonly stdout: string;
     readonly stderr: string;
   },
-  GitCommandError,
+  GitCommandError | EnvironmentAuthorizationError,
   GitVcsDriver.GitVcsDriver
 > {
   return Effect.gen(function* () {
@@ -261,7 +261,7 @@ function initRepo(
   cwd: string,
 ): Effect.Effect<
   void,
-  PlatformError.PlatformError | GitCommandError,
+  PlatformError.PlatformError | GitCommandError | EnvironmentAuthorizationError,
   FileSystem.FileSystem | Scope.Scope | GitVcsDriver.GitVcsDriver
 > {
   return Effect.gen(function* () {
@@ -277,7 +277,7 @@ function initRepo(
 
 function createBareRemote(): Effect.Effect<
   string,
-  PlatformError.PlatformError | GitCommandError,
+  PlatformError.PlatformError | GitCommandError | EnvironmentAuthorizationError,
   FileSystem.FileSystem | Scope.Scope | GitVcsDriver.GitVcsDriver
 > {
   return Effect.gen(function* () {
@@ -292,7 +292,7 @@ function configureRemote(
   remoteName: string,
   remotePath: string,
   fetchNamespace: string,
-): Effect.Effect<void, GitCommandError, GitVcsDriver.GitVcsDriver> {
+): Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError, GitVcsDriver.GitVcsDriver> {
   return Effect.gen(function* () {
     yield* runGit(cwd, ["config", `remote.${remoteName}.url`, remotePath]);
     yield* runGit(cwd, [
@@ -309,7 +309,7 @@ function configureVisibleRemoteUrlWithLocalRewrite(
   remoteName: string,
   visibleUrl: string,
   localRemotePath: string,
-): Effect.Effect<void, GitCommandError, GitVcsDriver.GitVcsDriver> {
+): Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError, GitVcsDriver.GitVcsDriver> {
   return Effect.gen(function* () {
     yield* runGit(cwd, ["config", `remote.${remoteName}.url`, visibleUrl]);
     yield* runGit(cwd, ["config", `url.${localRemotePath}.insteadOf`, visibleUrl]);
@@ -670,9 +670,10 @@ function runStackedAction(
     featureBranch?: boolean;
     filePaths?: readonly string[];
   },
-  options?: Parameters<GitManager.GitManager["Service"]["runStackedAction"]>[1],
+  options?: Parameters<GitManager.GitManager["Service"]["runStackedAction"]>[2],
 ) {
   return manager.runStackedAction(
+    trustedReadAuthority,
     {
       ...input,
       actionId: input.actionId ?? "test-action-id",
@@ -2748,7 +2749,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       const first = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(first.pr?.number).toBe(90);
 
-      yield* manager.invalidateStatus(repoDir);
+      yield* manager.invalidateStatus(trustedReadAuthority, repoDir);
       const second = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(second.pr?.number).toBe(90);
     }),
@@ -2902,7 +2903,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       // An explicit invalidation (user refresh, git action) bypasses the PR
       // cache and forces a live lookup — which now fails. The badge must keep
       // the last known PR instead of blanking out.
-      yield* manager.invalidateStatus(repoDir);
+      yield* manager.invalidateStatus(trustedReadAuthority, repoDir);
       const second = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(second.pr?.number).toBe(214);
     }),
@@ -2951,7 +2952,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           "feature/pr-retarget",
         ]);
 
-        yield* manager.invalidateStatus(repoDir);
+        yield* manager.invalidateStatus(trustedReadAuthority, repoDir);
         const second = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
         expect(second.pr).toBeNull();
       }),
@@ -2985,7 +2986,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       expect(first.pr?.number).toBe(215);
 
       yield* runGit(repoDir, ["push", "-u", "origin", "feature/pr-sticky-first-push"]);
-      yield* manager.invalidateStatus(repoDir);
+      yield* manager.invalidateStatus(trustedReadAuthority, repoDir);
 
       const second = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(second.pr?.number).toBe(215);
@@ -3024,7 +3025,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* runGit(repoDir, ["remote", "add", "replacement", replacementRemoteDir]);
       yield* runGit(repoDir, ["push", "replacement", "feature/pr-repointed"]);
       yield* runGit(repoDir, ["remote", "set-url", "origin", replacementRemoteDir]);
-      yield* manager.invalidateStatus(repoDir);
+      yield* manager.invalidateStatus(trustedReadAuthority, repoDir);
 
       const second = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(second.pr).toBeNull();
@@ -3068,7 +3069,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       // sticky PR must survive even though the current lookup can no
       // longer resolve a remote URL to compare against.
       yield* runGit(repoDir, ["config", "--unset", "remote.origin.url"]);
-      yield* manager.invalidateStatus(repoDir);
+      yield* manager.invalidateStatus(trustedReadAuthority, repoDir);
 
       const second = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(second.pr?.number).toBe(217);
@@ -3282,7 +3283,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       });
 
       // The checkout is not the project's root, so only the thread can name the project.
-      yield* manager.runStackedAction({
+      yield* manager.runStackedAction(trustedReadAuthority, {
         actionId: "test-action-id",
         cwd: repoDir,
         action: "commit",
@@ -4213,11 +4214,12 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         const forkDir = yield* createBareRemote();
         yield* runGit(repoDir, ["remote", "add", "fork-seed", forkDir]);
         yield* runGit(repoDir, ["push", "-u", "fork-seed", "statemachine"]);
-        yield* runGit(repoDir, [
-          "config",
-          "remote.fork-seed.url",
+        yield* configureVisibleRemoteUrlWithLocalRewrite(
+          repoDir,
+          "fork-seed",
           "git@github.com:octocat/codething-mvp.git",
-        ]);
+          forkDir,
+        );
 
         const { manager, ghCalls } = yield* makeManager({
           ghScenario: {

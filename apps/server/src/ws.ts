@@ -1,3 +1,7 @@
+import {
+  type WorkspaceActionAdmission,
+  recoverWorkspaceError,
+} from "./auth/workspaceReadAccess.ts";
 import { trustedReadAuthority } from "./auth/ResourceAuthorization.ts";
 import { trustedMutationAuthority, type MutationAuthority } from "./auth/CommandAuthorization.ts";
 import { type OrchestrationV2DomainEvent } from "@t3tools/contracts";
@@ -1981,10 +1985,24 @@ const layerWsRpc = (
           };
         });
 
-      const refreshGitStatus = (cwd: string) =>
+      // Existing bootstrap (08) and deferred worktree flows (04c2b); activation remains closed.
+      const refreshTrustedGitStatus = (cwd: string) =>
         vcsStatusBroadcaster
           .refreshStatus(trustedReadAuthority, cwd)
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
+
+      const refreshGitStatus = (admission: WorkspaceActionAdmission) =>
+        admission.beforeEffect(admission.input.cwd).pipe(
+          Effect.andThen(
+            vcsStatusBroadcaster.refreshStatus(
+              admission.authority,
+              admission.input.cwd,
+              admission.scope,
+            ),
+          ),
+          recoverWorkspaceError(() => undefined),
+          Effect.asVoid,
+        );
 
       const mutateProject = Effect.fn("ws.projects.mutate")(function* (mutation: ProjectMutation) {
         const result = yield* projectMutationOperation(projectService, mutationAuthority, mutation);
@@ -2817,7 +2835,7 @@ const layerWsRpc = (
                     projectId: project.projectId,
                   }),
                 ),
-                Effect.andThen(refreshGitStatus(project.workspaceRoot)),
+                Effect.andThen(refreshTrustedGitStatus(project.workspaceRoot)),
                 Effect.ignoreCause({ log: true }),
               ),
           }),
@@ -2858,12 +2876,12 @@ const layerWsRpc = (
             ),
           ),
         [WS_METHODS.sourceControlPublishRepository]: (input) =>
-          sourceControlRepositories.publishRepository(input).pipe(
-            // A new remote can change the cached identity. Only the `cwd` entry
-            // refreshes, so after a publish from a linked worktree the project
-            // root entry waits for its TTL.
-            Effect.tap(() => repositoryIdentityResolver.resolve(input.cwd, { refresh: true })),
-            Effect.tap(() => refreshGitStatus(input.cwd)),
+          sourceControlRepositories.publishRepository(readAuthority, input, (admission) =>
+            admission.beforeEffect(input.cwd).pipe(
+              Effect.andThen(repositoryIdentityResolver.resolve(input.cwd, { refresh: true })),
+              recoverWorkspaceError(() => undefined),
+              Effect.andThen(refreshGitStatus(admission)),
+            ),
           ),
         [WS_METHODS.projectsSearchEntries]: (input) =>
           workspaceEntries.search(input).pipe(
@@ -3052,67 +3070,66 @@ const layerWsRpc = (
             .cancel(input.threadId)
             .pipe(Effect.map((cancelled) => ({ cancelled }))),
         [WS_METHODS.vcsPull]: (input) =>
-          gitWorkflow.pullCurrentBranch(input.cwd).pipe(
-            Effect.matchCauseEffect({
-              onFailure: (cause) => Effect.failCause(cause),
-              onSuccess: (result) =>
-                refreshGitStatus(input.cwd).pipe(Effect.ignore({ log: true }), Effect.as(result)),
-            }),
-          ),
+          gitWorkflow.pullCurrentBranch(readAuthority, input.cwd, refreshGitStatus),
         [WS_METHODS.gitRunStackedAction]: (input) =>
-          Stream.callback<GitActionProgressEvent, GitManagerServiceError>((queue) =>
+          Stream.callback<
+            GitActionProgressEvent,
+            GitManagerServiceError | EnvironmentAuthorizationError
+          >((queue) =>
             gitWorkflow
-              .runStackedAction(input, {
+              .runStackedAction(readAuthority, input, {
                 actionId: input.actionId,
                 progressReporter: {
                   publish: (event) => Queue.offer(queue, event).pipe(Effect.asVoid),
                 },
+                afterSuccess: (admission, result) =>
+                  (input.threadId === undefined
+                    ? Effect.void
+                    : linkCreatedPullRequest({
+                        admission,
+                        threadId: input.threadId,
+                        result,
+                        commandId: serverCommandId("pr-created-link"),
+                      }).pipe(
+                        Effect.provideService(Orchestrator.OrchestratorV2, orchestrationEngine),
+                        Effect.provideService(ProjectService.ProjectService, projectService),
+                      )
+                  ).pipe(
+                    Effect.andThen(
+                      refreshPushedPullRequests(admission, input, result).pipe(
+                        Effect.provideService(Orchestrator.OrchestratorV2, orchestrationEngine),
+                        Effect.provideService(ProjectStore.ProjectStoreV2, projectStore),
+                        Effect.provideService(PullRequestService.PullRequestService, pullRequests),
+                      ),
+                    ),
+                    Effect.andThen(refreshGitStatus(admission)),
+                  ),
               })
               .pipe(
                 Effect.matchCauseEffect({
                   onFailure: (cause) => Queue.failCause(queue, cause),
-                  onSuccess: (result) =>
-                    (input.threadId === undefined
-                      ? Effect.void
-                      : linkCreatedPullRequest({
-                          threadId: input.threadId,
-                          result,
-                          commandId: serverCommandId("pr-created-link"),
-                        }).pipe(
-                          Effect.provideService(Orchestrator.OrchestratorV2, orchestrationEngine),
-                          Effect.provideService(ProjectService.ProjectService, projectService),
-                        )
-                    ).pipe(
-                      Effect.andThen(
-                        refreshPushedPullRequests(input, result).pipe(
-                          Effect.provideService(Orchestrator.OrchestratorV2, orchestrationEngine),
-                          Effect.provideService(ProjectStore.ProjectStoreV2, projectStore),
-                          Effect.provideService(
-                            PullRequestService.PullRequestService,
-                            pullRequests,
-                          ),
-                        ),
-                      ),
-                      Effect.andThen(refreshGitStatus(input.cwd)),
-                      Effect.andThen(Queue.end(queue).pipe(Effect.asVoid)),
-                    ),
+                  onSuccess: () => Queue.end(queue).pipe(Effect.asVoid),
                 }),
               ),
           ),
         [WS_METHODS.gitPreparePullRequestThread]: (input) =>
           gitWorkflow
             .preparePullRequestThread(input)
-            .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+            .pipe(Effect.tap(() => refreshTrustedGitStatus(input.cwd))),
         [WS_METHODS.vcsCreateWorktree]: (input) =>
-          gitWorkflow.createWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+          gitWorkflow
+            .createWorktree(input)
+            .pipe(Effect.tap(() => refreshTrustedGitStatus(input.cwd))),
         [WS_METHODS.vcsRemoveWorktree]: (input) =>
-          gitWorkflow.removeWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+          gitWorkflow
+            .removeWorktree(input)
+            .pipe(Effect.tap(() => refreshTrustedGitStatus(input.cwd))),
         [WS_METHODS.vcsCreateRef]: (input) =>
-          gitWorkflow.createRef(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+          gitWorkflow.createRef(readAuthority, input, refreshGitStatus),
         [WS_METHODS.vcsSwitchRef]: (input) =>
-          gitWorkflow.switchRef(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+          gitWorkflow.switchRef(readAuthority, input, refreshGitStatus),
         [WS_METHODS.vcsInit]: (input) =>
-          vcsProvisioning.initRepository(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
+          vcsProvisioning.initRepository(readAuthority, input, refreshGitStatus),
         [WS_METHODS.terminalOpen]: (input) => terminalManager.open(input),
         [WS_METHODS.terminalAttach]: (input) =>
           Stream.callback<TerminalAttachStreamEvent, TerminalError>((queue) =>

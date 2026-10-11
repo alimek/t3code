@@ -552,7 +552,7 @@ const make = Effect.gen(function* () {
         yield* setupTracker.stageStatus(threadId, "fetch", startFromOrigin ? "running" : "skipped");
         if (startFromOrigin) {
           yield* git
-            .fetchRemote({
+            .fetchRemote(trustedReadAuthority, {
               cwd: project.workspaceRoot,
               remoteName: "origin",
               refName: input.workspaceStrategy.baseRef,
@@ -651,7 +651,7 @@ const make = Effect.gen(function* () {
         const worktreeCwd = worktreePath;
         yield* generateBranchNameFor(worktreeCwd, initialMessage).pipe(
           Effect.flatMap(({ branch: newBranch, exactName }) =>
-            git.renameBranch({
+            git.renameBranch(trustedReadAuthority, {
               cwd: worktreeCwd,
               oldBranch,
               newBranch,

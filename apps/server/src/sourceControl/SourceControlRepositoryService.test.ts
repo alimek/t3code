@@ -1,3 +1,5 @@
+import { collectionStoreLayer } from "../orchestration-v2/projectCollectionTestFixtures.ts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -65,6 +67,7 @@ function layer(input: {
   readonly fileSystem?: FileSystem.FileSystem;
 }) {
   const layerService = SourceControlRepositoryService.layer.pipe(
+    Layer.provide(collectionStoreLayer),
     Layer.provide(
       Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
         resolveLink: () => undefined,
@@ -145,6 +148,7 @@ it.effect("preserves provider failures without deriving the repository message f
         cwd: "/workspace",
       }),
     );
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.strictEqual(error.provider, "github");
     assert.strictEqual(error.operation, "lookupRepository");
@@ -182,9 +186,12 @@ it.effect(
         };
         for (const operation of [
           service.lookupRepository(input).pipe(Effect.asVoid),
-          service.publishRepository({ ...input, visibility: "private" }).pipe(Effect.asVoid),
+          service
+            .publishRepository(trustedReadAuthority, { ...input, visibility: "private" })
+            .pipe(Effect.asVoid),
         ]) {
           const error = yield* Effect.flip(operation);
+          if (error._tag === "EnvironmentAuthorizationError") throw error;
 
           assert.strictEqual(error.provider, "bitbucket");
           assert.strictEqual(
@@ -226,6 +233,7 @@ it.effect("keeps a plain Bitbucket locator lookalike out of the repository messa
     const error = yield* Effect.flip(
       service.lookupRepository({ provider: "bitbucket", repository: "t3code" }),
     );
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.strictEqual(error.detail, "The source control operation could not be completed.");
     assert.notInclude(error.message, "abc123");
@@ -255,6 +263,7 @@ it.effect("keeps arbitrary Bitbucket request failures out of the repository mess
           cwd: "/workspace",
         }),
       );
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
       assert.strictEqual(error.detail, "The source control operation could not be completed.");
       assert.notInclude(error.message, "abc123");
@@ -399,6 +408,7 @@ it.effect("reports clone progress from git's stderr and keeps its error text on 
       { stage: "receiving", percent: 40, detail: "1.00 MiB | 2.00 MiB/s" },
       { stage: "receiving", percent: 100, detail: "2.50 MiB | 2.00 MiB/s" },
     ]);
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
     // Git echoes the remote in some failures; the credentials must not follow.
     assert.strictEqual(
       error.detail,
@@ -459,8 +469,10 @@ it.effect("discards only a directory git wrote to", () =>
       const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
       yield* service.discardClone(partial);
       const error = yield* Effect.flip(service.discardClone(foreign));
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       assert.include(error.detail, "not from the clone");
       const replacedError = yield* Effect.flip(service.discardClone(replaced));
+      if (replacedError._tag === "EnvironmentAuthorizationError") throw replacedError;
       assert.include(replacedError.detail, "could not be inspected");
       // A destination that never got created is nothing to discard.
       yield* service.discardClone(path.join(parent, "missing"));
@@ -510,6 +522,7 @@ it.effect("preserves destination probe failures instead of treating them as miss
         destinationPath: "/restricted/t3code",
       }),
     );
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.strictEqual(error.provider, "unknown");
     assert.strictEqual(error.operation, "cloneRepository");
@@ -544,7 +557,7 @@ it.effect("publishes by creating the repository, adding a remote, and pushing up
 
   return Effect.gen(function* () {
     const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
-    const result = yield* service.publishRepository({
+    const result = yield* service.publishRepository(trustedReadAuthority, {
       cwd: "/workspace",
       provider: "github",
       repository: "octocat/t3code",
@@ -599,7 +612,7 @@ it.effect("publishes to the remote name returned by ensureRemote", () => {
 
   return Effect.gen(function* () {
     const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
-    const result = yield* service.publishRepository({
+    const result = yield* service.publishRepository(trustedReadAuthority, {
       cwd: "/workspace",
       provider: "github",
       repository: "octocat/t3code",
@@ -635,7 +648,7 @@ it.effect("publish succeeds with status remote_added when the local repo has no 
   let pushCalls = 0;
   return Effect.gen(function* () {
     const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
-    const result = yield* service.publishRepository({
+    const result = yield* service.publishRepository(trustedReadAuthority, {
       cwd: "/workspace",
       provider: "github",
       repository: "octocat/t3code",

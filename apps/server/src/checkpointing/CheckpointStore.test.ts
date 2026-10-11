@@ -1,3 +1,4 @@
+import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodePath from "node:path";
 
@@ -57,7 +58,7 @@ function writeTextFile(
 function git(
   cwd: string,
   args: ReadonlyArray<string>,
-): Effect.Effect<string, VcsError, VcsProcess.VcsProcess> {
+): Effect.Effect<string, VcsError | EnvironmentAuthorizationError, VcsProcess.VcsProcess> {
   return Effect.gen(function* () {
     const process = yield* VcsProcess.VcsProcess;
     const result = yield* process.run({
@@ -75,7 +76,7 @@ function initRepoWithCommit(
   cwd: string,
 ): Effect.Effect<
   void,
-  VcsError | PlatformError.PlatformError,
+  VcsError | EnvironmentAuthorizationError | PlatformError.PlatformError,
   VcsProcess.VcsProcess | FileSystem.FileSystem
 > {
   return Effect.gen(function* () {

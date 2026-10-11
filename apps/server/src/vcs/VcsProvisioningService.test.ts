@@ -1,3 +1,6 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { collectionStoreLayer } from "../orchestration-v2/projectCollectionTestFixtures.ts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -62,6 +65,7 @@ it.effect("routes repository initialization through an explicit VCS driver kind"
   const calls: string[] = [];
   const driver = makeDriver(calls);
   const layerTest = VcsProvisioningService.layer.pipe(
+    Layer.provide(Layer.mergeAll(collectionStoreLayer, NodeServices.layer)),
     Layer.provide(
       Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
         get: (kind) => (kind === "git" ? Effect.succeed(driver) : Effect.die("unexpected kind")),
@@ -71,7 +75,7 @@ it.effect("routes repository initialization through an explicit VCS driver kind"
 
   return Effect.gen(function* () {
     const provisioning = yield* VcsProvisioningService.VcsProvisioningService;
-    yield* provisioning.initRepository({ cwd: "/repo", kind: "git" });
+    yield* provisioning.initRepository(trustedReadAuthority, { cwd: "/repo", kind: "git" });
 
     assert.deepStrictEqual(calls, ["git:/repo"]);
   }).pipe(Effect.provide(layerTest));
@@ -81,6 +85,7 @@ it.effect("defaults repository initialization to Git until callers choose a VCS 
   const calls: string[] = [];
   const driver = makeDriver(calls);
   const layerTest = VcsProvisioningService.layer.pipe(
+    Layer.provide(Layer.mergeAll(collectionStoreLayer, NodeServices.layer)),
     Layer.provide(
       Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
         get: (kind) => (kind === "git" ? Effect.succeed(driver) : Effect.die("unexpected kind")),
@@ -90,7 +95,7 @@ it.effect("defaults repository initialization to Git until callers choose a VCS 
 
   return Effect.gen(function* () {
     const provisioning = yield* VcsProvisioningService.VcsProvisioningService;
-    yield* provisioning.initRepository({ cwd: "/repo" });
+    yield* provisioning.initRepository(trustedReadAuthority, { cwd: "/repo" });
 
     assert.deepStrictEqual(calls, ["default:/repo"]);
   }).pipe(Effect.provide(layerTest));

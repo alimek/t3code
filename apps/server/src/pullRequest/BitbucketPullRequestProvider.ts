@@ -127,7 +127,7 @@ export const make = Effect.gen(function* () {
         ...bitbucketProviderFailure(error),
         // Every Bitbucket failure states its own fact; this names the operation around it, so
         // the two do not stack into "failed in x: failed in y: ...".
-        detail: error.detail,
+        detail: error._tag === "EnvironmentAuthorizationError" ? error.message : error.detail,
         cause: error,
       });
 

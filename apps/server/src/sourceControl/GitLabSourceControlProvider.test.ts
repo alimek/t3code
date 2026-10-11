@@ -74,6 +74,7 @@ it.effect("adds repository context while retaining GitLab CLI causes", () =>
         visibility: "private",
       })
       .pipe(Effect.flip);
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.deepStrictEqual(
       {
@@ -300,6 +301,7 @@ it.effect.each(["read", "decode"] as const)(
       });
       assert.ok(lookup);
       const error = yield* Effect.flip(lookup);
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       assert.strictEqual(error.operation, stage === "read" ? "resolveLink" : "resolveLink.decode");
       assert.strictEqual(error.detail, "The linked subject could not be read.");
       assert.notInclude(error.message, "private response text");

@@ -65,6 +65,7 @@ it.effect("adds repository context while retaining Bitbucket API causes", () =>
     const error = yield* provider
       .getRepositoryCloneUrls({ cwd: "/repo", repository: "owner/repo" })
       .pipe(Effect.flip);
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.deepStrictEqual(
       {

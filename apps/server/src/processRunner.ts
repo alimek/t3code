@@ -17,7 +17,9 @@ import {
   type CollectedUint8StreamText,
 } from "./stream/collectUint8StreamText.ts";
 
-export interface ProcessRunInput {
+export interface ProcessRunInput<E = never> {
+  /** Runs after executable resolution, immediately before spawn. Service-owned admission only. */
+  readonly beforeSpawn?: Effect.Effect<void, E>;
   readonly command: string;
   readonly args: ReadonlyArray<string>;
   readonly cwd?: string | undefined;
@@ -142,7 +144,9 @@ export type ProcessRunError = typeof ProcessRunError.Type;
 export class ProcessRunner extends Context.Service<
   ProcessRunner,
   {
-    readonly run: (input: ProcessRunInput) => Effect.Effect<ProcessRunOutput, ProcessRunError>;
+    readonly run: <E = never>(
+      input: ProcessRunInput<E>,
+    ) => Effect.Effect<ProcessRunOutput, ProcessRunError | E>;
   }
 >()("t3/processRunner") {}
 
@@ -247,10 +251,10 @@ const collectText = Effect.fnUntraced(function* (input: {
   );
 });
 
-function finalizeRunProcess<R>(
-  effect: Effect.Effect<ProcessRunOutput, ProcessRunError, R | Scope.Scope>,
-  input: ProcessRunInput,
-): Effect.Effect<ProcessRunOutput, ProcessRunError, Exclude<R, Scope.Scope>> {
+function finalizeRunProcess<R, E>(
+  effect: Effect.Effect<ProcessRunOutput, ProcessRunError | E, R | Scope.Scope>,
+  input: ProcessRunInput<E>,
+): Effect.Effect<ProcessRunOutput, ProcessRunError | E, Exclude<R, Scope.Scope>> {
   const timeout = Duration.fromInputUnsafe(input.timeout ?? DEFAULT_TIMEOUT);
   const timeoutBehavior = input.timeoutBehavior ?? "error";
 
@@ -289,10 +293,10 @@ function finalizeRunProcess<R>(
 /** The executable name without its directory, recorded as `process.command` on process spans. */
 export const commandName = (command: string) => command.replace(/^.*[\\/]/, "");
 
-const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
+const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* <E>(
   spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
-  input: ProcessRunInput,
-): Effect.fn.Return<ProcessRunOutput, ProcessRunError, Scope.Scope> {
+  input: ProcessRunInput<E>,
+): Effect.fn.Return<ProcessRunOutput, ProcessRunError | E, Scope.Scope> {
   yield* Effect.annotateCurrentSpan("process.command", commandName(input.command));
   const maxOutputBytes = input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   const outputMode = input.outputMode ?? "error";
@@ -304,6 +308,7 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
     input.env === undefined ? {} : { env: input.env, extendEnv },
   );
 
+  if (input.beforeSpawn !== undefined) yield* input.beforeSpawn;
   const child = yield* spawner
     .spawn(
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {

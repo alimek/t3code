@@ -1,3 +1,6 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
+import { AuthSourceControlWriteScope } from "@t3tools/contracts";
+import type { WorkspaceActionAdmission } from "../auth/workspaceReadAccess.ts";
 import {
   CommandId,
   ProjectId,
@@ -25,6 +28,14 @@ import { createdPullRequestKey, linkCreatedPullRequest } from "./linkCreatedPull
 
 const PROJECT_ID = ProjectId.make("project-1");
 const THREAD_ID = ThreadId.make("thread-1");
+const admission: WorkspaceActionAdmission = {
+  authority: trustedReadAuthority,
+  input: { cwd: "/workspace/project", threadId: THREAD_ID },
+  scope: AuthSourceControlWriteScope,
+  projectId: undefined,
+  checkSql: Effect.void,
+  beforeEffect: () => Effect.void,
+};
 const commandId = Effect.succeed(CommandId.make("server:pr-created-link:test"));
 
 const project: OrchestrationProjectShell = {
@@ -152,6 +163,7 @@ describe("linkCreatedPullRequest", () => {
     Effect.gen(function* () {
       const { commands, dispatch } = yield* recordingDispatch();
       yield* linkCreatedPullRequest({
+        admission,
         threadId: THREAD_ID,
         result: prResult({
           status: "created",
@@ -181,11 +193,13 @@ describe("linkCreatedPullRequest", () => {
       const { commands, dispatch } = yield* recordingDispatch();
       const layerDependencies = layerDependenciesFor(dispatch);
       yield* linkCreatedPullRequest({
+        admission,
         threadId: THREAD_ID,
         result: prResult({ status: "skipped_not_requested" }),
         commandId,
       }).pipe(Effect.provide(layerDependencies));
       yield* linkCreatedPullRequest({
+        admission,
         threadId: THREAD_ID,
         result: prResult({ status: "created", url: "https://github.com/t3tools/t3code/pull/42" }),
         commandId,
@@ -210,14 +224,14 @@ describe("linkCreatedPullRequest", () => {
         number: 7,
         url: "https://github.com/t3tools/t3code/pull/7",
       });
-      yield* linkCreatedPullRequest({ threadId: THREAD_ID, result, commandId }).pipe(
+      yield* linkCreatedPullRequest({ admission, threadId: THREAD_ID, result, commandId }).pipe(
         Effect.provide(layerDependenciesFor(rejecting)),
       );
-      yield* linkCreatedPullRequest({ threadId: THREAD_ID, result, commandId }).pipe(
+      yield* linkCreatedPullRequest({ admission, threadId: THREAD_ID, result, commandId }).pipe(
         Effect.provide(layerDependenciesFor(() => Effect.die(new Error("engine down")))),
       );
       // A thread that vanished between the action and the link is not an error either.
-      yield* linkCreatedPullRequest({ threadId: THREAD_ID, result, commandId }).pipe(
+      yield* linkCreatedPullRequest({ admission, threadId: THREAD_ID, result, commandId }).pipe(
         Effect.provide(layerDependenciesFor(() => Effect.die(new Error("unreachable")), null)),
       );
     }),
@@ -244,21 +258,27 @@ it.effect(
         }),
       );
       yield* refreshPushedPullRequests(
+        admission,
         { cwd: "/worktree", threadId: THREAD_ID },
         { push: { status: "pushed" } },
       ).pipe(Effect.provide(layerDependencies));
       yield* refreshPushedPullRequests(
+        admission,
         { cwd: project.workspaceRoot },
         { push: { status: "pushed" } },
       ).pipe(Effect.provide(layerDependencies));
-      yield* refreshPushedPullRequests({ cwd: "/unrelated" }, { push: { status: "pushed" } }).pipe(
-        Effect.provide(layerDependencies),
-      );
       yield* refreshPushedPullRequests(
+        admission,
+        { cwd: "/unrelated" },
+        { push: { status: "pushed" } },
+      ).pipe(Effect.provide(layerDependencies));
+      yield* refreshPushedPullRequests(
+        admission,
         { cwd: project.workspaceRoot, threadId: THREAD_ID },
         { push: { status: "skipped_not_requested" } },
       ).pipe(Effect.provide(layerDependencies));
       yield* refreshPushedPullRequests(
+        admission,
         { cwd: "/draft-worktree", projectId: PROJECT_ID },
         { push: { status: "pushed" } },
       ).pipe(Effect.provide(layerDependencies));

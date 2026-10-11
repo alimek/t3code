@@ -1,3 +1,4 @@
+import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -76,6 +77,7 @@ export class GitHubCliFailedError extends Schema.TaggedError<GitHubCliFailedErro
 
 /** There is no token for the host. */
 export type GitHubCredentialUnavailableError =
+  | EnvironmentAuthorizationError
   | GitHubCliMissingError
   | GitHubNotSignedInError
   | GitHubHostDisabledError
@@ -161,14 +163,19 @@ export const make = Effect.gen(function* () {
       })
       .pipe(
         Effect.mapError((error) =>
-          error._tag === "VcsProcessSpawnError" &&
-          error.cause instanceof PlatformError.PlatformError &&
-          error.cause.reason._tag === "NotFound"
-            ? new GitHubCliMissingError({ host })
-            : // gh exits non-zero with "no oauth token" when it has no login for the host.
-              error._tag === "VcsProcessExitError"
-              ? new GitHubNotSignedInError({ host, ...(account === undefined ? {} : { account }) })
-              : new GitHubCliFailedError({ host, cause: error }),
+          error._tag === "EnvironmentAuthorizationError"
+            ? error
+            : error._tag === "VcsProcessSpawnError" &&
+                error.cause instanceof PlatformError.PlatformError &&
+                error.cause.reason._tag === "NotFound"
+              ? new GitHubCliMissingError({ host })
+              : // gh exits non-zero with "no oauth token" when it has no login for the host.
+                error._tag === "VcsProcessExitError"
+                ? new GitHubNotSignedInError({
+                    host,
+                    ...(account === undefined ? {} : { account }),
+                  })
+                : new GitHubCliFailedError({ host, cause: error }),
         ),
         Effect.map((output) => output.stdout.trim()),
         Effect.filterOrFail(
@@ -224,7 +231,11 @@ export const make = Effect.gen(function* () {
       Exit.isSuccess(exit)
         ? TOKEN_TTL
         : Exit.findErrorOption(exit).pipe(
-              Option.exists((error) => error._tag === "GitHubCliFailedError"),
+              Option.exists(
+                (error) =>
+                  error._tag === "GitHubCliFailedError" ||
+                  error._tag === "EnvironmentAuthorizationError",
+              ),
             )
           ? Duration.zero
           : MISSING_TTL,

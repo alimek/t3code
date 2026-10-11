@@ -1,3 +1,5 @@
+import { beforeCurrentWorkspaceEffect } from "../auth/workspaceReadAccess.ts";
+import { type EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -133,22 +135,31 @@ export class ForgejoCli extends Context.Service<
       readonly stdin?: string;
       readonly timeoutMs?: number;
       readonly maxOutputBytes?: number;
-    }) => Effect.Effect<VcsProcess.VcsProcessOutput, ForgejoCliError>;
+    }) => Effect.Effect<
+      VcsProcess.VcsProcessOutput,
+      ForgejoCliError | EnvironmentAuthorizationError
+    >;
     readonly listLogins?: (input: {
       readonly cwd: string;
       readonly command: "fj" | "tea";
       readonly remoteUrl?: string;
-    }) => Effect.Effect<ReturnType<typeof parseForgejoLogins>, ForgejoCliError>;
+    }) => Effect.Effect<
+      ReturnType<typeof parseForgejoLogins>,
+      ForgejoCliError | EnvironmentAuthorizationError
+    >;
     readonly getAccount?: (input: {
       readonly cwd: string;
       readonly baseUrl: string;
-    }) => Effect.Effect<string, ForgejoCliError>;
+    }) => Effect.Effect<string, ForgejoCliError | EnvironmentAuthorizationError>;
     readonly resolveRepository: (
       input: ForgejoRepositoryInput,
-    ) => Effect.Effect<ForgejoRepository, ForgejoCliError>;
+    ) => Effect.Effect<ForgejoRepository, ForgejoCliError | EnvironmentAuthorizationError>;
     readonly api: (
       input: ForgejoApiInput,
-    ) => Effect.Effect<VcsProcess.VcsProcessOutput, ForgejoCliError>;
+    ) => Effect.Effect<
+      VcsProcess.VcsProcessOutput,
+      ForgejoCliError | EnvironmentAuthorizationError
+    >;
   }
 >()("t3/sourceControl/ForgejoCli") {}
 
@@ -226,24 +237,25 @@ export const make = Effect.gen(function* () {
         timeoutMs: input.timeoutMs ?? 30_000,
       })
       .pipe(
-        Effect.mapError(
-          (cause) =>
-            new ForgejoCliError({
-              command: input.command ?? "tea",
-              cwd: input.cwd,
-              ...(input.command === "fj" ? {} : { cause }),
-              ...(cause._tag === "VcsProcessSpawnError"
-                ? { reason: "missing-cli" as const }
-                : cause._tag === "VcsProcessExitError" && cause.failureKind === "authentication"
-                  ? { reason: "authentication" as const }
-                  : {}),
-              detail:
-                cause._tag === "VcsProcessSpawnError"
-                  ? "Install Forgejo CLI (`fj` 0.6 or later) or Gitea CLI (`tea` 0.16 or later) and retry."
+        Effect.mapError((cause) =>
+          cause._tag === "EnvironmentAuthorizationError"
+            ? cause
+            : new ForgejoCliError({
+                command: input.command ?? "tea",
+                cwd: input.cwd,
+                ...(input.command === "fj" ? {} : { cause }),
+                ...(cause._tag === "VcsProcessSpawnError"
+                  ? { reason: "missing-cli" as const }
                   : cause._tag === "VcsProcessExitError" && cause.failureKind === "authentication"
-                    ? "Authenticate this server with `fj auth login`, `fj auth add-token`, or `tea login add`."
-                    : "Forgejo CLI command failed.",
-            }),
+                    ? { reason: "authentication" as const }
+                    : {}),
+                detail:
+                  cause._tag === "VcsProcessSpawnError"
+                    ? "Install Forgejo CLI (`fj` 0.6 or later) or Gitea CLI (`tea` 0.16 or later) and retry."
+                    : cause._tag === "VcsProcessExitError" && cause.failureKind === "authentication"
+                      ? "Authenticate this server with `fj auth login`, `fj auth add-token`, or `tea login add`."
+                      : "Forgejo CLI command failed.",
+              }),
         ),
       );
 
@@ -325,7 +337,17 @@ export const make = Effect.gen(function* () {
         const available = yield* execute({ command: "fj", cwd: input.cwd, args: ["version"] }).pipe(
           Effect.result,
         );
-        if (Result.isFailure(available) && available.failure.reason === "missing-cli") return [];
+        if (
+          Result.isFailure(available) &&
+          available.failure._tag === "EnvironmentAuthorizationError"
+        )
+          return yield* available.failure;
+        if (
+          Result.isFailure(available) &&
+          available.failure._tag === "ForgejoCliError" &&
+          available.failure.reason === "missing-cli"
+        )
+          return [];
         return yield* keys.failure;
       }
       return publicLogins(keys.success, input.remoteUrl);
@@ -362,6 +384,7 @@ export const make = Effect.gen(function* () {
       );
       if (input.body !== undefined)
         request = request.pipe(HttpClientRequest.bodyText(input.body, "application/json"));
+      yield* beforeCurrentWorkspaceEffect;
       const response = yield* httpClient
         .execute(request)
         .pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }));
@@ -415,7 +438,7 @@ export const make = Effect.gen(function* () {
       effect.pipe(
         Effect.timeout(30_000),
         Effect.mapError((error) =>
-          error._tag === "ForgejoCliError"
+          error._tag === "EnvironmentAuthorizationError" || error._tag === "ForgejoCliError"
             ? error
             : new ForgejoCliError({
                 command: "fj",
@@ -581,12 +604,17 @@ export const make = Effect.gen(function* () {
           reason: "authentication",
           detail: "Multiple fj logins match this repository. Specify its full server URL.",
         });
-      if (available.failure.reason !== "missing-cli") return yield* available.failure;
+      if (
+        available.failure._tag === "EnvironmentAuthorizationError" ||
+        available.failure.reason !== "missing-cli"
+      )
+        return yield* available.failure;
     }
     if (login) {
       const auth = yield* authenticateFj(input.cwd, login).pipe(Effect.result);
       if (Result.isFailure(auth)) {
-        if (auth.failure.reason === "missing-cli") login = undefined;
+        if (auth.failure._tag === "ForgejoCliError" && auth.failure.reason === "missing-cli")
+          login = undefined;
         else return yield* auth.failure;
       }
     }

@@ -1,3 +1,6 @@
+import { AuthSourceControlWriteScope } from "@t3tools/contracts";
+import { recoverWorkspaceError } from "../auth/workspaceReadAccess.ts";
+import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as NodeBuffer from "node:buffer";
 
 import * as Context from "effect/Context";
@@ -41,6 +44,8 @@ import * as VcsDriver from "./VcsDriver.ts";
 import * as VcsProcess from "./VcsProcess.ts";
 
 export interface ExecuteGitInput {
+  /** Service-owned optional status fetches select their write scope here. */
+  readonly requiredScope?: typeof AuthSourceControlWriteScope;
   readonly operation: string;
   readonly cwd: string;
   readonly args: ReadonlyArray<string>;
@@ -306,117 +311,151 @@ export interface GitRemoteStatusOptions {
 export class GitVcsDriver extends Context.Service<
   GitVcsDriver,
   {
-    readonly execute: (input: ExecuteGitInput) => Effect.Effect<ExecuteGitResult, GitCommandError>;
-    readonly status: (input: VcsStatusInput) => Effect.Effect<VcsStatusResult, GitCommandError>;
-    readonly statusDetails: (cwd: string) => Effect.Effect<GitStatusDetails, GitCommandError>;
+    readonly execute: (
+      input: ExecuteGitInput,
+    ) => Effect.Effect<ExecuteGitResult, GitCommandError | EnvironmentAuthorizationError>;
+    readonly status: (
+      input: VcsStatusInput,
+    ) => Effect.Effect<VcsStatusResult, GitCommandError | EnvironmentAuthorizationError>;
+    readonly statusDetails: (
+      cwd: string,
+    ) => Effect.Effect<GitStatusDetails, GitCommandError | EnvironmentAuthorizationError>;
     readonly statusDetailsLocal: (
       cwd: string,
       options?: GitLocalStatusOptions,
-    ) => Effect.Effect<GitStatusDetails, GitCommandError>;
+    ) => Effect.Effect<GitStatusDetails, GitCommandError | EnvironmentAuthorizationError>;
     readonly statusDetailsRemote: (
       cwd: string,
       options?: GitRemoteStatusOptions,
-    ) => Effect.Effect<GitRemoteStatusDetails, GitCommandError>;
+    ) => Effect.Effect<GitRemoteStatusDetails, GitCommandError | EnvironmentAuthorizationError>;
     readonly prepareCommitContext: (
       cwd: string,
       filePaths?: readonly string[],
-    ) => Effect.Effect<GitPreparedCommitContext | null, GitCommandError>;
+    ) => Effect.Effect<
+      GitPreparedCommitContext | null,
+      GitCommandError | EnvironmentAuthorizationError
+    >;
     readonly commit: (
       cwd: string,
       subject: string,
       body: string,
       options?: GitCommitOptions,
-    ) => Effect.Effect<{ commitSha: string }, GitCommandError>;
+    ) => Effect.Effect<{ commitSha: string }, GitCommandError | EnvironmentAuthorizationError>;
     readonly pushCurrentBranch: (
       cwd: string,
       fallbackBranch: string | null,
       options?: { readonly remoteName?: string | null },
-    ) => Effect.Effect<GitPushResult, GitCommandError>;
+    ) => Effect.Effect<GitPushResult, GitCommandError | EnvironmentAuthorizationError>;
     readonly readRangeContext: (
       cwd: string,
       baseRef: string,
-    ) => Effect.Effect<GitRangeContext, GitCommandError>;
+    ) => Effect.Effect<GitRangeContext, GitCommandError | EnvironmentAuthorizationError>;
     readonly getReviewDiffPreview: (
       input: ReviewDiffPreviewInput,
-    ) => Effect.Effect<ReviewDiffPreviewResult, GitCommandError>;
+    ) => Effect.Effect<ReviewDiffPreviewResult, GitCommandError | EnvironmentAuthorizationError>;
     readonly getReviewDiffFileContents: (
       input: ReviewDiffFileContentsInput,
-    ) => Effect.Effect<ReviewDiffFileContentsResult, GitCommandError>;
+    ) => Effect.Effect<
+      ReviewDiffFileContentsResult,
+      GitCommandError | EnvironmentAuthorizationError
+    >;
     readonly readConfigValue: (
       cwd: string,
       key: string,
-    ) => Effect.Effect<string | null, GitCommandError>;
+    ) => Effect.Effect<string | null, GitCommandError | EnvironmentAuthorizationError>;
     readonly listRefs: (
       input: VcsListRefsInput,
-    ) => Effect.Effect<VcsListRefsResult, GitCommandError>;
-    readonly pullCurrentBranch: (cwd: string) => Effect.Effect<VcsPullResult, GitCommandError>;
+    ) => Effect.Effect<VcsListRefsResult, GitCommandError | EnvironmentAuthorizationError>;
+    readonly pullCurrentBranch: (
+      cwd: string,
+    ) => Effect.Effect<VcsPullResult, GitCommandError | EnvironmentAuthorizationError>;
     readonly createWorktree: (
       input: VcsCreateWorktreeInput,
       options?: CreateWorktreeOptions,
-    ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
+    ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError | EnvironmentAuthorizationError>;
     readonly fetchPullRequestBranch: (
       input: GitFetchPullRequestBranchInput,
-    ) => Effect.Effect<void, GitCommandError>;
+    ) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
     /** Fetches `refs/pull/<n>/head` without writing a branch, for heads that exist nowhere else. */
     readonly fetchPullRequestHeadCommit: (
       input: GitFetchPullRequestHeadCommitInput,
-    ) => Effect.Effect<GitResolveCommitResult, GitCommandError>;
+    ) => Effect.Effect<GitResolveCommitResult, GitCommandError | EnvironmentAuthorizationError>;
     readonly resolveCommit: (
       input: GitResolveCommitInput,
-    ) => Effect.Effect<GitResolveCommitResult, GitCommandError>;
+    ) => Effect.Effect<GitResolveCommitResult, GitCommandError | EnvironmentAuthorizationError>;
     /** Moves the branch checked out in `cwd` onto `targetCommit`, from inside that worktree. */
     readonly refreshCheckedOutBranch: (
       input: GitRefreshCheckedOutBranchInput,
-    ) => Effect.Effect<GitRefreshCheckedOutBranchResult, GitCommandError>;
-    readonly ensureRemote: (input: GitEnsureRemoteInput) => Effect.Effect<string, GitCommandError>;
-    readonly resolvePrimaryRemoteName: (cwd: string) => Effect.Effect<string, GitCommandError>;
+    ) => Effect.Effect<
+      GitRefreshCheckedOutBranchResult,
+      GitCommandError | EnvironmentAuthorizationError
+    >;
+    readonly ensureRemote: (
+      input: GitEnsureRemoteInput,
+    ) => Effect.Effect<string, GitCommandError | EnvironmentAuthorizationError>;
+    readonly resolvePrimaryRemoteName: (
+      cwd: string,
+    ) => Effect.Effect<string, GitCommandError | EnvironmentAuthorizationError>;
     readonly resolveDefaultBranchName: (
       cwd: string,
       remoteName: string,
-    ) => Effect.Effect<string | null, GitCommandError>;
-    readonly fetchRemote: (input: GitFetchRemoteInput) => Effect.Effect<void, GitCommandError>;
-    readonly remoteExists: (input: GitRemoteExistsInput) => Effect.Effect<boolean, GitCommandError>;
+    ) => Effect.Effect<string | null, GitCommandError | EnvironmentAuthorizationError>;
+    readonly fetchRemote: (
+      input: GitFetchRemoteInput,
+    ) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
+    readonly remoteExists: (
+      input: GitRemoteExistsInput,
+    ) => Effect.Effect<boolean, GitCommandError | EnvironmentAuthorizationError>;
     readonly remoteBranchExists: (
       input: GitRemoteBranchExistsInput,
-    ) => Effect.Effect<boolean, GitCommandError>;
+    ) => Effect.Effect<boolean, GitCommandError | EnvironmentAuthorizationError>;
     readonly resolveRemoteTrackingCommit: (
       input: GitResolveRemoteTrackingCommitInput,
-    ) => Effect.Effect<GitResolveRemoteTrackingCommitResult, GitCommandError>;
+    ) => Effect.Effect<
+      GitResolveRemoteTrackingCommitResult,
+      GitCommandError | EnvironmentAuthorizationError
+    >;
     readonly fetchRemoteBranch: (
       input: GitFetchRemoteBranchInput,
-    ) => Effect.Effect<void, GitCommandError>;
+    ) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
     readonly fetchRemoteTrackingBranch: (
       input: GitFetchRemoteTrackingBranchInput,
-    ) => Effect.Effect<void, GitCommandError>;
+    ) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
     readonly setBranchUpstream: (
       input: GitSetBranchUpstreamInput,
-    ) => Effect.Effect<void, GitCommandError>;
+    ) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
-    ) => Effect.Effect<void, GitCommandError>;
+    ) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
     /** Drops worktree admin entries whose directory is already gone (`git worktree prune`). */
     readonly pruneWorktrees: (input: {
       readonly cwd: string;
-    }) => Effect.Effect<void, GitCommandError>;
+    }) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
     /**
      * Absolute paths of every live worktree of the repository at `cwd`, the
      * main checkout included. Worktrees whose directory is gone are left out.
      */
-    readonly listWorktreePaths: (cwd: string) => Effect.Effect<string[], GitCommandError>;
+    readonly listWorktreePaths: (
+      cwd: string,
+    ) => Effect.Effect<string[], GitCommandError | EnvironmentAuthorizationError>;
     readonly deleteLocalBranch: (
       input: GitDeleteLocalBranchInput,
-    ) => Effect.Effect<void, GitCommandError>;
+    ) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
     readonly renameBranch: (
       input: GitRenameBranchInput,
-    ) => Effect.Effect<GitRenameBranchResult, GitCommandError>;
+    ) => Effect.Effect<GitRenameBranchResult, GitCommandError | EnvironmentAuthorizationError>;
     readonly createRef: (
       input: VcsCreateRefInput,
-    ) => Effect.Effect<VcsCreateRefResult, GitCommandError>;
+    ) => Effect.Effect<VcsCreateRefResult, GitCommandError | EnvironmentAuthorizationError>;
     readonly switchRef: (
       input: VcsSwitchRefInput,
-    ) => Effect.Effect<VcsSwitchRefResult, GitCommandError>;
-    readonly initRepo: (input: VcsInitInput) => Effect.Effect<void, GitCommandError>;
-    readonly listLocalBranchNames: (cwd: string) => Effect.Effect<string[], GitCommandError>;
+    ) => Effect.Effect<VcsSwitchRefResult, GitCommandError | EnvironmentAuthorizationError>;
+    readonly initRepo: (
+      input: VcsInitInput,
+    ) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
+    readonly listLocalBranchNames: (
+      cwd: string,
+    ) => Effect.Effect<string[], GitCommandError | EnvironmentAuthorizationError>;
   }
 >()("t3/vcs/GitVcsDriver") {}
 
@@ -593,7 +632,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       "GitVcsDriver.detectRepository.commonDir",
       cwd,
       ["rev-parse", "--git-common-dir"],
-    ).pipe(Effect.orElseSucceed(() => null));
+    ).pipe(recoverWorkspaceError(() => null));
 
     return {
       kind: "git" as const,
@@ -928,7 +967,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             }
             // Sparse Git clears skip-worktree for present files. Manual flags still need a reset.
             return !specialFlags;
-          }).pipe(Effect.orElseSucceed(() => false));
+          }).pipe(recoverWorkspaceError(() => false));
           if (!reusedIndex) {
             if (sparseCheckout) {
               const cone = yield* execute({
@@ -1131,7 +1170,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           /^warning: failed to remove \.\/: [^\n]+$/.test(cleaned.stderr.trim()) &&
           (yield* fileSystem.readDirectory(input.cwd).pipe(
             Effect.map((entries) => entries.length === 0),
-            Effect.orElseSucceed(() => false),
+            recoverWorkspaceError(() => false),
           ));
         if (!emptiedWorkspace)
           return yield* new VcsProcessExitError({

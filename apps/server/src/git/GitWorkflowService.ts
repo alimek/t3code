@@ -1,4 +1,9 @@
-import { EnvironmentAuthorizationError } from "@t3tools/contracts";
+import {
+  AuthSourceControlWriteScope,
+  AuthOrchestrationReadScope,
+  type AuthEnvironmentScope,
+  EnvironmentAuthorizationError,
+} from "@t3tools/contracts";
 import * as WorkspaceReadAccess from "../auth/workspaceReadAccess.ts";
 import { type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as Context from "effect/Context";
@@ -52,10 +57,12 @@ export class GitWorkflowService extends Context.Service<
     readonly status: (
       authority: ThreadReadAuthority,
       input: VcsStatusInput,
+      scope?: AuthEnvironmentScope,
     ) => Effect.Effect<VcsStatusResult, GitManagerServiceError | EnvironmentAuthorizationError>;
     readonly localStatus: (
       authority: ThreadReadAuthority,
       input: VcsStatusInput,
+      scope?: AuthEnvironmentScope,
     ) => Effect.Effect<
       VcsStatusLocalResult,
       GitManagerServiceError | EnvironmentAuthorizationError
@@ -64,18 +71,39 @@ export class GitWorkflowService extends Context.Service<
       authority: ThreadReadAuthority,
       input: VcsStatusInput,
       options?: GitManager.GitRemoteStatusOptions,
+      scope?: AuthEnvironmentScope,
     ) => Effect.Effect<
       VcsStatusRemoteResult | null,
       GitManagerServiceError | EnvironmentAuthorizationError
     >;
-    readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
-    readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
-    readonly invalidateStatus: (cwd: string) => Effect.Effect<void, never>;
-    readonly pullCurrentBranch: (cwd: string) => Effect.Effect<VcsPullResult, GitCommandError>;
+    readonly invalidateLocalStatus: (
+      authority: ThreadReadAuthority,
+      cwd: string,
+      scope?: AuthEnvironmentScope,
+    ) => Effect.Effect<void, EnvironmentAuthorizationError>;
+    readonly invalidateRemoteStatus: (
+      authority: ThreadReadAuthority,
+      cwd: string,
+      scope?: AuthEnvironmentScope,
+    ) => Effect.Effect<void, EnvironmentAuthorizationError>;
+    readonly invalidateStatus: (
+      authority: ThreadReadAuthority,
+      cwd: string,
+      scope?: AuthEnvironmentScope,
+    ) => Effect.Effect<void, EnvironmentAuthorizationError>;
+    readonly pullCurrentBranch: (
+      authority: ThreadReadAuthority,
+      cwd: string,
+      afterSuccess?: WorkspaceReadAccess.WorkspaceActionCallback<VcsPullResult>,
+    ) => Effect.Effect<VcsPullResult, GitCommandError | EnvironmentAuthorizationError>;
     readonly runStackedAction: (
+      authority: ThreadReadAuthority,
       input: GitRunStackedActionInput,
       options?: GitManager.GitRunStackedActionOptions,
-    ) => Effect.Effect<GitRunStackedActionResult, GitManagerServiceError>;
+    ) => Effect.Effect<
+      GitRunStackedActionResult,
+      GitManagerServiceError | EnvironmentAuthorizationError
+    >;
     readonly resolvePullRequest: (
       authority: ThreadReadAuthority,
       input: GitPullRequestRefInput,
@@ -85,7 +113,10 @@ export class GitWorkflowService extends Context.Service<
     >;
     readonly preparePullRequestThread: (
       input: GitPreparePullRequestThreadInput,
-    ) => Effect.Effect<GitPreparePullRequestThreadResult, GitManagerServiceError>;
+    ) => Effect.Effect<
+      GitPreparePullRequestThreadResult,
+      GitManagerServiceError | EnvironmentAuthorizationError
+    >;
     readonly listRefs: (
       authority: ThreadReadAuthority,
       input: VcsListRefsInput,
@@ -93,16 +124,20 @@ export class GitWorkflowService extends Context.Service<
     readonly createWorktree: (
       input: VcsCreateWorktreeInput,
       options?: GitVcsDriver.CreateWorktreeOptions,
-    ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
+    ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError | EnvironmentAuthorizationError>;
     readonly listLocalBranchNames: (
       authority: ThreadReadAuthority,
       cwd: string,
     ) => Effect.Effect<string[], GitCommandError | EnvironmentAuthorizationError>;
-    readonly fetchRemote: (input: {
-      readonly cwd: string;
-      readonly remoteName: string;
-      readonly refName?: string;
-    }) => Effect.Effect<void, GitCommandError>;
+    readonly fetchRemote: (
+      authority: ThreadReadAuthority,
+      input: {
+        readonly cwd: string;
+        readonly remoteName: string;
+        readonly refName?: string;
+      },
+      afterSuccess?: WorkspaceReadAccess.WorkspaceActionCallback<void>,
+    ) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
     readonly remoteExists: (
       authority: ThreadReadAuthority,
       input: {
@@ -131,25 +166,38 @@ export class GitWorkflowService extends Context.Service<
     >;
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
-    ) => Effect.Effect<void, GitCommandError>;
+    ) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
     readonly pruneWorktrees: (input: {
       readonly cwd: string;
-    }) => Effect.Effect<void, GitCommandError>;
+    }) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
     readonly deleteLocalBranch: (
+      authority: ThreadReadAuthority,
       input: GitVcsDriver.GitDeleteLocalBranchInput,
-    ) => Effect.Effect<void, GitCommandError>;
+      afterSuccess?: WorkspaceReadAccess.WorkspaceActionCallback<void>,
+    ) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
     readonly createRef: (
+      authority: ThreadReadAuthority,
       input: VcsCreateRefInput,
-    ) => Effect.Effect<VcsCreateRefResult, GitCommandError>;
+      afterSuccess?: WorkspaceReadAccess.WorkspaceActionCallback<VcsCreateRefResult>,
+    ) => Effect.Effect<VcsCreateRefResult, GitCommandError | EnvironmentAuthorizationError>;
     readonly switchRef: (
+      authority: ThreadReadAuthority,
       input: VcsSwitchRefInput,
-    ) => Effect.Effect<VcsSwitchRefResult, GitCommandError>;
-    readonly renameBranch: (input: {
-      readonly exactName?: boolean;
-      readonly cwd: string;
-      readonly oldBranch: string;
-      readonly newBranch: string;
-    }) => Effect.Effect<{ readonly branch: string }, GitManagerServiceError>;
+      afterSuccess?: WorkspaceReadAccess.WorkspaceActionCallback<VcsSwitchRefResult>,
+    ) => Effect.Effect<VcsSwitchRefResult, GitCommandError | EnvironmentAuthorizationError>;
+    readonly renameBranch: (
+      authority: ThreadReadAuthority,
+      input: {
+        readonly exactName?: boolean;
+        readonly cwd: string;
+        readonly oldBranch: string;
+        readonly newBranch: string;
+      },
+      afterSuccess?: WorkspaceReadAccess.WorkspaceActionCallback<{ readonly branch: string }>,
+    ) => Effect.Effect<
+      { readonly branch: string },
+      GitManagerServiceError | EnvironmentAuthorizationError
+    >;
   }
 >()("t3/git/GitWorkflowService") {}
 
@@ -249,7 +297,12 @@ export const make = Effect.gen(function* () {
   });
 
   const detectGitRepositoryForStatus = Effect.fn("GitWorkflowService.detectGitRepositoryForStatus")(
-    function* (operation: string, cwd: string, authority: ThreadReadAuthority) {
+    function* (
+      operation: string,
+      cwd: string,
+      authority: ThreadReadAuthority,
+      scope: AuthEnvironmentScope = AuthOrchestrationReadScope,
+    ) {
       const handle = yield* registry.detect({ cwd }).pipe(
         Effect.mapError(
           (cause) =>
@@ -264,7 +317,7 @@ export const make = Effect.gen(function* () {
       if (!handle) {
         return false;
       }
-      yield* access.repository(authority, { cwd }, handle.repository.rootPath);
+      yield* access.repository(authority, { cwd }, handle.repository.rootPath, scope);
       if (handle.kind !== "git") {
         return yield* new GitManagerError({
           operation,
@@ -278,7 +331,12 @@ export const make = Effect.gen(function* () {
 
   const detectGitRepositoryForCommand = Effect.fn(
     "GitWorkflowService.detectGitRepositoryForCommand",
-  )(function* (operation: string, cwd: string, authority: ThreadReadAuthority) {
+  )(function* (
+    operation: string,
+    cwd: string,
+    authority: ThreadReadAuthority,
+    scope: AuthEnvironmentScope = AuthOrchestrationReadScope,
+  ) {
     const handle = yield* registry.detect({ cwd }).pipe(
       Effect.mapError(
         (cause) =>
@@ -294,7 +352,7 @@ export const make = Effect.gen(function* () {
     if (!handle) {
       return false;
     }
-    yield* access.repository(authority, { cwd }, handle.repository.rootPath);
+    yield* access.repository(authority, { cwd }, handle.repository.rootPath, scope);
     if (handle.kind !== "git") {
       return yield* new GitCommandError({
         operation,
@@ -309,7 +367,9 @@ export const make = Effect.gen(function* () {
   const routeGitManager =
     <Input extends { readonly cwd: string }, Output>(
       operation: string,
-      run: (input: Input) => Effect.Effect<Output, GitManagerServiceError>,
+      run: (
+        input: Input,
+      ) => Effect.Effect<Output, GitManagerServiceError | EnvironmentAuthorizationError>,
     ) =>
     (input: Input) =>
       ensureGit(operation, input.cwd).pipe(Effect.andThen(run(input)));
@@ -356,52 +416,93 @@ export const make = Effect.gen(function* () {
           Effect.map((result) => result.exitCode === 0),
         ),
       ),
-    status: (authority, input) =>
+    status: (authority, input, scope) =>
       access.read(
         authority,
         input,
-        detectGitRepositoryForStatus("GitWorkflowService.status", input.cwd, authority).pipe(
+        detectGitRepositoryForStatus("GitWorkflowService.status", input.cwd, authority, scope).pipe(
           Effect.flatMap((isGitRepository) =>
             isGitRepository
-              ? gitManager.status(authority, input)
+              ? gitManager.status(authority, input, scope)
               : Effect.succeed(nonRepositoryStatus()),
           ),
         ),
+        scope,
       ),
-    localStatus: (authority, input) =>
+    localStatus: (authority, input, scope) =>
       access.read(
         authority,
         input,
-        detectGitRepositoryForStatus("GitWorkflowService.localStatus", input.cwd, authority).pipe(
+        detectGitRepositoryForStatus(
+          "GitWorkflowService.localStatus",
+          input.cwd,
+          authority,
+          scope,
+        ).pipe(
           Effect.flatMap((isGitRepository) =>
             isGitRepository
-              ? gitManager.localStatus(authority, input)
+              ? gitManager.localStatus(authority, input, scope)
               : Effect.succeed(nonRepositoryLocalStatus()),
           ),
         ),
+        scope,
       ),
-    remoteStatus: (authority, input, options) =>
+    remoteStatus: (authority, input, options, scope) =>
       access.read(
         authority,
         input,
-        detectGitRepositoryForStatus("GitWorkflowService.remoteStatus", input.cwd, authority).pipe(
+        detectGitRepositoryForStatus(
+          "GitWorkflowService.remoteStatus",
+          input.cwd,
+          authority,
+          scope,
+        ).pipe(
           Effect.flatMap((isGitRepository) =>
             isGitRepository
-              ? gitManager.remoteStatus(authority, input, options)
+              ? gitManager.remoteStatus(authority, input, options, scope)
               : Effect.succeed(null),
           ),
         ),
+        scope,
       ),
     invalidateLocalStatus: gitManager.invalidateLocalStatus,
     invalidateRemoteStatus: gitManager.invalidateRemoteStatus,
     invalidateStatus: gitManager.invalidateStatus,
-    pullCurrentBranch: (cwd) =>
-      ensureGitCommand("GitWorkflowService.pullCurrentBranch", cwd).pipe(
-        Effect.andThen(git.pullCurrentBranch(cwd)),
+    pullCurrentBranch: (authority, cwd, afterSuccess) =>
+      access.run(
+        authority,
+        { cwd },
+        ensureGitCommand("GitWorkflowService.pullCurrentBranch", cwd).pipe(
+          Effect.tap((handle) =>
+            access.repository(
+              authority,
+              { cwd },
+              handle.repository.rootPath,
+              AuthSourceControlWriteScope,
+            ),
+          ),
+          Effect.andThen(WorkspaceReadAccess.beforeWorkspaceEffect(cwd)),
+          Effect.andThen(git.pullCurrentBranch(cwd)),
+        ),
+        AuthSourceControlWriteScope,
+        afterSuccess,
       ),
-    runStackedAction: (input, options) =>
-      ensureGit("GitWorkflowService.runStackedAction", input.cwd).pipe(
-        Effect.andThen(gitManager.runStackedAction(input, options)),
+    runStackedAction: (authority, input, options) =>
+      access.run(
+        authority,
+        input,
+        ensureGit("GitWorkflowService.runStackedAction", input.cwd).pipe(
+          Effect.tap((handle) =>
+            access.repository(
+              authority,
+              input,
+              handle.repository.rootPath,
+              AuthSourceControlWriteScope,
+            ),
+          ),
+          Effect.andThen(gitManager.runStackedAction(authority, input, options)),
+        ),
+        AuthSourceControlWriteScope,
       ),
     resolvePullRequest: (authority, input) =>
       access.read(
@@ -442,9 +543,24 @@ export const make = Effect.gen(function* () {
           Effect.andThen(git.listLocalBranchNames(cwd)),
         ),
       ),
-    fetchRemote: (input) =>
-      ensureGitCommand("GitWorkflowService.fetchRemote", input.cwd).pipe(
-        Effect.andThen(git.fetchRemote(input)),
+    fetchRemote: (authority, input, afterSuccess) =>
+      access.run(
+        authority,
+        input,
+        ensureGitCommand("GitWorkflowService.fetchRemote", input.cwd).pipe(
+          Effect.tap((handle) =>
+            access.repository(
+              authority,
+              input,
+              handle.repository.rootPath,
+              AuthSourceControlWriteScope,
+            ),
+          ),
+          Effect.andThen(WorkspaceReadAccess.beforeWorkspaceEffect(input.cwd)),
+          Effect.andThen(git.fetchRemote(input)),
+        ),
+        AuthSourceControlWriteScope,
+        afterSuccess,
       ),
     remoteExists: (authority, input) =>
       access.read(
@@ -484,21 +600,81 @@ export const make = Effect.gen(function* () {
       ensureGitCommand("GitWorkflowService.pruneWorktrees", input.cwd).pipe(
         Effect.andThen(git.pruneWorktrees(input)),
       ),
-    deleteLocalBranch: (input) =>
-      ensureGitCommand("GitWorkflowService.deleteLocalBranch", input.cwd).pipe(
-        Effect.andThen(git.deleteLocalBranch(input)),
+    deleteLocalBranch: (authority, input, afterSuccess) =>
+      access.run(
+        authority,
+        input,
+        ensureGitCommand("GitWorkflowService.deleteLocalBranch", input.cwd).pipe(
+          Effect.tap((handle) =>
+            access.repository(
+              authority,
+              input,
+              handle.repository.rootPath,
+              AuthSourceControlWriteScope,
+            ),
+          ),
+          Effect.andThen(WorkspaceReadAccess.beforeWorkspaceEffect(input.cwd)),
+          Effect.andThen(git.deleteLocalBranch(input)),
+        ),
+        AuthSourceControlWriteScope,
+        afterSuccess,
       ),
-    createRef: (input) =>
-      ensureGitCommand("GitWorkflowService.createRef", input.cwd).pipe(
-        Effect.andThen(git.createRef(input)),
+    createRef: (authority, input, afterSuccess) =>
+      access.run(
+        authority,
+        input,
+        ensureGitCommand("GitWorkflowService.createRef", input.cwd).pipe(
+          Effect.tap((handle) =>
+            access.repository(
+              authority,
+              input,
+              handle.repository.rootPath,
+              AuthSourceControlWriteScope,
+            ),
+          ),
+          Effect.andThen(WorkspaceReadAccess.beforeWorkspaceEffect(input.cwd)),
+          Effect.andThen(git.createRef(input)),
+        ),
+        AuthSourceControlWriteScope,
+        afterSuccess,
       ),
-    switchRef: (input) =>
-      ensureGitCommand("GitWorkflowService.switchRef", input.cwd).pipe(
-        Effect.andThen(Effect.scoped(git.switchRef(input))),
+    switchRef: (authority, input, afterSuccess) =>
+      access.run(
+        authority,
+        input,
+        ensureGitCommand("GitWorkflowService.switchRef", input.cwd).pipe(
+          Effect.tap((handle) =>
+            access.repository(
+              authority,
+              input,
+              handle.repository.rootPath,
+              AuthSourceControlWriteScope,
+            ),
+          ),
+          Effect.andThen(WorkspaceReadAccess.beforeWorkspaceEffect(input.cwd)),
+          Effect.andThen(Effect.scoped(git.switchRef(input))),
+        ),
+        AuthSourceControlWriteScope,
+        afterSuccess,
       ),
-    renameBranch: (input) =>
-      ensureGit("GitWorkflowService.renameBranch", input.cwd).pipe(
-        Effect.andThen(git.renameBranch(input)),
+    renameBranch: (authority, input, afterSuccess) =>
+      access.run(
+        authority,
+        input,
+        ensureGit("GitWorkflowService.renameBranch", input.cwd).pipe(
+          Effect.tap((handle) =>
+            access.repository(
+              authority,
+              input,
+              handle.repository.rootPath,
+              AuthSourceControlWriteScope,
+            ),
+          ),
+          Effect.andThen(WorkspaceReadAccess.beforeWorkspaceEffect(input.cwd)),
+          Effect.andThen(git.renameBranch(input)),
+        ),
+        AuthSourceControlWriteScope,
+        afterSuccess,
       ),
   });
 });

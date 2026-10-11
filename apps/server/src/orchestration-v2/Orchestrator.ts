@@ -1,9 +1,12 @@
+import { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import {
   authorizeCommand,
   authorizeCommandAdmission,
+  isCheckedSourceControlLinkAuthority,
+  beforeSourceControlLinkEffect,
   receiptForMutationAuthority,
   type CommandAdmission,
-  type MutationAuthority,
+  type CommandAuthority,
 } from "../auth/CommandAuthorization.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import type {
@@ -137,6 +140,8 @@ import {
 } from "./ThreadForkService.ts";
 import { planThreadDeletion } from "./ThreadDeletion.ts";
 
+const isEnvironmentAuthorizationError = Schema.is(EnvironmentAuthorizationError);
+
 export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDispatchError>()(
   "OrchestratorDispatchError",
   {
@@ -261,6 +266,7 @@ export function canReplayCommandReceipt(
 }
 
 export const OrchestratorV2Error = Schema.Union([
+  EnvironmentAuthorizationError,
   OrchestratorDispatchError,
   OrchestratorCommandRejectedError,
   OrchestratorProjectionError,
@@ -293,7 +299,7 @@ export interface OrchestratorV2Shape {
     childThreadId: ThreadId,
   ) => Effect.Effect<boolean, OrchestratorProjectionError>;
   readonly dispatch: (
-    authority: MutationAuthority,
+    authority: CommandAuthority,
     command: OrchestrationV2ServerCommand,
   ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>;
   readonly searchThreadStream: (
@@ -10431,7 +10437,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   });
 
   const dispatchWithReceiptEffect = Effect.fn("orchestrationV2.dispatch.withReceipt")(function* (
-    authority: MutationAuthority,
+    authority: CommandAuthority,
     command: OrchestrationV2ServerCommand,
   ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
     yield* Effect.annotateCurrentSpan({
@@ -10440,6 +10446,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.thread_id": commandThreadId(command),
     });
 
+    yield* beforeSourceControlLinkEffect(authority);
     const admission: CommandAdmission = { authority, command };
     const replayed = yield* sql
       .withTransaction(
@@ -10508,6 +10515,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     }),
                 ),
               );
+            if (isCheckedSourceControlLinkAuthority(authority))
+              yield* authorizeCommandAdmission(sql, admission, command.commandId);
             return {
               sequence: receipt.resultSequence,
               storedEvents,
@@ -10608,13 +10617,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return sequence;
       }).pipe(
         sql.withTransaction,
-        Effect.mapError(
-          (cause) =>
-            new OrchestratorDispatchError({
-              commandId: command.commandId,
-              commandType: command.type,
-              cause,
-            }),
+        Effect.mapError((cause) =>
+          isEnvironmentAuthorizationError(cause)
+            ? cause
+            : new OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause,
+              }),
         ),
       );
       return { sequence: resultSequence, storedEvents: [] } satisfies OrchestratorV2DispatchResult;
@@ -10633,13 +10643,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : { cancelUnsettledEffects: plan.cancelUnsettledEffects }),
       })
       .pipe(
-        Effect.mapError(
-          (cause) =>
-            new OrchestratorDispatchError({
-              commandId: command.commandId,
-              commandType: command.type,
-              cause,
-            }),
+        Effect.mapError((cause) =>
+          isEnvironmentAuthorizationError(cause)
+            ? cause
+            : new OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause,
+              }),
         ),
       );
 
@@ -10667,7 +10678,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   });
 
   const dispatchWithReceipt = (
-    authority: MutationAuthority,
+    authority: CommandAuthority,
     command: OrchestrationV2ServerCommand,
   ) =>
     authorizeCommand(sql, authority, command).pipe(

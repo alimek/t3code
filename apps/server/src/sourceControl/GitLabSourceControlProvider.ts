@@ -124,15 +124,16 @@ export const make = Effect.gen(function* () {
         maxOutputBytes: 32_000,
       })
       .pipe(
-        Effect.mapError(
-          (cause) =>
-            new SourceControlProviderError({
-              provider: "gitlab",
-              operation: "resolveLink",
-              cwd: input.cwd,
-              detail: "The linked subject could not be read.",
-              cause,
-            }),
+        Effect.mapError((cause) =>
+          cause._tag === "EnvironmentAuthorizationError"
+            ? cause
+            : new SourceControlProviderError({
+                provider: "gitlab",
+                operation: "resolveLink",
+                cwd: input.cwd,
+                detail: "The linked subject could not be read.",
+                cause,
+              }),
         ),
       );
     const subject = yield* decodeLinkSubject(result.stdout).pipe(
@@ -176,38 +177,40 @@ export const make = Effect.gen(function* () {
         })
         .pipe(
           Effect.map((items) => items.map(toChangeRequest)),
-          Effect.mapError(
-            (error) =>
-              new SourceControlProviderError({
-                provider: "gitlab",
-                operation: "listChangeRequests",
-                command: error.command,
-                cwd: input.cwd,
-                reference: SourceControlProvider.transportSafeSourceControlErrorValue(
-                  input.headSelector,
-                ),
-                detail: error.detail,
-                cause: error,
-              }),
+          Effect.mapError((error) =>
+            error._tag === "EnvironmentAuthorizationError"
+              ? error
+              : new SourceControlProviderError({
+                  provider: "gitlab",
+                  operation: "listChangeRequests",
+                  command: error.command,
+                  cwd: input.cwd,
+                  reference: SourceControlProvider.transportSafeSourceControlErrorValue(
+                    input.headSelector,
+                  ),
+                  detail: error.detail,
+                  cause: error,
+                }),
           ),
         );
     },
     getChangeRequest: (input) =>
       gitlab.getMergeRequest(input).pipe(
         Effect.map(toChangeRequest),
-        Effect.mapError(
-          (error) =>
-            new SourceControlProviderError({
-              provider: "gitlab",
-              operation: "getChangeRequest",
-              command: error.command,
-              cwd: input.cwd,
-              reference: SourceControlProvider.transportSafeSourceControlErrorValue(
-                input.reference,
-              ),
-              detail: error.detail,
-              cause: error,
-            }),
+        Effect.mapError((error) =>
+          error._tag === "EnvironmentAuthorizationError"
+            ? error
+            : new SourceControlProviderError({
+                provider: "gitlab",
+                operation: "getChangeRequest",
+                command: error.command,
+                cwd: input.cwd,
+                reference: SourceControlProvider.transportSafeSourceControlErrorValue(
+                  input.reference,
+                ),
+                detail: error.detail,
+                cause: error,
+              }),
         ),
       ),
     createChangeRequest: (input) => {
@@ -223,85 +226,90 @@ export const make = Effect.gen(function* () {
           bodyFile: input.bodyFile,
         })
         .pipe(
-          Effect.mapError(
-            (error) =>
-              new SourceControlProviderError({
-                provider: "gitlab",
-                operation: "createChangeRequest",
-                command: error.command,
-                cwd: input.cwd,
-                reference: SourceControlProvider.transportSafeSourceControlErrorValue(
-                  input.headSelector,
-                ),
-                detail: error.detail,
-                cause: error,
-              }),
+          Effect.mapError((error) =>
+            error._tag === "EnvironmentAuthorizationError"
+              ? error
+              : new SourceControlProviderError({
+                  provider: "gitlab",
+                  operation: "createChangeRequest",
+                  command: error.command,
+                  cwd: input.cwd,
+                  reference: SourceControlProvider.transportSafeSourceControlErrorValue(
+                    input.headSelector,
+                  ),
+                  detail: error.detail,
+                  cause: error,
+                }),
           ),
         );
     },
     getRepositoryCloneUrls: (input) =>
       gitlab.getRepositoryCloneUrls(input).pipe(
-        Effect.mapError(
-          (error) =>
-            new SourceControlProviderError({
-              provider: "gitlab",
-              operation: "getRepositoryCloneUrls",
-              command: error.command,
-              cwd: input.cwd,
-              repository: SourceControlProvider.transportSafeSourceControlErrorValue(
-                input.repository,
-              ),
-              detail: error.detail,
-              cause: error,
-            }),
+        Effect.mapError((error) =>
+          error._tag === "EnvironmentAuthorizationError"
+            ? error
+            : new SourceControlProviderError({
+                provider: "gitlab",
+                operation: "getRepositoryCloneUrls",
+                command: error.command,
+                cwd: input.cwd,
+                repository: SourceControlProvider.transportSafeSourceControlErrorValue(
+                  input.repository,
+                ),
+                detail: error.detail,
+                cause: error,
+              }),
         ),
       ),
     createRepository: (input) =>
       gitlab.createRepository(input).pipe(
-        Effect.mapError(
-          (error) =>
-            new SourceControlProviderError({
-              provider: "gitlab",
-              operation: "createRepository",
-              command: error.command,
-              cwd: input.cwd,
-              repository: SourceControlProvider.transportSafeSourceControlErrorValue(
-                input.repository,
-              ),
-              detail: error.detail,
-              cause: error,
-            }),
+        Effect.mapError((error) =>
+          error._tag === "EnvironmentAuthorizationError"
+            ? error
+            : new SourceControlProviderError({
+                provider: "gitlab",
+                operation: "createRepository",
+                command: error.command,
+                cwd: input.cwd,
+                repository: SourceControlProvider.transportSafeSourceControlErrorValue(
+                  input.repository,
+                ),
+                detail: error.detail,
+                cause: error,
+              }),
         ),
       ),
     getDefaultBranch: (input) =>
       gitlab.getDefaultBranch(input).pipe(
-        Effect.mapError(
-          (error) =>
-            new SourceControlProviderError({
-              provider: "gitlab",
-              operation: "getDefaultBranch",
-              command: error.command,
-              cwd: input.cwd,
-              detail: error.detail,
-              cause: error,
-            }),
+        Effect.mapError((error) =>
+          error._tag === "EnvironmentAuthorizationError"
+            ? error
+            : new SourceControlProviderError({
+                provider: "gitlab",
+                operation: "getDefaultBranch",
+                command: error.command,
+                cwd: input.cwd,
+                detail: error.detail,
+                cause: error,
+              }),
         ),
       ),
     checkoutChangeRequest: (input) =>
       gitlab.checkoutMergeRequest(input).pipe(
-        Effect.mapError(
-          (error) =>
-            new SourceControlProviderError({
-              provider: "gitlab",
-              operation: "checkoutChangeRequest",
-              command: error.command,
-              cwd: input.cwd,
-              reference: SourceControlProvider.transportSafeSourceControlErrorValue(
-                input.reference,
-              ),
-              detail: error.detail,
-              cause: error,
-            }),
+        Effect.mapError((error) =>
+          error._tag === "EnvironmentAuthorizationError"
+            ? error
+            : new SourceControlProviderError({
+                provider: "gitlab",
+                operation: "checkoutChangeRequest",
+                command: error.command,
+                cwd: input.cwd,
+                reference: SourceControlProvider.transportSafeSourceControlErrorValue(
+                  input.reference,
+                ),
+                detail: error.detail,
+                cause: error,
+              }),
         ),
       ),
   });

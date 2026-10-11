@@ -623,7 +623,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
     }),
     Layer.mock(GitManager.GitManager)({
       branchPullRequest,
-      invalidateStatus: (cwd) => Ref.update(invalidatedCwds, (cwds) => [...cwds, cwd]),
+      invalidateStatus: (_authority, cwd) => Ref.update(invalidatedCwds, (cwds) => [...cwds, cwd]),
     }),
     Layer.mock(PullRequestService.PullRequestService)({
       summary: pullRequestSummary,

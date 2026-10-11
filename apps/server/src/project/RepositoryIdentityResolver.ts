@@ -1,4 +1,10 @@
-import type { RepositoryIdentity, SourceControlProviderError } from "@t3tools/contracts";
+import { beforeWorkspaceEffect, recoverWorkspaceError } from "../auth/workspaceReadAccess.ts";
+import * as Option from "effect/Option";
+import type {
+  EnvironmentAuthorizationError,
+  RepositoryIdentity,
+  SourceControlProviderError,
+} from "@t3tools/contracts";
 import {
   detectSourceControlProviderFromGitRemoteUrl,
   normalizeGitRemoteUrl,
@@ -26,7 +32,10 @@ export interface RepositoryIdentityResolverOptions {
   readonly negativeCacheTtl?: Duration.Input;
   readonly refine?: (
     identity: RepositoryIdentity,
-  ) => Effect.Effect<RepositoryIdentity, SourceControlProviderError>;
+  ) => Effect.Effect<
+    RepositoryIdentity,
+    SourceControlProviderError | EnvironmentAuthorizationError
+  >;
 }
 
 export class RepositoryIdentityResolver extends Context.Service<
@@ -35,7 +44,7 @@ export class RepositoryIdentityResolver extends Context.Service<
     readonly resolve: (
       cwd: string,
       options?: { readonly refresh?: boolean },
-    ) => Effect.Effect<RepositoryIdentity | null>;
+    ) => Effect.Effect<RepositoryIdentity | null, EnvironmentAuthorizationError>;
   }
 >()("t3/project/RepositoryIdentityResolver") {}
 
@@ -123,11 +132,15 @@ const resolveRepositoryIdentityCacheKey = Effect.fn("RepositoryIdentityResolver.
     // would split paths containing spaces during cmd's re-tokenization.
     const topLevelResult = yield* processRunner
       .run({
+        beforeSpawn: beforeWorkspaceEffect(cwd),
         command: "git",
         args: ["-C", cwd, "rev-parse", "--show-toplevel"],
         timeoutBehavior: "timedOutResult",
       })
-      .pipe(Effect.option);
+      .pipe(
+        recoverWorkspaceError(() => null),
+        Effect.map(Option.fromNullishOr),
+      );
     if (topLevelResult._tag === "None" || topLevelResult.value.code !== 0) {
       return null;
     }
@@ -141,15 +154,23 @@ const resolveRepositoryIdentityFromCacheKey = Effect.fn(
   "RepositoryIdentityResolver.resolveFromCacheKey",
 )(function* (
   cacheKey: string,
-): Effect.fn.Return<RepositoryIdentity | null, never, ProcessRunner.ProcessRunner> {
+): Effect.fn.Return<
+  RepositoryIdentity | null,
+  EnvironmentAuthorizationError,
+  ProcessRunner.ProcessRunner
+> {
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const remoteResult = yield* processRunner
     .run({
+      beforeSpawn: beforeWorkspaceEffect(cacheKey),
       command: "git",
       args: ["-C", cacheKey, "remote", "-v"],
       timeoutBehavior: "timedOutResult",
     })
-    .pipe(Effect.option);
+    .pipe(
+      recoverWorkspaceError(() => null),
+      Effect.map(Option.fromNullishOr),
+    );
   if (remoteResult._tag === "None" || remoteResult.value.code !== 0) {
     return null;
   }
@@ -169,7 +190,7 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
   const refine = options.refine ?? Effect.succeed;
   // Git errors and timeouts resolve to null, so they use the negative TTL like
   // "no repository" or "no remote". Only interrupts and defects skip the cache.
-  const timeToLive = (exit: Exit.Exit<unknown>) =>
+  const timeToLive = (exit: Exit.Exit<unknown, unknown>) =>
     Exit.match(exit, {
       onSuccess: (value) =>
         value === null
@@ -178,7 +199,11 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
       onFailure: () => Duration.zero,
     });
 
-  const repositoryRootCache = yield* Cache.makeWith<string, string | null>(
+  const repositoryRootCache = yield* Cache.makeWith<
+    string,
+    string | null,
+    EnvironmentAuthorizationError
+  >(
     (cwd) =>
       resolveRepositoryIdentityCacheKey(cwd).pipe(
         Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
@@ -186,13 +211,17 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
     { capacity: cacheCapacity, timeToLive },
   );
 
-  const repositoryIdentityCache = yield* Cache.makeWith<string, RepositoryIdentity | null>(
+  const repositoryIdentityCache = yield* Cache.makeWith<
+    string,
+    RepositoryIdentity | null,
+    EnvironmentAuthorizationError
+  >(
     (cacheKey) =>
       resolveRepositoryIdentityFromCacheKey(cacheKey).pipe(
         Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
         Effect.filterOrElse(
           (identity): identity is null => identity === null,
-          (identity) => refine(identity).pipe(Effect.orElseSucceed(() => identity)),
+          (identity) => refine(identity).pipe(recoverWorkspaceError(() => identity)),
         ),
       ),
     { capacity: cacheCapacity, timeToLive },
@@ -202,11 +231,15 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
   // git keep their own spans.
   const resolve: RepositoryIdentityResolver["Service"]["resolve"] = Effect.fnUntraced(
     function* (cwd, options) {
+      yield* beforeWorkspaceEffect(cwd);
       if (options?.refresh) yield* Cache.invalidate(repositoryRootCache, cwd);
       const cacheKey = yield* Cache.get(repositoryRootCache, cwd);
       if (cacheKey === null) return null;
+      yield* beforeWorkspaceEffect(cacheKey);
       if (options?.refresh) yield* Cache.invalidate(repositoryIdentityCache, cacheKey);
-      return yield* Cache.get(repositoryIdentityCache, cacheKey);
+      const identity = yield* Cache.get(repositoryIdentityCache, cacheKey);
+      yield* beforeWorkspaceEffect(cacheKey);
+      return identity;
     },
   );
 

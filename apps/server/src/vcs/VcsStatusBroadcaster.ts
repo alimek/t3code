@@ -1,3 +1,8 @@
+import {
+  AuthOrchestrationReadScope,
+  AuthSourceControlWriteScope,
+  type AuthEnvironmentScope,
+} from "@t3tools/contracts";
 import { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as WorkspaceReadAccess from "../auth/workspaceReadAccess.ts";
 import { trustedReadAuthority, type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
@@ -186,6 +191,10 @@ export function remoteRefreshFailureDelay(
   return Duration.max(configuredInterval, cappedBackoff);
 }
 
+const refreshScope = Context.Reference<AuthEnvironmentScope>("t3/vcs/refreshScope", {
+  defaultValue: () => AuthOrchestrationReadScope,
+});
+
 export class VcsStatusBroadcaster extends Context.Service<
   VcsStatusBroadcaster,
   {
@@ -203,6 +212,7 @@ export class VcsStatusBroadcaster extends Context.Service<
     readonly refreshStatus: (
       authority: ThreadReadAuthority,
       cwd: string,
+      scope?: AuthEnvironmentScope,
     ) => Effect.Effect<VcsStatusResult, GitManagerServiceError | EnvironmentAuthorizationError>;
     /**
      * Refresh a loaded cwd after a turn if background policy allows it.
@@ -268,6 +278,7 @@ export const make = Effect.gen(function* () {
 
   const updateCachedLocalStatus = Effect.fn("VcsStatusBroadcaster.updateCachedLocalStatus")(
     function* (cwd: string, local: VcsStatusLocalResult, options?: { publish?: boolean }) {
+      yield* WorkspaceReadAccess.beforeWorkspaceEffect(cwd);
       const nextLocal = {
         fingerprint: fingerprintStatusPart(local),
         value: local,
@@ -298,6 +309,7 @@ export const make = Effect.gen(function* () {
 
   const updateCachedRemoteStatus = Effect.fn("VcsStatusBroadcaster.updateCachedRemoteStatus")(
     function* (cwd: string, remote: VcsStatusRemoteResult | null, options?: { publish?: boolean }) {
+      yield* WorkspaceReadAccess.beforeWorkspaceEffect(cwd);
       const nextRemote = {
         fingerprint: fingerprintStatusPart(remote),
         value: remote,
@@ -332,6 +344,7 @@ export const make = Effect.gen(function* () {
     remote: VcsStatusRemoteResult | null,
     options?: { publish?: boolean },
   ) {
+    yield* WorkspaceReadAccess.beforeWorkspaceEffect(cwd);
     const nextLocal = {
       fingerprint: fingerprintStatusPart(local),
       value: local,
@@ -372,8 +385,8 @@ export const make = Effect.gen(function* () {
     authority: ThreadReadAuthority,
     cwd: string,
   ) {
-    const local = yield* workflow.localStatus(authority, { cwd });
-    yield* access.admit(authority, { cwd });
+    const local = yield* workflow.localStatus(authority, { cwd }, yield* refreshScope);
+    yield* access.admit(authority, { cwd }, yield* refreshScope);
     return yield* updateCachedLocalStatus(cwd, local);
   });
 
@@ -395,7 +408,7 @@ export const make = Effect.gen(function* () {
     input: VcsStatusInput,
   ) {
     const cwd = yield* withFileSystem(normalizeCwd(input.cwd));
-    yield* access.admit(authority, input);
+    yield* access.admit(authority, input, yield* refreshScope);
     const cached = yield* getCachedStatus(cwd);
     if (cached?.local && cached.remote) {
       return mergeGitStatusParts(cached.local.value, cached.remote.value);
@@ -403,20 +416,20 @@ export const make = Effect.gen(function* () {
     return yield* withRemoteWriteLock(
       cwd,
       Effect.gen(function* () {
-        yield* access.admit(authority, input);
+        yield* access.admit(authority, input, yield* refreshScope);
         const latest = yield* getCachedStatus(cwd);
         const [local, remote] = yield* Effect.all(
           [
             latest?.local
               ? Effect.succeed(latest.local.value)
-              : workflow.localStatus(authority, { cwd }),
+              : workflow.localStatus(authority, { cwd }, yield* refreshScope),
             latest?.remote
               ? Effect.succeed(latest.remote.value)
-              : workflow.remoteStatus(authority, { cwd }),
+              : workflow.remoteStatus(authority, { cwd }, undefined, yield* refreshScope),
           ],
           { concurrency: "unbounded" },
         );
-        yield* access.admit(authority, { cwd });
+        yield* access.admit(authority, { cwd }, yield* refreshScope);
         return yield* updateCachedStatus(cwd, local, remote);
       }),
     );
@@ -424,10 +437,10 @@ export const make = Effect.gen(function* () {
 
   const refreshLocalStatusCore = Effect.fn("VcsStatusBroadcaster.refreshLocalStatusCore")(
     function* (authority: ThreadReadAuthority, cwd: string) {
-      yield* access.admit(authority, { cwd });
-      yield* workflow.invalidateLocalStatus(cwd);
-      const local = yield* workflow.localStatus(authority, { cwd });
-      yield* access.admit(authority, { cwd });
+      yield* access.admit(authority, { cwd }, yield* refreshScope);
+      yield* workflow.invalidateLocalStatus(authority, cwd, yield* refreshScope);
+      const local = yield* workflow.localStatus(authority, { cwd }, yield* refreshScope);
+      yield* access.admit(authority, { cwd }, yield* refreshScope);
       return yield* updateCachedLocalStatus(cwd, local, { publish: true });
     },
   );
@@ -437,7 +450,7 @@ export const make = Effect.gen(function* () {
     rawCwd: string,
   ) {
     const cwd = yield* withFileSystem(normalizeCwd(rawCwd));
-    yield* access.admit(authority, { cwd: rawCwd });
+    yield* access.admit(authority, { cwd: rawCwd }, yield* refreshScope);
     return yield* refreshLocalStatusCore(authority, cwd);
   });
 
@@ -448,7 +461,7 @@ export const make = Effect.gen(function* () {
     policyCwds: ReadonlyArray<string>,
   ) {
     return yield* Effect.gen(function* () {
-      yield* access.admit(authority, { cwd });
+      yield* access.admit(authority, { cwd }, yield* refreshScope);
       const autoPullEnabled = (yield* Effect.forEach(policyCwds, autoPullPolicy.isEnabled, {
         concurrency: "unbounded",
       })).some(Boolean);
@@ -462,25 +475,37 @@ export const make = Effect.gen(function* () {
         return null;
       }
 
-      yield* workflow.invalidateLocalStatus(cwd);
-      const local = yield* workflow.localStatus(authority, { cwd });
+      yield* workflow.invalidateLocalStatus(authority, cwd, yield* refreshScope);
+      const local = yield* workflow.localStatus(authority, { cwd }, yield* refreshScope);
       if (!local.isRepo || !local.isDefaultRef || local.hasWorkingTreeChanges) return null;
 
-      yield* access.admit(authority, { cwd });
-      yield* workflow.pullCurrentBranch(cwd);
-      yield* workflow.invalidateStatus(cwd);
+      yield* access.admit(authority, { cwd }, yield* refreshScope);
+      if (
+        authority !== trustedReadAuthority &&
+        !(yield* authority.current).scopes.includes(AuthSourceControlWriteScope)
+      )
+        return null;
+      yield* workflow.pullCurrentBranch(authority, cwd);
+      yield* workflow.invalidateStatus(authority, cwd, yield* refreshScope);
       const [refreshedLocal, refreshedRemote] = yield* Effect.all(
         [
-          workflow.localStatus(authority, { cwd }),
-          workflow.remoteStatus(authority, { cwd }, { refreshUpstream: false }),
+          workflow.localStatus(authority, { cwd }, yield* refreshScope),
+          workflow.remoteStatus(
+            authority,
+            { cwd },
+            { refreshUpstream: false },
+            yield* refreshScope,
+          ),
         ],
         { concurrency: "unbounded" },
       );
       yield* updateCachedStatus(cwd, refreshedLocal, refreshedRemote, { publish: true });
       return { local: refreshedLocal, remote: refreshedRemote };
     }).pipe(
-      Effect.catch(() =>
-        Effect.logWarning("Automatic project pull failed", { cwd }).pipe(Effect.as(null)),
+      Effect.catch((error) =>
+        error._tag === "EnvironmentAuthorizationError"
+          ? Effect.fail(error)
+          : Effect.logWarning("Automatic project pull failed", { cwd }).pipe(Effect.as(null)),
       ),
     );
   });
@@ -496,7 +521,7 @@ export const make = Effect.gen(function* () {
       cwd,
       Effect.gen(function* () {
         if (options?.refreshUpstream !== false) {
-          yield* workflow.invalidateRemoteStatus(cwd);
+          yield* workflow.invalidateRemoteStatus(trustedReadAuthority, cwd);
         }
         const previousRemote = (yield* getCachedStatus(cwd))?.remote?.value;
         const remote = yield* workflow.remoteStatus(trustedReadAuthority, { cwd }, options);
@@ -529,20 +554,25 @@ export const make = Effect.gen(function* () {
     rawCwd: string,
   ) {
     const cwd = yield* withFileSystem(normalizeCwd(rawCwd));
-    yield* access.admit(authority, { cwd: rawCwd });
+    yield* access.admit(authority, { cwd: rawCwd }, yield* refreshScope);
     // invalidateStatus (not the two partial invalidations) so an explicit
     // refresh also bypasses GitManager's slow PR-lookup cache.
     return yield* withRemoteWriteLock(
       cwd,
       Effect.gen(function* () {
-        yield* access.admit(authority, { cwd: rawCwd });
-        yield* workflow.invalidateStatus(cwd);
+        yield* access.admit(authority, { cwd: rawCwd }, yield* refreshScope);
+        yield* workflow.invalidateStatus(authority, cwd, yield* refreshScope);
         // Local after remote: the fetch can move the base that the Changes totals compare with.
-        const remote = yield* workflow.remoteStatus(authority, { cwd });
-        const local = yield* workflow.localStatus(authority, { cwd });
+        const remote = yield* workflow.remoteStatus(
+          authority,
+          { cwd },
+          undefined,
+          yield* refreshScope,
+        );
+        const local = yield* workflow.localStatus(authority, { cwd }, yield* refreshScope);
         const pulled = yield* maybeAutoPull(authority, cwd, remote, [rawCwd]);
         if (pulled !== null) return mergeGitStatusParts(pulled.local, pulled.remote);
-        yield* access.admit(authority, { cwd });
+        yield* access.admit(authority, { cwd }, yield* refreshScope);
         return yield* updateCachedStatus(cwd, local, remote, { publish: true });
       }),
     );
@@ -551,11 +581,11 @@ export const make = Effect.gen(function* () {
   const refreshPullRequestStatus = Effect.fn("VcsStatusBroadcaster.refreshPullRequestStatus")(
     function* (authority: ThreadReadAuthority, rawCwd: string) {
       const cwd = yield* withFileSystem(normalizeCwd(rawCwd));
-      yield* access.admit(authority, { cwd: rawCwd });
+      yield* access.admit(authority, { cwd: rawCwd }, yield* refreshScope);
       return yield* withRemoteWriteLock(
         cwd,
         Effect.gen(function* () {
-          yield* access.admit(authority, { cwd: rawCwd });
+          yield* access.admit(authority, { cwd: rawCwd }, yield* refreshScope);
           const cached = yield* getCachedStatus(cwd);
           if (cached?.remote?.value == null) return null;
           const poller = (yield* SynchronizedRef.get(pollersRef)).get(cwd);
@@ -574,7 +604,7 @@ export const make = Effect.gen(function* () {
             { cwd },
             { refreshUpstream: false, refreshMissingPullRequest: true },
           );
-          yield* access.admit(authority, { cwd });
+          yield* access.admit(authority, { cwd }, yield* refreshScope);
           return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
         }),
       );
@@ -768,14 +798,14 @@ export const make = Effect.gen(function* () {
     Stream.unwrap(
       Effect.gen(function* () {
         const cwd = yield* withFileSystem(normalizeCwd(input.cwd));
-        yield* access.admit(authority, input);
+        yield* access.admit(authority, input, yield* refreshScope);
         const subscription = yield* PubSub.subscribe(changesPubSub);
         const initialLocal = yield* getOrLoadLocalStatus(authority, cwd);
-        yield* access.admit(authority, input);
+        yield* access.admit(authority, input, yield* refreshScope);
         const cachedStatus = yield* getCachedStatus(cwd);
         const initialRemote = cachedStatus?.remote?.value ?? null;
         if (input.includeRemote !== false) {
-          yield* access.admit(authority, input);
+          yield* access.admit(authority, input, yield* refreshScope);
           yield* retainRemotePoller(
             authority,
             cwd,
@@ -808,8 +838,10 @@ export const make = Effect.gen(function* () {
     getStatus: (authority, input) => access.read(authority, input, getStatus(authority, input)),
     refreshLocalStatus: (authority, cwd) =>
       access.read(authority, { cwd }, refreshLocalStatus(authority, cwd)),
-    refreshStatus: (authority, cwd) =>
-      access.read(authority, { cwd }, refreshStatus(authority, cwd)),
+    refreshStatus: (authority, cwd, scope = AuthOrchestrationReadScope) =>
+      access
+        .read(authority, { cwd }, refreshStatus(authority, cwd), scope)
+        .pipe(Effect.provideService(refreshScope, scope)),
     refreshPullRequestStatus: (authority, cwd) =>
       access.read(authority, { cwd }, refreshPullRequestStatus(authority, cwd)),
     streamStatus: (authority, input, options) =>

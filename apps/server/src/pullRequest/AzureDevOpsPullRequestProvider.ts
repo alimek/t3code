@@ -160,7 +160,7 @@ export const make = Effect.gen(function* () {
         provider: "azure-devops",
         operation,
         ...azureDevOpsProviderFailure(error),
-        detail: error.detail,
+        detail: error._tag === "EnvironmentAuthorizationError" ? error.message : error.detail,
         cause: error,
       });
 

@@ -898,11 +898,13 @@ it.effect("rejects HTTP failures even when tea exits successfully", () =>
       })
       .pipe(Effect.result);
     assert.strictEqual(result._tag, "Failure");
-    if (result._tag === "Failure")
+    if (result._tag === "Failure") {
+      if (result.failure._tag === "EnvironmentAuthorizationError") return yield* result.failure;
       assert.strictEqual(
         result.failure.detail,
         "Forgejo repository or pull request was not found.",
       );
+    }
   }).pipe(
     Effect.provideService(
       FileSystem.FileSystem,
@@ -1386,6 +1388,7 @@ it.effect("handles fj mutation statuses without retrying failures or reading abs
         assert.strictEqual(result._tag, status < 300 ? "Success" : "Failure");
         if (result._tag === "Success") assert.strictEqual(result.success.stdout, "");
         if (result._tag === "Failure") {
+          if (result.failure._tag === "EnvironmentAuthorizationError") throw result.failure;
           assert.strictEqual(result.failure.command, "fj");
           assert.strictEqual(result.failure.httpStatus, status);
         }

@@ -1,3 +1,6 @@
+import { EnvironmentAuthorizationError, AuthSourceControlWriteScope } from "@t3tools/contracts";
+import type { ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
+import * as WorkspaceReadAccess from "../auth/workspaceReadAccess.ts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -13,7 +16,11 @@ import * as VcsDriverRegistry from "./VcsDriverRegistry.ts";
 export class VcsProvisioningService extends Context.Service<
   VcsProvisioningService,
   {
-    readonly initRepository: (input: VcsInitInput) => Effect.Effect<void, VcsError>;
+    readonly initRepository: (
+      authority: ThreadReadAuthority,
+      input: VcsInitInput,
+      afterSuccess?: WorkspaceReadAccess.WorkspaceActionCallback<void>,
+    ) => Effect.Effect<void, VcsError | EnvironmentAuthorizationError>;
   }
 >()("t3/vcs/VcsProvisioningService") {}
 
@@ -37,18 +44,27 @@ function resolveRequestedKind(
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  const access = yield* WorkspaceReadAccess.make;
   const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
 
   const initRepository: VcsProvisioningService["Service"]["initRepository"] = Effect.fn(
     "VcsProvisioningService.initRepository",
-  )(function* (input) {
+  )(function* (authority, input) {
     const kind = yield* resolveRequestedKind(input.kind);
     const driver = yield* registry.get(kind);
+    yield* WorkspaceReadAccess.beforeWorkspaceEffect(input.cwd);
     return yield* driver.initRepository(input);
   });
 
   return VcsProvisioningService.of({
-    initRepository,
+    initRepository: (authority, input, afterSuccess) =>
+      access.run(
+        authority,
+        input,
+        initRepository(authority, input),
+        AuthSourceControlWriteScope,
+        afterSuccess,
+      ),
   });
 });
 

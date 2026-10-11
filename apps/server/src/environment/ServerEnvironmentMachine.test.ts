@@ -14,7 +14,12 @@ import {
   machineKindFromDmi,
 } from "./ServerEnvironmentMachine.ts";
 
-const runMock = vi.fn<ProcessRunner.ProcessRunner["Service"]["run"]>();
+const runMock =
+  vi.fn<
+    (
+      input: ProcessRunner.ProcessRunInput<unknown>,
+    ) => Effect.Effect<ProcessRunner.ProcessRunOutput, ProcessRunner.ProcessRunError>
+  >();
 
 const layerProcessRunnerTest = Layer.succeed(
   ProcessRunner.ProcessRunner,

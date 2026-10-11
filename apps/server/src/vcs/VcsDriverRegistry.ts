@@ -1,3 +1,4 @@
+import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -33,11 +34,15 @@ export interface VcsDriverHandle {
 export class VcsDriverRegistry extends Context.Service<
   VcsDriverRegistry,
   {
-    readonly get: (kind: VcsDriverKind) => Effect.Effect<VcsDriver.VcsDriver["Service"], VcsError>;
+    readonly get: (
+      kind: VcsDriverKind,
+    ) => Effect.Effect<VcsDriver.VcsDriver["Service"], VcsError | EnvironmentAuthorizationError>;
     readonly detect: (
       input: VcsDriverResolveInput,
-    ) => Effect.Effect<VcsDriverHandle | null, VcsError>;
-    readonly resolve: (input: VcsDriverResolveInput) => Effect.Effect<VcsDriverHandle, VcsError>;
+    ) => Effect.Effect<VcsDriverHandle | null, VcsError | EnvironmentAuthorizationError>;
+    readonly resolve: (
+      input: VcsDriverResolveInput,
+    ) => Effect.Effect<VcsDriverHandle, VcsError | EnvironmentAuthorizationError>;
   }
 >()("t3/vcs/VcsDriverRegistry") {}
 
@@ -146,7 +151,7 @@ export const make = Effect.gen(function* () {
   const detectionCache = yield* Cache.makeWith<
     string,
     { readonly handle: VcsDriverHandle; readonly gitEntries: ReadonlyArray<boolean> } | null,
-    VcsError
+    VcsError | EnvironmentAuthorizationError
   >(
     (key) =>
       Effect.gen(function* () {

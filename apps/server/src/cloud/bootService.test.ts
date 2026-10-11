@@ -162,7 +162,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
   };
   const runner = ProcessRunner.ProcessRunner.of({
     run: Effect.fn("test.run_boot_service_command")(function* (
-      input: ProcessRunner.ProcessRunInput,
+      input: ProcessRunner.ProcessRunInput<unknown>,
     ) {
       const command = `${input.command} ${input.args.join(" ")}`;
       commands.push(command);

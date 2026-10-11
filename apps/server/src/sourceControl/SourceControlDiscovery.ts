@@ -1,3 +1,4 @@
+import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import {
   type SourceControlDiscoveryResult,
   type VcsDiscoveryItem,
@@ -60,7 +61,7 @@ const VCS_PROBES: ReadonlyArray<VcsProbe> = [
 export class SourceControlDiscovery extends Context.Service<
   SourceControlDiscovery,
   {
-    readonly discover: Effect.Effect<SourceControlDiscoveryResult>;
+    readonly discover: Effect.Effect<SourceControlDiscoveryResult, EnvironmentAuthorizationError>;
   }
 >()("t3/sourceControl/SourceControlDiscovery") {}
 

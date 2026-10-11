@@ -1,3 +1,8 @@
+import {
+  beforeWorkspaceEffect,
+  beforeCurrentWorkspaceEffect,
+} from "../auth/workspaceReadAccess.ts";
+import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -50,7 +55,9 @@ export interface VcsProcessOutput {
 export class VcsProcess extends Context.Service<
   VcsProcess,
   {
-    readonly run: (input: VcsProcessInput) => Effect.Effect<VcsProcessOutput, VcsError>;
+    readonly run: (
+      input: VcsProcessInput,
+    ) => Effect.Effect<VcsProcessOutput, VcsError | EnvironmentAuthorizationError>;
   }
 >()("t3/vcs/VcsProcess") {}
 
@@ -126,8 +133,12 @@ export const make = Effect.gen(function* () {
       argumentCount: input.args.length,
     };
 
+    const admission =
+      input.command === "git" ? beforeWorkspaceEffect(input.cwd) : beforeCurrentWorkspaceEffect;
+    yield* admission;
     const result = yield* processRunner
       .run({
+        beforeSpawn: admission,
         command: input.command,
         args: input.args,
         cwd: input.cwd,
@@ -144,6 +155,7 @@ export const make = Effect.gen(function* () {
       .pipe(
         Effect.mapError(
           Match.valueTags({
+            EnvironmentAuthorizationError: (error) => error,
             ProcessSpawnError: (error) =>
               VcsProcessSpawnError.fromProcessSpawnError(baseError, error),
             ProcessOutputLimitError: (error) =>

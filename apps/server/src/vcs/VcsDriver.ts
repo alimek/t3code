@@ -1,3 +1,4 @@
+import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 
@@ -40,17 +41,21 @@ export interface VcsDeleteCheckpointRefsInput {
 }
 
 export interface VcsCheckpointOps {
-  readonly captureCheckpoint: (input: VcsCaptureCheckpointInput) => Effect.Effect<void, VcsError>;
+  readonly captureCheckpoint: (
+    input: VcsCaptureCheckpointInput,
+  ) => Effect.Effect<void, VcsError | EnvironmentAuthorizationError>;
   readonly hasCheckpointRef: (
     input: Omit<VcsRestoreCheckpointInput, "fallbackToHead">,
-  ) => Effect.Effect<boolean, VcsError>;
+  ) => Effect.Effect<boolean, VcsError | EnvironmentAuthorizationError>;
   readonly restoreCheckpoint: (
     input: VcsRestoreCheckpointInput,
-  ) => Effect.Effect<boolean, VcsError>;
-  readonly diffCheckpoints: (input: VcsDiffCheckpointsInput) => Effect.Effect<string, VcsError>;
+  ) => Effect.Effect<boolean, VcsError | EnvironmentAuthorizationError>;
+  readonly diffCheckpoints: (
+    input: VcsDiffCheckpointsInput,
+  ) => Effect.Effect<string, VcsError | EnvironmentAuthorizationError>;
   readonly deleteCheckpointRefs: (
     input: VcsDeleteCheckpointRefsInput,
-  ) => Effect.Effect<void, VcsError>;
+  ) => Effect.Effect<void, VcsError | EnvironmentAuthorizationError>;
 }
 
 export class VcsDriver extends Context.Service<
@@ -59,23 +64,29 @@ export class VcsDriver extends Context.Service<
     readonly capabilities: VcsDriverCapabilities;
     readonly execute: (
       input: Omit<VcsProcess.VcsProcessInput, "command">,
-    ) => Effect.Effect<VcsProcess.VcsProcessOutput, VcsError>;
+    ) => Effect.Effect<VcsProcess.VcsProcessOutput, VcsError | EnvironmentAuthorizationError>;
     readonly checkpoints?: VcsCheckpointOps;
     readonly detectRepository: (
       cwd: string,
-    ) => Effect.Effect<VcsRepositoryIdentity | null, VcsError>;
-    readonly isInsideWorkTree: (cwd: string) => Effect.Effect<boolean, VcsError>;
+    ) => Effect.Effect<VcsRepositoryIdentity | null, VcsError | EnvironmentAuthorizationError>;
+    readonly isInsideWorkTree: (
+      cwd: string,
+    ) => Effect.Effect<boolean, VcsError | EnvironmentAuthorizationError>;
     readonly listWorkspaceFiles: (
       cwd: string,
-    ) => Effect.Effect<VcsListWorkspaceFilesResult, VcsError>;
-    readonly listRemotes: (cwd: string) => Effect.Effect<VcsListRemotesResult, VcsError>;
+    ) => Effect.Effect<VcsListWorkspaceFilesResult, VcsError | EnvironmentAuthorizationError>;
+    readonly listRemotes: (
+      cwd: string,
+    ) => Effect.Effect<VcsListRemotesResult, VcsError | EnvironmentAuthorizationError>;
     readonly filterIgnoredPaths: (
       cwd: string,
       relativePaths: ReadonlyArray<string>,
-    ) => Effect.Effect<ReadonlyArray<string>, VcsError>;
-    readonly initRepository: (input: VcsInitInput) => Effect.Effect<void, VcsError>;
+    ) => Effect.Effect<ReadonlyArray<string>, VcsError | EnvironmentAuthorizationError>;
+    readonly initRepository: (
+      input: VcsInitInput,
+    ) => Effect.Effect<void, VcsError | EnvironmentAuthorizationError>;
     readonly getDiffPreview?: (
       input: ReviewDiffPreviewInput,
-    ) => Effect.Effect<ReviewDiffPreviewResult, VcsError>;
+    ) => Effect.Effect<ReviewDiffPreviewResult, VcsError | EnvironmentAuthorizationError>;
   }
 >()("t3/vcs/VcsDriver") {}

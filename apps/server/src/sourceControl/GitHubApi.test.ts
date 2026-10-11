@@ -191,6 +191,7 @@ describe("GitHubApi", () => {
       const error = yield* Effect.flip(
         api.graphql({ host: "github.com", operation: "detail", query: "query { viewer { id } }" }),
       );
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       expect(error._tag).toBe("GitHubApiResponseError");
       expect(error.message).toContain("Resource not accessible");
     }).pipe(Effect.provide(layer));
@@ -217,6 +218,7 @@ describe("GitHubApi", () => {
             query: "query { viewer { id } }",
           }),
         );
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
         expect(error._tag).toBe("GitHubApiResponseError");
       }).pipe(Effect.provide(layer));
     },
@@ -310,6 +312,7 @@ describe("GitHubApi", () => {
           path: "repos/acme/web/pulls",
         }),
       );
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       expect(error.message).toBe(
         "GitHub returned an error: Validation Failed; A pull request already exists for acme:feature.",
       );
@@ -363,6 +366,7 @@ describe("GitHubApi", () => {
       const error = yield* Effect.flip(
         api.graphql({ host: "github.com", operation: "lookup", query: "query { viewer { id } }" }),
       );
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       expect(error).toMatchObject({ _tag: "GitHubApiRateLimitError", retryAt: reset * 1000 });
     }).pipe(Effect.provide(layer));
   });
@@ -393,6 +397,7 @@ describe("GitHubApi", () => {
       const error = yield* Effect.flip(
         api.rest({ host: "github.com", operation: "checks", path: "repos/acme/web/pulls/7" }),
       );
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       expect(error).toMatchObject({ _tag: "GitHubApiRateLimitError", retryAt: NOW + 60_000 });
     }).pipe(Effect.provide(layer));
   });
@@ -432,6 +437,7 @@ describe("GitHubApi", () => {
           credentialFingerprint: "github.com:pinned",
         }),
       );
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       expect(error._tag).toBe("GitHubApiAuthenticationError");
       expect(requests).toHaveLength(0);
     }).pipe(Effect.provide(layer));

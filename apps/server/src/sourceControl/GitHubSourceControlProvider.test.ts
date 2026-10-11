@@ -200,6 +200,7 @@ describe("GitHubSourceControlProvider repository resolution", () => {
     return Effect.gen(function* () {
       const gh = yield* GitHubSourceControlProvider.make;
       const error = yield* gh.getDefaultBranch({ cwd: "/repo" }).pipe(Effect.flip);
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       assert.include(error.detail, "Repository not found");
     }).pipe(Effect.provide(layer));
   });
@@ -212,6 +213,7 @@ describe("GitHubSourceControlProvider repository resolution", () => {
     return Effect.gen(function* () {
       const gh = yield* GitHubSourceControlProvider.make;
       const error = yield* gh.getDefaultBranch({ cwd: "/repo" }).pipe(Effect.flip);
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       assert.strictEqual(error._tag, "SourceControlProviderError");
       assert.include(error.detail, "No GitHub repository");
     }).pipe(Effect.provide(layer));
@@ -374,10 +376,11 @@ describe("GitHubSourceControlProvider change request lookups by head", () => {
           .pipe(Effect.flip, Effect.forkChild);
       const missing = yield* read("missing");
       yield* TestClock.adjust("500 millis");
-      assert.include((yield* Fiber.join(missing)).detail, "No GitHub credential on the server");
+      assert.include((yield* Fiber.join(missing)).message, "No GitHub credential on the server");
       const limited = yield* read("limited");
       yield* TestClock.adjust("500 millis");
       const error = yield* Fiber.join(limited);
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       assert.include(error.detail, "rate limit exceeded");
       assert.propertyVal(error.cause, "retryAt", 123);
     }).pipe(Effect.provide(layer));
@@ -424,6 +427,7 @@ describe("GitHubSourceControlProvider.getChangeRequest", () => {
     return Effect.gen(function* () {
       const gh = yield* GitHubSourceControlProvider.make;
       const error = yield* gh.getChangeRequest({ cwd: "/repo", reference: "7" }).pipe(Effect.flip);
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       assert.include(error.detail, "Pull request not found");
     }).pipe(Effect.provide(layer));
   });
@@ -621,6 +625,7 @@ describe("GitHubSourceControlProvider.checkoutChangeRequest", () => {
       const error = yield* gh
         .checkoutChangeRequest({ cwd: "/repo", reference: "5" })
         .pipe(Effect.flip);
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       assert.strictEqual(error.detail, "The pull request could not be checked out with git.");
       assert.notInclude(error.message, "secret-path");
     }).pipe(Effect.provide(layer));
@@ -886,6 +891,7 @@ it.effect.each(["read", "decode"] as const)(
       });
       assert.ok(lookup);
       const error = yield* Effect.flip(lookup);
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       assert.strictEqual(error.operation, stage === "read" ? "resolveLink" : "resolveLink.decode");
       assert.strictEqual(error.detail, "The linked subject could not be read.");
       assert.notInclude(error.message, "private response text");

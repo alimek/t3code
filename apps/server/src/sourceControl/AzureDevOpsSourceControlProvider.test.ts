@@ -65,6 +65,7 @@ it.effect("adds change-request context while retaining Azure CLI causes", () =>
     const error = yield* provider
       .checkoutChangeRequest({ cwd: "/repo", reference: "#42" })
       .pipe(Effect.flip);
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.deepStrictEqual(
       {

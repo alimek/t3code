@@ -704,6 +704,7 @@ it.effect("preserves the HTTP client failure without deriving the domain message
         reference: "42",
       }),
     );
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.instanceOf(error, BitbucketApi.BitbucketRequestError);
     assert.strictEqual(error.operation, "getPullRequest");
@@ -727,6 +728,7 @@ it.effect("keeps Bitbucket response bodies out of checkout diagnostics", () => {
     const error = yield* bitbucket
       .checkoutPullRequest({ cwd: "/repo", reference: "42" })
       .pipe(Effect.flip);
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.instanceOf(error, BitbucketApi.BitbucketResponseError);
     assert.strictEqual(error.operation, "getPullRequest");
@@ -752,6 +754,7 @@ it.effect("keeps a 429 Retry-After time on the response error", () => {
     const error = yield* bitbucket
       .request({ method: "GET", url: "/repositories/acme/web" })
       .pipe(Effect.flip);
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.instanceOf(error, BitbucketApi.BitbucketResponseError);
     assert.strictEqual(error.status, 429);
@@ -776,6 +779,7 @@ it.effect("preserves Bitbucket response body read failures as their immediate ca
     const error = yield* bitbucket
       .getPullRequest({ cwd: "/repo", reference: "42" })
       .pipe(Effect.flip);
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.instanceOf(error, BitbucketApi.BitbucketResponseBodyReadError);
     assert.strictEqual(error.operation, "getPullRequest");
@@ -806,6 +810,7 @@ it.effect("keeps the 429 retry time when the response body cannot be read", () =
     const error = yield* bitbucket
       .request({ method: "GET", url: "/repositories/acme/web" })
       .pipe(Effect.flip);
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.instanceOf(error, BitbucketApi.BitbucketResponseBodyReadError);
     assert.strictEqual(error.status, 429);
@@ -898,6 +903,7 @@ it.effect("preserves Git checkout failures without deriving the domain message f
         force: true,
       }),
     );
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.instanceOf(error, BitbucketApi.BitbucketCheckoutError);
     assert.strictEqual(error.cwd, "/repo");
@@ -981,6 +987,7 @@ it.effect("refuses a url that points away from the configured Bitbucket", () => 
     const error = yield* Effect.flip(
       bitbucket.request({ method: "GET", url: "https://attacker.example/2.0/repositories" }),
     );
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.strictEqual(error._tag, "BitbucketUntrustedUrlError");
     // Nothing was sent at all, so no header travelled anywhere.
@@ -999,6 +1006,7 @@ it.effect("keeps only the host of a url it refuses, never its query", () =>
         url: "https://attacker.example/asset?signature=secret-token",
       }),
     );
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     assert.strictEqual(error._tag, "BitbucketUntrustedUrlError");
     assert.strictEqual(
@@ -1016,6 +1024,7 @@ it.effect("does not follow a redirect off the configured Bitbucket", () =>
     const error = yield* Effect.flip(
       bitbucket.request({ method: "GET", url: "/repositories/acme/web/pullrequests/1/diff" }),
     );
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
 
     // The client would carry every header to the new host, so the hop is checked here instead.
     assert.strictEqual(error._tag, "BitbucketUntrustedUrlError");

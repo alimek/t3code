@@ -1,5 +1,7 @@
+import type { WorkspaceActionAdmission } from "./workspaceReadAccess.ts";
 import {
   AuthOrchestrationOperateScope,
+  AuthSourceControlWriteScope,
   EnvironmentAuthorizationError,
   ProjectId,
   ThreadId,
@@ -30,6 +32,8 @@ import {
   toSafeThreadAttachmentSegment,
 } from "../attachmentStore.ts";
 
+const isEnvironmentAuthorizationError = Schema.is(EnvironmentAuthorizationError);
+
 /** App-owned work opts in explicitly; external calls must reload device authority. */
 export const trustedMutationAuthority = Symbol("trusted mutation");
 const registeredCommandWorkspace = Symbol("canonical launch workspace");
@@ -54,10 +58,90 @@ export const withRegisteredCommandWorkspace = (
   authority === trustedMutationAuthority
     ? authority
     : { ...authority, [registeredCommandWorkspace]: workspace };
+const sourceControlLink = Symbol("checked source-control link");
+export type SourceControlLinkAuthority = {
+  readonly [sourceControlLink]: {
+    readonly workspace: WorkspaceActionAdmission;
+    readonly command: Extract<
+      OrchestrationV2ServerCommand,
+      { readonly type: "thread.pull-request.link" }
+    >;
+  };
+};
+export type CommandAuthority = MutationAuthority | SourceControlLinkAuthority;
+/** A checked Git action may link only its original thread, using the existing command lock/commit. */
+export const checkedSourceControlLinkAuthority = (
+  workspace: WorkspaceActionAdmission,
+  command: Extract<OrchestrationV2ServerCommand, { readonly type: "thread.pull-request.link" }>,
+): SourceControlLinkAuthority => ({ [sourceControlLink]: { workspace, command } });
+export const isCheckedSourceControlLinkAuthority = (authority: CommandAuthority) =>
+  typeof authority === "object" && sourceControlLink in authority;
+const linkAdmission = (authority: CommandAuthority) =>
+  typeof authority === "object" && sourceControlLink in authority
+    ? authority[sourceControlLink]
+    : undefined;
+/** Filesystem admission stays outside SQL, after the existing thread lock is acquired. */
+export const beforeSourceControlLinkEffect = (authority: CommandAuthority) => {
+  const link = linkAdmission(authority);
+  return link === undefined ? Effect.void : link.workspace.beforeEffect(link.workspace.input.cwd);
+};
+const sourceControlDenied = () =>
+  new EnvironmentAuthorizationError({
+    requiredScope: AuthSourceControlWriteScope,
+    message: "This connection cannot link this Git action's pull request.",
+  });
+const authorizeSourceControlLink = Effect.fnUntraced(function* (
+  sql: SqlClient.SqlClient,
+  authority: SourceControlLinkAuthority,
+  commandId: CommandId,
+  command?: OrchestrationV2ServerCommand,
+) {
+  const { workspace, command: original } = authority[sourceControlLink];
+  if (
+    original.type !== "thread.pull-request.link" ||
+    original.source !== "created" ||
+    workspace.scope !== AuthSourceControlWriteScope ||
+    workspace.input.threadId !== original.threadId ||
+    original.commandId !== commandId ||
+    (command !== undefined && command !== original)
+  )
+    return yield* sourceControlDenied();
+  yield* workspace.checkSql;
+  if (workspace.authority === trustedReadAuthority) return;
+  const current = yield* workspace.authority.current;
+  if (!current.scopes.includes(AuthSourceControlWriteScope)) return yield* sourceControlDenied();
+  const owner = yield* sql<{ readonly project: string }>`
+    SELECT t.project_id AS project FROM orchestration_v2_projection_threads t
+    JOIN projection_projects p ON p.project_id = t.project_id
+    WHERE t.thread_id = ${original.threadId} AND t.deleted_at IS NULL AND p.deleted_at IS NULL
+  `;
+  if (
+    owner.length !== 1 ||
+    owner[0]!.project !== workspace.projectId ||
+    !resourceGrantAllowsProject(current.resourceGrant, ProjectId.make(owner[0]!.project))
+  )
+    return yield* sourceControlDenied();
+  const receipts = yield* sql<{
+    readonly kind: string;
+    readonly id: string;
+    readonly type: string;
+  }>`
+    SELECT aggregate_kind AS kind, aggregate_id AS id, command_type AS type FROM orchestration_command_receipts WHERE command_id = ${commandId}
+    UNION SELECT aggregate_kind, stream_id, 'thread.pull-request.link' FROM orchestration_events WHERE command_id = ${commandId}
+  `;
+  if (
+    receipts.some(
+      (r) =>
+        r.kind !== "thread" || r.id !== original.threadId || r.type !== "thread.pull-request.link",
+    )
+  )
+    return yield* sourceControlDenied();
+  yield* workspace.checkSql;
+});
 export type CommandAdmission =
   | typeof trustedMutationAuthority
   | {
-      readonly authority: MutationAuthority;
+      readonly authority: CommandAuthority;
       readonly command: OrchestrationV2ServerCommand;
       readonly projectId?: ProjectId;
     };
@@ -169,16 +253,22 @@ const currentMutationGrant = Effect.fnUntraced(function* (authority: MutationAut
 /** Rejected receipts do not retain original source participants; opaque diagnostics are not admission. */
 export const receiptForMutationAuthority = Effect.fnUntraced(
   function* <T extends Pick<CommandReceiptV2, "status" | "error">>(
-    authority: MutationAuthority,
+    authority: CommandAuthority,
     receipt: T,
   ) {
     if (receipt.status !== "rejected") return receipt;
-    const grant = yield* currentMutationGrant(authority);
+    const link = linkAdmission(authority);
+    const grant =
+      link === undefined
+        ? yield* currentMutationGrant(authority as MutationAuthority)
+        : link.workspace.authority === trustedReadAuthority
+          ? undefined
+          : (yield* link.workspace.authority.current).resourceGrant;
     return grant !== undefined && (grant.projects.mode !== "all" || grant.providers.mode !== "all")
       ? { ...receipt, error: "Previously rejected." }
       : receipt;
   },
-  Effect.mapError(() => mutationDenied()),
+  Effect.mapError((error) => (isEnvironmentAuthorizationError(error) ? error : mutationDenied())),
 );
 
 const authorizeProjects = Effect.fnUntraced(function* (
@@ -633,11 +723,19 @@ export const authorizeAttachmentClaim = Effect.fnUntraced(
 export const authorizeCommand = Effect.fn("resourceAuthorization.command")(
   function* (
     sql: SqlClient.SqlClient,
-    authority: MutationAuthority,
+    authority: CommandAuthority,
     command: OrchestrationV2ServerCommand,
     creatingThread?: { readonly threadId: ThreadId; readonly projectId: ProjectId },
   ) {
-    const grant = yield* currentMutationGrant(authority);
+    if (linkAdmission(authority) !== undefined)
+      return yield* authorizeSourceControlLink(
+        sql,
+        authority as SourceControlLinkAuthority,
+        command.commandId,
+        command,
+      );
+    const mutationAuthority = authority as MutationAuthority;
+    const grant = yield* currentMutationGrant(mutationAuthority);
     if (grant === undefined) return;
     if (command.type === "thread.create" && command.importedNativeThread !== undefined) {
       // An unregistered native session has no project owner. Restricted callers cannot claim it.
@@ -656,7 +754,10 @@ export const authorizeCommand = Effect.fn("resourceAuthorization.command")(
     if (creatingThread !== undefined) {
       if (command.type !== "message.dispatch" || command.threadId !== creatingThread.threadId)
         return yield* mutationDenied();
-      yield* authorizeMutationTarget(sql, authority, { ...creatingThread, allowCreate: true });
+      yield* authorizeMutationTarget(sql, mutationAuthority, {
+        ...creatingThread,
+        allowCreate: true,
+      });
     }
     const targets = commandTargets(command);
     if (targets.project !== undefined) yield* authorizeProjects(sql, grant, [targets.project]);
@@ -670,13 +771,13 @@ export const authorizeCommand = Effect.fn("resourceAuthorization.command")(
     `;
       if (existing.length > 0) yield* authorizeMutationThread(sql, grant, targets.createdThread);
       if (command.type === "thread.create")
-        yield* authorizeMutationTarget(sql, authority, {
+        yield* authorizeMutationTarget(sql, mutationAuthority, {
           threadId: command.threadId,
           projectId: command.projectId,
           allowCreate: true,
         });
     }
-    yield* authorizeCommandWorkspace(sql, grant, command, authority);
+    yield* authorizeCommandWorkspace(sql, grant, command, mutationAuthority);
     const runIds = [
       ...("runId" in command ? [command.runId] : []),
       ...("parentRunId" in command ? [command.parentRunId] : []),
@@ -821,19 +922,26 @@ export const authorizeCommand = Effect.fn("resourceAuthorization.command")(
           .map((a) => a.id),
       );
   },
-  Effect.mapError(() => mutationDenied()),
+  Effect.mapError((error) => (isEnvironmentAuthorizationError(error) ? error : mutationDenied())),
 );
 
 /** Inspect raw receipt participants before EventStore decodes any stored payload. */
 export const authorizeCommandReceipt = Effect.fn("resourceAuthorization.commandReceipt")(
   function* (
     sql: SqlClient.SqlClient,
-    authority: MutationAuthority,
+    authority: CommandAuthority,
     commandId: CommandId,
     includeDeleted = true,
     includeDeletedProject = false,
   ) {
-    const grant = yield* currentMutationGrant(authority);
+    if (linkAdmission(authority) !== undefined)
+      return yield* authorizeSourceControlLink(
+        sql,
+        authority as SourceControlLinkAuthority,
+        commandId,
+      );
+    const mutationAuthority = authority as MutationAuthority;
+    const grant = yield* currentMutationGrant(mutationAuthority);
     if (grant === undefined) return;
     const owners = yield* sql<{ readonly kind: string; readonly id: string }>`
     SELECT aggregate_kind AS kind, aggregate_id AS id FROM orchestration_command_receipts WHERE command_id = ${commandId}
@@ -884,7 +992,7 @@ export const authorizeCommandReceipt = Effect.fn("resourceAuthorization.commandR
           sql,
           { projectId: ProjectId.make(path.project), threadId: ThreadId.make(path.thread) },
           path.path,
-          authority,
+          mutationAuthority,
           commandId,
         );
     }
@@ -1023,7 +1131,7 @@ export const authorizeCommandReceipt = Effect.fn("resourceAuthorization.commandR
       }
     }
   },
-  Effect.mapError(() => mutationDenied()),
+  Effect.mapError((error) => (isEnvironmentAuthorizationError(error) ? error : mutationDenied())),
 );
 
 export const authorizeCommandAdmission = Effect.fnUntraced(function* (
@@ -1041,6 +1149,11 @@ export const authorizeCommandAdmission = Effect.fnUntraced(function* (
       target.commandType !== admission.command.type)
   )
     return yield* mutationDenied();
+  if (linkAdmission(admission.authority)) {
+    yield* authorizeCommand(sql, admission.authority, admission.command);
+    yield* authorizeCommandReceipt(sql, admission.authority, commandId);
+    return;
+  }
   if (admission.projectId !== undefined) {
     const rows = yield* sql<{ readonly project: string }>`
       SELECT t.project_id AS project FROM orchestration_v2_projection_threads t
@@ -1049,7 +1162,9 @@ export const authorizeCommandAdmission = Effect.fnUntraced(function* (
     `;
     if (rows.length !== 1 || rows[0]!.project !== admission.projectId)
       return yield* mutationDenied();
-    yield* authorizeMutationTarget(sql, admission.authority, { projectId: admission.projectId });
+    yield* authorizeMutationTarget(sql, admission.authority as MutationAuthority, {
+      projectId: admission.projectId,
+    });
   }
   yield* authorizeCommand(sql, admission.authority, admission.command);
   yield* authorizeCommandReceipt(sql, admission.authority, commandId);

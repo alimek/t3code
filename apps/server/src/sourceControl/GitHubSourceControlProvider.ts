@@ -1,3 +1,5 @@
+import { recoverWorkspaceError } from "../auth/workspaceReadAccess.ts";
+import { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -54,6 +56,8 @@ import {
   type SourceControlManagedCliDiscoverySpec,
 } from "./SourceControlProviderDiscovery.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+
+const isEnvironmentAuthorizationError = Schema.is(EnvironmentAuthorizationError);
 
 const decodeLinkSubject = Schema.decodeUnknownEffect(
   Schema.fromJsonString(
@@ -203,7 +207,7 @@ export const makeDiscovery = Effect.gen(function* () {
     probe: Effect.fn("GitHubSourceControlProvider.discovery")(function* (cwd: string) {
       const settings = yield* serverSettings.getSettings.pipe(
         Effect.map((current) => current.github),
-        Effect.orElseSucceed(() => DEFAULT_SERVER_SETTINGS.github),
+        recoverWorkspaceError(() => DEFAULT_SERVER_SETTINGS.github),
       );
       const cli = yield* probeSourceControlProvider({
         cwd,
@@ -219,6 +223,8 @@ export const makeDiscovery = Effect.gen(function* () {
       const viewer = yield* api
         .rest({ host: "github.com", operation: "discovery", path: "user" })
         .pipe(Effect.result);
+      if (Result.isFailure(viewer) && viewer.failure._tag === "EnvironmentAuthorizationError")
+        return yield* viewer.failure;
       const login = Result.isSuccess(viewer)
         ? Option.getOrUndefined(decodeViewer(viewer.success.body))?.login
         : undefined;
@@ -277,7 +283,8 @@ const REPOSITORY_NOT_FOUND = "Repository not found. Check the owner and name and
 function fromGitHubApiError(
   error: GitHubApi.GitHubApiError,
   notFound = PULL_REQUEST_NOT_FOUND,
-): GitHubFailure {
+): GitHubFailure | EnvironmentAuthorizationError {
+  if (error._tag === "EnvironmentAuthorizationError") return error;
   switch (error._tag) {
     case "GitHubCliMissingError":
       return failure(
@@ -377,7 +384,7 @@ class PullRequestsByHeadRead extends Request.Class<
     readonly allowReserve: boolean;
   },
   ReadonlyArray<NormalizedGitHubPullRequestRecord>,
-  GitHubFailure
+  GitHubFailure | EnvironmentAuthorizationError
 > {}
 
 /** One aliased `pullRequests` connection per lookup, each head and state passed as a variable. */
@@ -483,7 +490,7 @@ export const make = Effect.gen(function* () {
       const [remotes, resolved] = yield* Effect.all([
         gitRead(input.cwd, ["remote", "-v"]),
         gitRead(input.cwd, ["config", "--get-regexp", "^remote\\..*\\.gh-resolved$"]),
-      ]).pipe(Effect.orElseSucceed(() => [null, null] as const));
+      ]).pipe(recoverWorkspaceError(() => [null, null] as const));
       const { host, locator } = resolveGitHubRepository({
         remotes: remotes?.exitCode === 0 ? remotes.stdout : "",
         resolved: resolved?.exitCode === 0 ? resolved.stdout : "",
@@ -695,7 +702,9 @@ export const make = Effect.gen(function* () {
   // Git and filesystem errors can carry arguments, paths and stderr, so the detail a client
   // sees is fixed and the raw error stays in `cause`.
   const gitFailure = (cause: unknown) =>
-    failure("The pull request could not be checked out with git.", cause);
+    isEnvironmentAuthorizationError(cause)
+      ? cause
+      : failure("The pull request could not be checked out with git.", cause);
 
   const runGit = (cwd: string, operation: string, args: ReadonlyArray<string>) =>
     git.execute({
@@ -790,21 +799,24 @@ export const make = Effect.gen(function* () {
           upstream: { remoteName, remoteBranch: pullRequest.headRefName },
         };
       }).pipe(
-        Effect.catch(() =>
-          Effect.gen(function* () {
-            yield* runGit(input.cwd, "fetchPullRef", [
-              "fetch",
-              "--quiet",
-              "--no-tags",
-              yield* baseRemote,
-              `refs/pull/${pullRequest.number}/head`,
-            ]);
-            const { commitSha } = yield* git.resolveCommit({
-              cwd: input.cwd,
-              revision: "FETCH_HEAD",
-            });
-            return { ref: commitSha, upstream: null };
-          }),
+        Effect.catchIf(
+          (error): error is Exclude<typeof error, EnvironmentAuthorizationError> =>
+            !isEnvironmentAuthorizationError(error),
+          () =>
+            Effect.gen(function* () {
+              yield* runGit(input.cwd, "fetchPullRef", [
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                yield* baseRemote,
+                `refs/pull/${pullRequest.number}/head`,
+              ]);
+              const { commitSha } = yield* git.resolveCommit({
+                cwd: input.cwd,
+                revision: "FETCH_HEAD",
+              });
+              return { ref: commitSha, upstream: null };
+            }),
         ),
         Effect.mapError(gitFailure),
       );
@@ -837,28 +849,30 @@ export const make = Effect.gen(function* () {
       cwd: string,
       context?: { readonly reference?: string; readonly repository?: string },
     ) =>
-    (error: GitHubFailure) =>
-      new SourceControlProviderError({
-        provider: "github",
-        operation,
-        cwd,
-        ...(context?.reference === undefined
-          ? {}
-          : {
-              reference: SourceControlProvider.transportSafeSourceControlErrorValue(
-                context.reference,
-              ),
-            }),
-        ...(context?.repository === undefined
-          ? {}
-          : {
-              repository: SourceControlProvider.transportSafeSourceControlErrorValue(
-                context.repository,
-              ),
-            }),
-        detail: error.detail,
-        cause: error.cause,
-      });
+    (error: GitHubFailure | EnvironmentAuthorizationError) =>
+      isEnvironmentAuthorizationError(error)
+        ? error
+        : new SourceControlProviderError({
+            provider: "github",
+            operation,
+            cwd,
+            ...(context?.reference === undefined
+              ? {}
+              : {
+                  reference: SourceControlProvider.transportSafeSourceControlErrorValue(
+                    context.reference,
+                  ),
+                }),
+            ...(context?.repository === undefined
+              ? {}
+              : {
+                  repository: SourceControlProvider.transportSafeSourceControlErrorValue(
+                    context.repository,
+                  ),
+                }),
+            detail: error.detail,
+            cause: error.cause,
+          });
 
   const readLinkSubject = Effect.fn("GitHubSourceControlProvider.readLinkSubject")(function* (
     input: { readonly cwd: string; readonly url: URL },
@@ -971,7 +985,7 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const fallbackHost = (yield* resolveRepository({ cwd: input.cwd }).pipe(
           Effect.map((locator) => locator.host),
-          Effect.orElseSucceed(() => environment.GH_HOST ?? "github.com"),
+          recoverWorkspaceError(() => environment.GH_HOST ?? "github.com"),
         )).toLowerCase();
         const locator = parseGitHubRepositorySelector(input.repository, fallbackHost);
         if (locator === null) return yield* failure("Repositories are named owner/name.");

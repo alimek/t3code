@@ -1,3 +1,4 @@
+import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import type { GitCommandError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -63,7 +64,7 @@ function readTemplateBlob(input: {
   readonly cwd: string;
   readonly executeGit: ExecuteGit;
   readonly entry: TemplateTreeEntry;
-}): Effect.Effect<Option.Option<string>, GitCommandError> {
+}): Effect.Effect<Option.Option<string>, GitCommandError | EnvironmentAuthorizationError> {
   return input
     .executeGit({
       operation: "PrTemplateDetection.readTemplateBlob",
@@ -97,7 +98,7 @@ function readTemplateDirectory(input: {
   readonly executeGit: ExecuteGit;
   readonly entries: ReadonlyArray<TemplateTreeEntry>;
   readonly directory: string;
-}): Effect.Effect<DirectoryTemplateResult, GitCommandError> {
+}): Effect.Effect<DirectoryTemplateResult, GitCommandError | EnvironmentAuthorizationError> {
   return Effect.gen(function* () {
     const prefix = `${input.directory}/`;
     const candidates = input.entries.filter((entry) => {

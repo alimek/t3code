@@ -1,3 +1,4 @@
+import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -64,7 +65,10 @@ const makeCaptureStore = Effect.fn("test.makeCaptureStore")(function* (
   );
 });
 
-type GitContractError = GitCommandError | PlatformError.PlatformError;
+type GitContractError =
+  | GitCommandError
+  | EnvironmentAuthorizationError
+  | PlatformError.PlatformError;
 
 runVcsDriverContractSuite<GitVcsDriver.GitVcsDriver, GitContractError>({
   name: "Git",

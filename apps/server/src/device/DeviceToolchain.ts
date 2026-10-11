@@ -141,13 +141,13 @@ const installTool = Effect.fn("DeviceToolchain.installTool")(function* (
       `${spec.name}@${spec.version}`,
     ];
     const result = yield* runner
-      .run({ command: "npm", args: installArgs, timeout: INSTALL_TIMEOUT })
+      .run<never>({ command: "npm", args: installArgs, timeout: INSTALL_TIMEOUT })
       .pipe(
         Effect.catchTags({
           ProcessSpawnError: (error) =>
             error.cause instanceof PlatformError.PlatformError &&
             error.cause.reason._tag === "NotFound"
-              ? runner.run({
+              ? runner.run<never>({
                   command: "pnpm",
                   args: ["--package=npm@11", "dlx", "npm", ...installArgs],
                   timeout: INSTALL_TIMEOUT,

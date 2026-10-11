@@ -326,6 +326,7 @@ layer("GitLabCli.layer", (it) => {
         });
       }).pipe(Effect.flip);
 
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       assert.equal(error.message.includes("Merge request 4888 was not found"), true);
       assert.strictEqual(error._tag, "GitLabMergeRequestNotFoundError");
       assert.strictEqual(error.command, "glab");
@@ -376,6 +377,7 @@ layer("GitLabCli.layer", (it) => {
       const error = yield* glab
         .execute({ cwd: "/repo", args: ["api", "projects"] })
         .pipe(Effect.flip);
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
       assert.strictEqual(error._tag, "GitLabCliRateLimitError");
       assert.strictEqual(error.cause, cause);

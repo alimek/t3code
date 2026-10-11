@@ -1,3 +1,5 @@
+import { recoverWorkspaceError } from "../auth/workspaceReadAccess.ts";
+import { type EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as NodeUtil from "node:util";
 import type {
   SourceControlProviderAuth,
@@ -44,16 +46,18 @@ export type SourceControlCliDiscoverySpec = SourceControlDiscoverySpecBase & {
 
 export type SourceControlApiDiscoverySpec = SourceControlDiscoverySpecBase & {
   readonly type: "api";
-  readonly probeAuth: Effect.Effect<SourceControlProviderAuth, never>;
+  readonly probeAuth: Effect.Effect<SourceControlProviderAuth, EnvironmentAuthorizationError>;
 };
 
 export type SourceControlManagedCliDiscoverySpec = SourceControlDiscoverySpecBase & {
   readonly type: "managed-cli";
-  readonly probe: (cwd: string) => Effect.Effect<SourceControlProviderDiscoveryItem>;
+  readonly probe: (
+    cwd: string,
+  ) => Effect.Effect<SourceControlProviderDiscoveryItem, EnvironmentAuthorizationError>;
   readonly refineUnknownRemote: (input: {
     readonly cwd: string;
     readonly context: SourceControlProvider.SourceControlProviderContext;
-  }) => Effect.Effect<SourceControlProviderInfo | null>;
+  }) => Effect.Effect<SourceControlProviderInfo | null, EnvironmentAuthorizationError>;
 };
 
 export type SourceControlProviderDiscoverySpec =
@@ -181,7 +185,7 @@ function probeCli(input: {
   readonly spec: SourceControlCliDiscoverySpec;
   readonly process: VcsProcess.VcsProcess["Service"];
   readonly cwd: string;
-}): Effect.Effect<DiscoveryProbeResult> {
+}): Effect.Effect<DiscoveryProbeResult, EnvironmentAuthorizationError> {
   return input.process
     .run({
       operation: "source-control.discovery.probe",
@@ -208,15 +212,17 @@ function probeCli(input: {
           }) satisfies DiscoveryProbeResult,
       ),
       Effect.catch((cause) =>
-        Effect.succeed({
-          kind: input.spec.kind,
-          label: input.spec.label,
-          executable: input.spec.executable,
-          status: "missing" as const,
-          version: Option.none<string>(),
-          installHint: input.spec.installHint,
-          detail: detailFromCause(cause),
-        } satisfies DiscoveryProbeResult),
+        cause._tag === "EnvironmentAuthorizationError"
+          ? Effect.fail(cause)
+          : Effect.succeed({
+              kind: input.spec.kind,
+              label: input.spec.label,
+              executable: input.spec.executable,
+              status: "missing" as const,
+              version: Option.none<string>(),
+              installHint: input.spec.installHint,
+              detail: detailFromCause(cause),
+            } satisfies DiscoveryProbeResult),
       ),
     );
 }
@@ -225,7 +231,7 @@ export function probeSourceControlProvider(input: {
   readonly spec: SourceControlProviderDiscoverySpec;
   readonly process: VcsProcess.VcsProcess["Service"];
   readonly cwd: string;
-}): Effect.Effect<SourceControlProviderDiscoveryItem> {
+}): Effect.Effect<SourceControlProviderDiscoveryItem, EnvironmentAuthorizationError> {
   if (input.spec.type === "managed-cli") return input.spec.probe(input.cwd);
   if (input.spec.type === "api") {
     return input.spec.probeAuth.pipe(
@@ -279,10 +285,12 @@ export function probeSourceControlProvider(input: {
               }) satisfies SourceControlProviderDiscoveryItem,
           ),
           Effect.catch((cause) =>
-            Effect.succeed({
-              ...item,
-              auth: unknownAuth(Option.getOrUndefined(detailFromCause(cause))),
-            } satisfies SourceControlProviderDiscoveryItem),
+            cause._tag === "EnvironmentAuthorizationError"
+              ? Effect.fail(cause)
+              : Effect.succeed({
+                  ...item,
+                  auth: unknownAuth(Option.getOrUndefined(detailFromCause(cause))),
+                } satisfies SourceControlProviderDiscoveryItem),
           ),
         );
     }),
@@ -295,7 +303,10 @@ export const refineUnknownRemoteProvider = Effect.fn("refineUnknownRemoteProvide
     readonly process: VcsProcess.VcsProcess["Service"];
     readonly cwd: string;
     readonly context: SourceControlProvider.SourceControlProviderContext | null;
-  }): Effect.fn.Return<SourceControlProvider.SourceControlProviderContext | null> {
+  }): Effect.fn.Return<
+    SourceControlProvider.SourceControlProviderContext | null,
+    EnvironmentAuthorizationError
+  > {
     if (input.context === null || input.context.provider.kind !== "unknown") {
       return input.context;
     }
@@ -325,7 +336,7 @@ export const refineUnknownRemoteProvider = Effect.fn("refineUnknownRemoteProvide
               auth,
             }),
           ),
-          Effect.orElseSucceed(() => null),
+          recoverWorkspaceError(() => null),
         );
     });
     const provider = providers.find((candidate) => candidate !== null);

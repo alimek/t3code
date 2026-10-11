@@ -249,7 +249,8 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           (error) =>
             new OrchestratorMcpFailure({
               code: "orchestration_error",
-              message: error.detail,
+              message:
+                error._tag === "EnvironmentAuthorizationError" ? error.message : error.detail,
             }),
         ),
       );

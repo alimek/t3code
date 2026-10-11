@@ -364,6 +364,7 @@ describe("AzureDevOpsCli.layer", () => {
 
       const az = yield* AzureDevOpsCli.AzureDevOpsCli;
       const error = yield* az.execute({ cwd: "/repo", args: ["repos", "list"] }).pipe(Effect.flip);
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
       assert.instanceOf(error, AzureDevOpsCli.AzureDevOpsCommandFailedError);
       assert.strictEqual(error.operation, "execute");
@@ -397,6 +398,7 @@ describe("AzureDevOpsCli.layer", () => {
 
       const az = yield* AzureDevOpsCli.AzureDevOpsCli;
       const error = yield* az.execute({ cwd, args: ["repos", "list"] }).pipe(Effect.flip);
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
       assert.instanceOf(error, AzureDevOpsCli.AzureDevOpsCommandFailedError);
       assert.strictEqual(error.cwd, cwd);
@@ -410,6 +412,7 @@ describe("AzureDevOpsCli.layer", () => {
 
       const az = yield* AzureDevOpsCli.AzureDevOpsCli;
       const error = yield* az.getPullRequest({ cwd: "/repo", reference: "42" }).pipe(Effect.flip);
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
       assert.instanceOf(error, AzureDevOpsCli.AzureDevOpsPullRequestDecodeError);
       assert.strictEqual(error.operation, "getPullRequest");
@@ -440,6 +443,7 @@ describe("AzureDevOpsCli.layer", () => {
 
       const az = yield* AzureDevOpsCli.AzureDevOpsCli;
       const error = yield* az.execute({ cwd: "/repo", args: ["repos", "list"] }).pipe(Effect.flip);
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
       assert.instanceOf(error, AzureDevOpsCli.AzureDevOpsCliRateLimitError);
       assert.strictEqual(error.cause, cause);

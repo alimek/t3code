@@ -1,6 +1,7 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import type {
+  EnvironmentAuthorizationError,
   ChangeRequest,
   ChangeRequestState,
   SourceControlProviderError,
@@ -19,7 +20,12 @@ export interface SourceControlLinkSubject {
 export type ResolveSourceControlLink = (input: {
   readonly cwd: string;
   readonly url: URL;
-}) => Effect.Effect<SourceControlLinkSubject, SourceControlProviderError> | undefined;
+}) =>
+  | Effect.Effect<
+      SourceControlLinkSubject,
+      SourceControlProviderError | EnvironmentAuthorizationError
+    >
+  | undefined;
 
 export interface SourceControlProviderContext {
   readonly provider: SourceControlProviderInfo;
@@ -105,12 +111,15 @@ export class SourceControlProvider extends Context.Service<
       readonly headSelector: string;
       readonly state: ChangeRequestState | "all";
       readonly limit?: number;
-    }) => Effect.Effect<ReadonlyArray<ChangeRequest>, SourceControlProviderError>;
+    }) => Effect.Effect<
+      ReadonlyArray<ChangeRequest>,
+      SourceControlProviderError | EnvironmentAuthorizationError
+    >;
     readonly getChangeRequest: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProviderContext;
       readonly reference: string;
-    }) => Effect.Effect<ChangeRequest, SourceControlProviderError>;
+    }) => Effect.Effect<ChangeRequest, SourceControlProviderError | EnvironmentAuthorizationError>;
     readonly createChangeRequest: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProviderContext;
@@ -120,26 +129,32 @@ export class SourceControlProvider extends Context.Service<
       readonly headSelector: string;
       readonly title: string;
       readonly bodyFile: string;
-    }) => Effect.Effect<void, SourceControlProviderError>;
+    }) => Effect.Effect<void, SourceControlProviderError | EnvironmentAuthorizationError>;
     readonly getRepositoryCloneUrls: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProviderContext;
       readonly repository: string;
-    }) => Effect.Effect<SourceControlRepositoryCloneUrls, SourceControlProviderError>;
+    }) => Effect.Effect<
+      SourceControlRepositoryCloneUrls,
+      SourceControlProviderError | EnvironmentAuthorizationError
+    >;
     readonly createRepository: (input: {
       readonly cwd: string;
       readonly repository: string;
       readonly visibility: SourceControlRepositoryVisibility;
-    }) => Effect.Effect<SourceControlRepositoryCloneUrls, SourceControlProviderError>;
+    }) => Effect.Effect<
+      SourceControlRepositoryCloneUrls,
+      SourceControlProviderError | EnvironmentAuthorizationError
+    >;
     readonly getDefaultBranch: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProviderContext;
-    }) => Effect.Effect<string | null, SourceControlProviderError>;
+    }) => Effect.Effect<string | null, SourceControlProviderError | EnvironmentAuthorizationError>;
     readonly checkoutChangeRequest: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProviderContext;
       readonly reference: string;
       readonly force?: boolean;
-    }) => Effect.Effect<void, SourceControlProviderError>;
+    }) => Effect.Effect<void, SourceControlProviderError | EnvironmentAuthorizationError>;
   }
 >()("t3/sourceControl/SourceControlProvider") {}

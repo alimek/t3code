@@ -1,7 +1,10 @@
+import { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import {
   authorizeCommandReceipt,
   trustedMutationAuthority,
   authorizeCommandAdmission,
+  isCheckedSourceControlLinkAuthority,
+  beforeSourceControlLinkEffect,
   receiptForMutationAuthority,
   type CommandAdmission,
   type ProjectAdmission,
@@ -43,6 +46,8 @@ import * as EventStore from "./EventStore.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+
+const isEnvironmentAuthorizationError = Schema.is(EnvironmentAuthorizationError);
 
 /**
  * ERRORS
@@ -99,7 +104,11 @@ export class EventSinkStreamError extends Schema.TaggedError<EventSinkStreamErro
   }
 }
 
-export const EventSinkV2Error = Schema.Union([EventSinkWriteError, EventSinkStreamError]);
+export const EventSinkV2Error = Schema.Union([
+  EventSinkWriteError,
+  EventSinkStreamError,
+  EnvironmentAuthorizationError,
+]);
 export type EventSinkV2Error = typeof EventSinkV2Error.Type;
 
 /**
@@ -599,6 +608,8 @@ const layerBase: Layer.Layer<
       admission: CommandAdmission,
       input: Parameters<EventSinkV2Shape["commitCommand"]>[1],
     ) {
+      if (admission !== trustedMutationAuthority)
+        yield* beforeSourceControlLinkEffect(admission.authority);
       const result = yield* commitThenPublish(
         Effect.gen(function* () {
           yield* authorizeCommandAdmission(sql, admission, input.commandId, input);
@@ -651,6 +662,11 @@ const layerBase: Layer.Layer<
                   threadId: input.threadId,
                   ...input.cancelUnsettledEffects,
                 });
+          if (
+            admission !== trustedMutationAuthority &&
+            isCheckedSourceControlLinkAuthority(admission.authority)
+          )
+            yield* authorizeCommandAdmission(sql, admission, input.commandId, input);
           return { receipt, storedEvents, committed: true as const, cancelledEffectIds };
         }),
         (result) =>
@@ -676,6 +692,8 @@ const layerBase: Layer.Layer<
       admission: CommandAdmission,
       input: Parameters<EventSinkV2Shape["commitRejectedCommand"]>[1],
     ) {
+      if (admission !== trustedMutationAuthority)
+        yield* beforeSourceControlLinkEffect(admission.authority);
       return yield* sql.withTransaction(
         Effect.gen(function* () {
           yield* authorizeCommandAdmission(sql, admission, input.commandId, input);
@@ -936,24 +954,30 @@ const layerBase: Layer.Layer<
         ),
       commitCommand: (admission, input) =>
         commitCommandEffect(admission, input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({
-                commandId: input.commandId,
-                eventCount: input.events.length,
-                cause,
-              }),
+          Effect.mapError((cause) =>
+            admission !== trustedMutationAuthority &&
+            isCheckedSourceControlLinkAuthority(admission.authority) &&
+            isEnvironmentAuthorizationError(cause)
+              ? cause
+              : new EventSinkWriteError({
+                  commandId: input.commandId,
+                  eventCount: input.events.length,
+                  cause,
+                }),
           ),
         ),
       commitRejectedCommand: (admission, input) =>
         commitRejectedCommandEffect(admission, input).pipe(
-          Effect.mapError(
-            (cause) =>
-              new EventSinkWriteError({
-                commandId: input.commandId,
-                eventCount: 0,
-                cause,
-              }),
+          Effect.mapError((cause) =>
+            admission !== trustedMutationAuthority &&
+            isCheckedSourceControlLinkAuthority(admission.authority) &&
+            isEnvironmentAuthorizationError(cause)
+              ? cause
+              : new EventSinkWriteError({
+                  commandId: input.commandId,
+                  eventCount: 0,
+                  cause,
+                }),
           ),
         ),
       commitProjectCommand: (admission, input) =>

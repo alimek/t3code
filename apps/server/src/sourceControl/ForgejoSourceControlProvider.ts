@@ -1,3 +1,5 @@
+import { recoverWorkspaceError } from "../auth/workspaceReadAccess.ts";
+import { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
@@ -13,6 +15,8 @@ import {
   type SourceControlManagedCliDiscoverySpec,
 } from "./SourceControlProviderDiscovery.ts";
 import { ForgejoPullRequestSchema, toForgejoChangeRequest } from "./forgejoPullRequests.ts";
+
+const isEnvironmentAuthorizationError = Schema.is(EnvironmentAuthorizationError);
 
 const isForgejoCliError = Schema.is(ForgejoCli.ForgejoCliError);
 
@@ -76,9 +80,14 @@ export const makeDiscovery = Effect.gen(function* () {
         })
         .pipe(
           Effect.map((result) => result.stdout.trim()),
-          Effect.orElseSucceed(() => ""),
+          recoverWorkspaceError(() => ""),
         );
       const credentials = yield* Effect.result(listLogins({ cwd, command: "fj", remoteUrl }));
+      if (
+        Result.isFailure(credentials) &&
+        credentials.failure._tag === "EnvironmentAuthorizationError"
+      )
+        return yield* credentials.failure;
       const logins = Result.isSuccess(credentials) ? credentials.success : [];
       const remote = ForgejoCli.parseForgejoRemote(remoteUrl);
       const login =
@@ -116,6 +125,8 @@ export const makeDiscovery = Effect.gen(function* () {
       if (fj.status === "available" && (login || Result.isFailure(credentials))) {
         if (login && fj.auth.status === "authenticated" && cli.getAccount) {
           const account = yield* cli.getAccount({ cwd, baseUrl: login.url }).pipe(Effect.result);
+          if (Result.isFailure(account) && account.failure._tag === "EnvironmentAuthorizationError")
+            return yield* account.failure;
           return {
             ...fj,
             auth: Result.isSuccess(account)
@@ -126,7 +137,10 @@ export const makeDiscovery = Effect.gen(function* () {
                 })
               : providerAuth({
                   status: "unknown",
-                  detail: account.failure.detail,
+                  detail:
+                    account.failure._tag === "EnvironmentAuthorizationError"
+                      ? account.failure.message
+                      : account.failure.detail,
                   host: ForgejoCli.parseForgejoRemote(login.url)?.host,
                 }),
           };
@@ -148,7 +162,7 @@ export const makeDiscovery = Effect.gen(function* () {
             cwd: input.cwd,
             command,
             remoteUrl: input.context.remoteUrl,
-          }).pipe(Effect.orElseSucceed(() => []));
+          }).pipe(recoverWorkspaceError(() => []));
           const login = ForgejoCli.matchForgejoLogin(logins, remote, input.context.requestedHost);
           if (login) return { kind: "forgejo" as const, name: discovery.label, baseUrl: login.url };
         }
@@ -197,16 +211,17 @@ export const make = Effect.gen(function* () {
       ),
     );
   const mapError = (operation: string, cwd: string) =>
-    Effect.mapError(
-      (cause: unknown) =>
-        new SourceControlProviderError({
-          provider: "forgejo",
-          operation,
-          cwd,
-          ...(isForgejoCliError(cause) ? { command: cause.command } : {}),
-          detail: isForgejoCliError(cause) ? cause.detail : "Forgejo operation failed.",
-          cause,
-        }),
+    Effect.mapError((cause: unknown) =>
+      isEnvironmentAuthorizationError(cause)
+        ? cause
+        : new SourceControlProviderError({
+            provider: "forgejo",
+            operation,
+            cwd,
+            ...(isForgejoCliError(cause) ? { command: cause.command } : {}),
+            detail: isForgejoCliError(cause) ? cause.detail : "Forgejo operation failed.",
+            cause,
+          }),
     );
   const getPull = Effect.fn("ForgejoSourceControlProvider.getPull")(function* (
     input: Parameters<

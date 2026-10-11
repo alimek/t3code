@@ -1,3 +1,4 @@
+import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -236,7 +237,7 @@ export const GitLabCliError = Schema.Union([
   GitLabRepositoryDecodeError,
   GitLabNamespaceDecodeError,
 ]);
-export type GitLabCliError = typeof GitLabCliError.Type;
+export type GitLabCliError = typeof GitLabCliError.Type | EnvironmentAuthorizationError;
 
 export interface GitLabMergeRequestSummary {
   readonly number: number;
@@ -426,7 +427,11 @@ export const make = Effect.gen(function* () {
         ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
         ...(input.maxOutputBytes === undefined ? {} : { maxOutputBytes: input.maxOutputBytes }),
       })
-      .pipe(Effect.mapError(mapError));
+      .pipe(
+        Effect.mapError((error) =>
+          error._tag === "EnvironmentAuthorizationError" ? error : mapError(error),
+        ),
+      );
 
   const execute: GitLabCli["Service"]["execute"] = (input) =>
     run(input, (error) =>

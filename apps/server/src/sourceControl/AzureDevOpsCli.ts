@@ -1,3 +1,4 @@
+import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -201,7 +202,7 @@ export const AzureDevOpsCliError = Schema.Union([
   AzureDevOpsPullRequestDecodeError,
   AzureDevOpsRepositoryDecodeError,
 ]);
-export type AzureDevOpsCliError = typeof AzureDevOpsCliError.Type;
+export type AzureDevOpsCliError = typeof AzureDevOpsCliError.Type | EnvironmentAuthorizationError;
 
 export interface AzureDevOpsRepositoryCloneUrls {
   readonly nameWithOwner: string;
@@ -366,15 +367,17 @@ export const make = Effect.gen(function* () {
       })
       .pipe(
         Effect.mapError((error) =>
-          AzureDevOpsCommandFailedError.fromVcsError(
-            {
-              operation: "execute",
-              command: "az",
-              cwd: input.cwd,
-              argumentCount: input.args.length,
-            },
-            error,
-          ),
+          error._tag === "EnvironmentAuthorizationError"
+            ? error
+            : AzureDevOpsCommandFailedError.fromVcsError(
+                {
+                  operation: "execute",
+                  command: "az",
+                  cwd: input.cwd,
+                  argumentCount: input.args.length,
+                },
+                error,
+              ),
         ),
       );
 

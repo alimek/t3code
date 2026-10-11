@@ -1,3 +1,4 @@
+import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 // @effect-diagnostics nodeBuiltinImport:off - realpathSync.native resolves Windows 8.3 short names, which the Effect realPath does not.
 import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -118,7 +119,11 @@ const git = (
   cwd: string,
   args: ReadonlyArray<string>,
   env?: NodeJS.ProcessEnv,
-): Effect.Effect<string, GitCommandError, GitVcsDriver.GitVcsDriver> =>
+): Effect.Effect<
+  string,
+  GitCommandError | EnvironmentAuthorizationError,
+  GitVcsDriver.GitVcsDriver
+> =>
   Effect.gen(function* () {
     const driver = yield* GitVcsDriver.GitVcsDriver;
     const result = yield* driver.execute({
@@ -135,7 +140,7 @@ const initRepoWithCommit = (
   cwd: string,
 ): Effect.Effect<
   { readonly initialBranch: string },
-  GitCommandError | PlatformError.PlatformError,
+  GitCommandError | EnvironmentAuthorizationError | PlatformError.PlatformError,
   GitVcsDriver.GitVcsDriver | FileSystem.FileSystem | Path.Path
 > =>
   Effect.gen(function* () {
@@ -287,7 +292,10 @@ it.effect.each(["root", "nested", "worktree"] as const)(
       for (let poll = 0; poll < 3; poll++) {
         const result = yield* driver.statusDetailsLocal(statusCwd).pipe(Effect.result);
         assert.isTrue(Result.isFailure(result));
-        if (Result.isFailure(result)) assert.include(result.failure.detail, "index is locked");
+        if (Result.isFailure(result)) {
+          if (result.failure._tag === "EnvironmentAuthorizationError") throw result.failure;
+          assert.include(result.failure.detail, "index is locked");
+        }
       }
       assert.isFalse(yield* fs.exists(runsPath));
       assert.isTrue(yield* fs.exists(lockPath));
@@ -611,6 +619,7 @@ it.effect("fails a ref snapshot when for-each-ref exits unsuccessfully", () =>
       yield* initRepoWithCommit(cwd).pipe(Effect.provideService(GitVcsDriver.GitVcsDriver, driver));
 
       const error = yield* driver.listRefs({ cwd, refresh: true }).pipe(Effect.flip);
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
       assert.deepInclude(error, {
         _tag: "GitCommandError",
@@ -919,6 +928,7 @@ it.effect.each([
     );
     const cwd = yield* makeTmpDir();
     const error = yield* driver.fetchRemote({ cwd, remoteName: "origin" }).pipe(Effect.flip);
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
     assert.include(error.detail, scenario.expected);
     assert.equal(error.exitCode, 128);
     assert.equal(error.stderrLength, stderr.length);
@@ -963,6 +973,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             args: ["status", "--short"],
           })
           .pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
 
         assert.deepInclude(error, {
           _tag: "GitCommandError",
@@ -994,6 +1005,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             args: ["status", `--unknown-option=${secret}`],
           })
           .pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
 
         assert.deepInclude(error, {
           _tag: "GitCommandError",
@@ -1032,6 +1044,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             env: { LC_ALL: "C" },
           })
           .pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
 
         assert.deepInclude(error, {
           _tag: "GitCommandError",
@@ -1056,6 +1069,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             env: { LC_ALL: "C" },
           })
           .pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
 
         assert.deepInclude(error, {
           _tag: "GitCommandError",
@@ -1090,6 +1104,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             path: pathService.join(parent, "second"),
           })
           .pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
 
         assert.equal(error.detail, "git worktree add failed");
         assert.include(error.message, "git worktree add failed (branch_checked_out_in_worktree)");
@@ -1157,6 +1172,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
               env: { LC_ALL: "C", GIT_SSH_COMMAND: fakeSsh },
             })
             .pipe(Effect.flip);
+          if (error._tag === "EnvironmentAuthorizationError") throw error;
 
           assert.deepInclude(error, { reason: expectedReason });
           assert.include(error.message, expectedText);
@@ -1189,6 +1205,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             env: { LC_ALL: "C", GIT_SSH_COMMAND: fakeSsh },
           })
           .pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
 
         assert.notInclude(error.message, "(authentication_failed)");
       }),
@@ -1224,6 +1241,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             env: { LC_ALL: "C" },
           })
           .pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
 
         assert.notProperty(error, "reason");
         assert.notInclude(error.message, "(authentication_failed)");
@@ -1257,6 +1275,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             env: { LC_ALL: "C" },
           })
           .pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
 
         assert.notProperty(error, "reason");
         assert.notInclude(error.message, "(authentication_failed)");
@@ -1278,6 +1297,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             env: { LC_ALL: "C" },
           })
           .pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
 
         assert.notProperty(error, "reason");
         assert.notInclude(error.message, "(path_already_exists)");
@@ -1347,6 +1367,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         yield* driver.initRepo({ cwd });
 
         const error = yield* driver.removeWorktree({ cwd, path: notAWorktree }).pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
 
         assert.deepInclude(error, {
           _tag: "GitCommandError",
@@ -1469,6 +1490,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const result = yield* driver.getReviewDiffPreview({ cwd }).pipe(Effect.result);
         assert.isTrue(Result.isFailure(result));
         if (Result.isFailure(result)) {
+          if (result.failure._tag !== "GitCommandError") throw result.failure;
           assert.equal(result.failure.operation, "GitVcsDriver.getReviewDiffPreview.patch");
         }
       }),
@@ -1969,6 +1991,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             }),
           )
           .pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
 
         assert.deepInclude(error, {
           _tag: "GitCommandError",
@@ -2128,6 +2151,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const error = yield* driver
           .getReviewDiffPreview({ cwd, baseRef: "missing-base" })
           .pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
         assert.strictEqual(error.operation, "GitVcsDriver.resolveReviewMergeBase");
       }),
     );
@@ -3031,6 +3055,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             { worktreesDirectory: "relative/worktrees" },
           )
           .pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
         assert.match(error.detail, /must be an absolute folder on this machine/);
 
         const rootError = yield* driver
@@ -3039,6 +3064,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             { worktreesDirectory: "/" },
           )
           .pipe(Effect.flip);
+        if (rootError._tag === "EnvironmentAuthorizationError") throw rootError;
         assert.match(rootError.detail, /not a drive root/);
       }),
     );
@@ -3351,6 +3377,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const missingRemote = `${cwd}/private-missing-remote`;
         yield* git(cwd, ["remote", "add", "origin", missingRemote]);
         const error = yield* driver.fetchRemote({ cwd, remoteName: "origin" }).pipe(Effect.flip);
+        if (error._tag === "EnvironmentAuthorizationError") throw error;
         assert.include(error.detail, "could not access the remote repository");
         assert.equal(error.exitCode, 128);
         assert.isAbove(error.stderrLength ?? 0, 0);
@@ -3587,6 +3614,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           assert.isTrue(Result.isFailure(result));
           assert.equal(attempts.length, 1);
           if (Result.isFailure(result)) {
+            if (result.failure._tag !== "GitCommandError") throw result.failure;
             assert.equal(
               result.failure.detail,
               failure === "timeout"

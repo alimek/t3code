@@ -235,7 +235,7 @@ const make = Effect.gen(function* () {
     let worktreeBaseRef = baseRef;
     if (startFromOrigin) {
       yield* gitWorkflow
-        .fetchRemote({ cwd: projectCwd, remoteName: "origin" })
+        .fetchRemote(trustedReadAuthority, { cwd: projectCwd, remoteName: "origin" })
         .pipe(asOperationFailed("Unable to fetch origin"));
       const resolvedRemoteBase = yield* gitWorkflow
         .resolveRemoteTrackingCommit(trustedReadAuthority, {
@@ -291,7 +291,7 @@ const make = Effect.gen(function* () {
           gitWorkflow.removeWorktree({ cwd: projectCwd, path: worktreePath, force: true }).pipe(
             Effect.andThen(
               Effect.suspend(() =>
-                gitWorkflow.deleteLocalBranch({
+                gitWorkflow.deleteLocalBranch(trustedReadAuthority, {
                   cwd: projectCwd,
                   refName: worktree.worktree.refName,
                   force: true,

@@ -1,3 +1,5 @@
+import { beforeCurrentWorkspaceEffect } from "../auth/workspaceReadAccess.ts";
+import { type EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -104,6 +106,7 @@ export class GitHubApiResponseError extends Schema.TaggedError<GitHubApiResponse
 }
 
 export type GitHubApiError =
+  | EnvironmentAuthorizationError
   | GitHubCredentials.GitHubCredentialUnavailableError
   | GitHubApiRequestError
   | GitHubApiAuthenticationError
@@ -415,6 +418,7 @@ export const make = Effect.gen(function* () {
       // One deadline covers the headers and the body: a host that answers headers and then stalls
       // must not hold a slot of the shared gate for undici's own five-minute body timeout.
       const { response, collected } = yield* Effect.gen(function* () {
+        yield* beforeCurrentWorkspaceEffect;
         const response: HttpClientResponse.HttpClientResponse = yield* httpClient
           .execute(
             input.request.pipe(
@@ -443,8 +447,10 @@ export const make = Effect.gen(function* () {
         return { response, collected };
       }).pipe(
         Effect.timeout(input.timeout ?? DEFAULT_TIMEOUT),
-        Effect.mapError(
-          (cause) => new GitHubApiRequestError({ host, operation: input.operation, cause }),
+        Effect.mapError((cause) =>
+          cause._tag === "EnvironmentAuthorizationError"
+            ? cause
+            : new GitHubApiRequestError({ host, operation: input.operation, cause }),
         ),
       );
       const headers = response.headers;

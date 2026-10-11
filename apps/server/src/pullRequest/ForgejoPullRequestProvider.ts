@@ -80,18 +80,20 @@ export const make = Effect.gen(function* () {
           new PullRequestProviderError({
             provider: "forgejo",
             operation: input.path,
-            detail: error.detail,
+            detail: error._tag === "EnvironmentAuthorizationError" ? error.message : error.detail,
             cause: error,
             reason:
-              error.reason === "missing-cli"
-                ? "missing-tool"
-                : error.reason === "authentication"
-                  ? "unauthenticated"
-                  : error.reason === "rate-limit"
-                    ? "rate-limited"
-                    : error.reason === "not-found"
-                      ? "not-found"
-                      : "failed",
+              error._tag === "EnvironmentAuthorizationError"
+                ? "failed"
+                : error.reason === "missing-cli"
+                  ? "missing-tool"
+                  : error.reason === "authentication"
+                    ? "unauthenticated"
+                    : error.reason === "rate-limit"
+                      ? "rate-limited"
+                      : error.reason === "not-found"
+                        ? "not-found"
+                        : "failed",
           }),
       ),
     );

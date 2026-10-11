@@ -80,7 +80,9 @@ export class ProjectCloneTracker extends Context.Service<
     /** Interrupts a running clone and deletes the partial checkout. */
     readonly cancel: (projectId: ProjectId) => Effect.Effect<boolean>;
     /** Restarts a failed or cancelled clone into the same destination. */
-    readonly retry: (projectId: ProjectId) => Effect.Effect<boolean, SourceControlRepositoryError>;
+    readonly retry: (
+      projectId: ProjectId,
+    ) => Effect.Effect<boolean, SourceControlRepositoryError | EnvironmentAuthorizationError>;
     /**
      * Stops tracking a project's clone, interrupting it if it still runs and
      * removing an unfinished checkout. Called when the project is deleted.

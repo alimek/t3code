@@ -144,7 +144,7 @@ function makeHarness(options: HarnessOptions = {}) {
         } as never)),
   );
   const renameBranch = vi.fn(
-    options.renameBranch ?? ((input) => Effect.succeed({ branch: input.newBranch })),
+    options.renameBranch ?? ((_authority, input) => Effect.succeed({ branch: input.newBranch })),
   );
   const removeWorktree = vi.fn(
     (_input: Parameters<GitWorkflow.GitWorkflowService["Service"]["removeWorktree"]>[0]) =>
@@ -1225,7 +1225,7 @@ it.effect("renames a temporary t3/<hash> branch off the provisioning critical pa
           .getThreadProjection(trustedReadAuthority, launched.threadId)
           .pipe(Effect.map((projection) => projection.thread.branch === "generated-branch")),
       );
-      assert.deepEqual(harness.renameBranch.mock.calls[0]?.[0], {
+      assert.deepEqual(harness.renameBranch.mock.calls[0]?.[1], {
         cwd: "/repo-worktrees/temp",
         oldBranch: "t3/abcd1234",
         newBranch: "generated-branch",
@@ -1261,7 +1261,7 @@ it.effect("provisions under t3-<hash> when a plain t3 branch blocks t3/*", () =>
           .pipe(Effect.map((projection) => projection.thread.branch === "generated-branch")),
       );
       assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "t3-abcd1234");
-      assert.equal(harness.renameBranch.mock.calls[0]?.[0]?.oldBranch, "t3-abcd1234");
+      assert.equal(harness.renameBranch.mock.calls[0]?.[1]?.oldBranch, "t3-abcd1234");
     }).pipe(Effect.provide(harness.layer));
   }),
 );
@@ -1348,7 +1348,7 @@ it.effect("renames a temporary branch on an existing worktree to a generated nam
           .getThreadProjection(trustedReadAuthority, launched.threadId)
           .pipe(Effect.map((projection) => projection.thread.branch === "generated-branch")),
       );
-      assert.deepEqual(harness.renameBranch.mock.calls[0]?.[0], {
+      assert.deepEqual(harness.renameBranch.mock.calls[0]?.[1], {
         cwd: "/repo-worktrees/t3-abcd1234",
         oldBranch: "t3/abcd1234",
         newBranch: "generated-branch",

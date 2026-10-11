@@ -1,3 +1,8 @@
+import {
+  beforeCurrentWorkspaceEffect,
+  recoverWorkspaceError,
+} from "../auth/workspaceReadAccess.ts";
+import { type EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
@@ -267,7 +272,7 @@ export const BitbucketApiError = Schema.Union([
   BitbucketPullRequestBodyReadError,
   BitbucketCheckoutError,
 ]);
-export type BitbucketApiError = typeof BitbucketApiError.Type;
+export type BitbucketApiError = typeof BitbucketApiError.Type | EnvironmentAuthorizationError;
 const isBitbucketApiError = Schema.is(BitbucketApiError);
 
 const RawBitbucketRepositorySchema = Schema.Struct({
@@ -327,7 +332,7 @@ export interface BitbucketRepositoryLocator {
 export class BitbucketApi extends Context.Service<
   BitbucketApi,
   {
-    readonly probeAuth: Effect.Effect<SourceControlProviderAuth, never>;
+    readonly probeAuth: Effect.Effect<SourceControlProviderAuth, EnvironmentAuthorizationError>;
 
     /**
      * One authenticated request, returning the body verbatim. Bitbucket answers most endpoints
@@ -713,13 +718,16 @@ export const make = Effect.gen(function* () {
     schema: S,
   ): Effect.Effect<S["Type"], BitbucketApiError, S["DecodingServices"]> =>
     withAuth(request.pipe(HttpClientRequest.acceptJson)).pipe(
-      Effect.flatMap(httpClient.execute),
-      Effect.mapError(
-        (cause) =>
-          new BitbucketRequestError({
-            operation,
-            cause,
-          }),
+      Effect.flatMap((request) =>
+        beforeCurrentWorkspaceEffect.pipe(Effect.andThen(httpClient.execute(request))),
+      ),
+      Effect.mapError((cause) =>
+        cause._tag === "EnvironmentAuthorizationError"
+          ? cause
+          : new BitbucketRequestError({
+              operation,
+              cause,
+            }),
       ),
       Effect.flatMap((response) => decodeResponse(operation, schema, response)),
     );
@@ -740,21 +748,23 @@ export const make = Effect.gen(function* () {
     if (fromContext) return fromContext;
 
     const handle = yield* vcsRegistry.resolve({ cwd: input.cwd }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new BitbucketRepositoryVcsResolveError({
-            cwd: input.cwd,
-            cause,
-          }),
+      Effect.mapError((cause) =>
+        cause._tag === "EnvironmentAuthorizationError"
+          ? cause
+          : new BitbucketRepositoryVcsResolveError({
+              cwd: input.cwd,
+              cause,
+            }),
       ),
     );
     const remotes = yield* handle.driver.listRemotes(input.cwd).pipe(
-      Effect.mapError(
-        (cause) =>
-          new BitbucketRepositoryRemotesListError({
-            cwd: input.cwd,
-            cause,
-          }),
+      Effect.mapError((cause) =>
+        cause._tag === "EnvironmentAuthorizationError"
+          ? cause
+          : new BitbucketRepositoryRemotesListError({
+              cwd: input.cwd,
+              cause,
+            }),
       ),
     );
 
@@ -821,7 +831,7 @@ export const make = Effect.gen(function* () {
     );
 
   const readConfigValueNullable = (cwd: string, key: string) =>
-    git.readConfigValue(cwd, key).pipe(Effect.orElseSucceed(() => null));
+    git.readConfigValue(cwd, key).pipe(recoverWorkspaceError(() => null));
 
   const resolveCheckoutRemote = Effect.fn("BitbucketApi.resolveCheckoutRemote")(function* (input: {
     readonly cwd: string;
@@ -841,7 +851,7 @@ export const make = Effect.gen(function* () {
     if (!input.isCrossRepository) {
       const remoteName = yield* git
         .resolvePrimaryRemoteName(input.cwd)
-        .pipe(Effect.orElseSucceed(() => null));
+        .pipe(recoverWorkspaceError(() => null));
       if (remoteName) return remoteName;
     }
 
@@ -907,7 +917,9 @@ export const make = Effect.gen(function* () {
         ? base
         : base.pipe(HttpClientRequest.bodyText(input.body, "application/json"));
     return withAuth(withBody).pipe(
-      Effect.flatMap(httpClient.execute),
+      Effect.flatMap((request) =>
+        beforeCurrentWorkspaceEffect.pipe(Effect.andThen(httpClient.execute(request))),
+      ),
       Effect.mapError(
         (cause): BitbucketApiError => new BitbucketRequestError({ operation: "request", cause }),
       ),
@@ -973,7 +985,11 @@ export const make = Effect.gen(function* () {
         host: Option.some("bitbucket.org"),
         detail: Option.none<string>(),
       })),
-      Effect.catch(() => currentCredential.pipe(Effect.map(authFromCredential))),
+      Effect.catchIf(
+        (error): error is Exclude<typeof error, EnvironmentAuthorizationError> =>
+          error._tag !== "EnvironmentAuthorizationError",
+        () => currentCredential.pipe(Effect.map(authFromCredential)),
+      ),
     ),
     listPullRequests: (input) =>
       resolveRepository(input).pipe(
@@ -1079,7 +1095,7 @@ export const make = Effect.gen(function* () {
             {
               repository: getRepositoryFromLocator(locator),
               branchingModel: getBranchingModelFromLocator(locator).pipe(
-                Effect.orElseSucceed(
+                recoverWorkspaceError(
                   (): typeof RawBitbucketBranchingModelSchema.Type | null => null,
                 ),
               ),

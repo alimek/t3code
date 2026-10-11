@@ -401,7 +401,7 @@ export const make = Effect.gen(function* () {
       // the merged pull request settle from the event itself below and need no
       // lookup, so they are absent from this map by construction.
       const cwds = [...new Set(lookupCwdByThreadId.values())];
-      yield* Effect.forEach(cwds, (cwd) => git.invalidateStatus(cwd), {
+      yield* Effect.forEach(cwds, (cwd) => git.invalidateStatus(trustedReadAuthority, cwd), {
         concurrency: 8,
         discard: true,
       });

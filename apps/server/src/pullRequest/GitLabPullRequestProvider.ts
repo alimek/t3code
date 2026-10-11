@@ -114,7 +114,7 @@ export const make = Effect.gen(function* () {
       provider: "gitlab",
       operation,
       ...gitLabProviderFailure(error),
-      detail: error.detail,
+      detail: error._tag === "EnvironmentAuthorizationError" ? error.message : error.detail,
       cause: error,
     });
 
