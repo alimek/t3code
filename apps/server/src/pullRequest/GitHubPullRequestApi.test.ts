@@ -20,7 +20,7 @@ import * as GitHubQuota from "../sourceControl/githubQuota.ts";
 import * as SourceControlRateLimit from "../sourceControl/SourceControlRateLimit.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubPullRequestApi from "./GitHubPullRequestApi.ts";
-import { make as makeGitHubProvider } from "./GitHubPullRequestProvider.ts";
+import * as GitHubPullRequestProvider from "./GitHubPullRequestProvider.ts";
 import { KnownWorkflowRuns } from "./gitHubConditionalChecks.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -4651,7 +4651,7 @@ layer("workflow REST recoveries", (it) => {
     ({ read, failure }) =>
       Effect.gen(function* () {
         routeFailure(failure === "denial" ? denial : ordinaryFailure);
-        const provider = yield* makeGitHubProvider;
+        const provider = yield* GitHubPullRequestProvider.make;
         const operation =
           read === "detail" ? provider.getChangeRequest : provider.getChangeRequestChecks;
         if (operation === undefined) return yield* Effect.die("checks read missing");
