@@ -27,9 +27,11 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
-import { HttpServerResponse, HttpClient } from "effect/http";
+import * as Redacted from "effect/Redacted";
+import { HttpServerResponse, HttpClient, HttpClientResponse } from "effect/http";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as Config from "../config.ts";
 import * as Sessions from "../auth/SessionStore.ts";
@@ -62,6 +64,7 @@ import {
 } from "./AttachmentUpload.ts";
 import * as AttachmentUpload from "./AttachmentUpload.ts";
 import * as AssetAccess from "./AssetAccess.ts";
+import { githubMediaResponse } from "./GitHubMediaFetch.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
@@ -677,4 +680,300 @@ it.effect("asset service preserves owner absolute media and filesystem-only draf
       ),
     ),
   ),
+);
+
+it.effect("GitHub credential await rechecks bound authority before HTTP", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const issued = yield* issueAssetUrl({
+      resource: {
+        _tag: "github-media",
+        cwd: f.a,
+        url: "https://raw.githubusercontent.com/owner/repo/main/shot.png",
+      },
+      authority: f.owner,
+    });
+    const asset = yield* f.resolve(issued.relativeUrl);
+    if (asset?.kind !== "github-media") return yield* Effect.die("not media");
+    const reached = yield* Deferred.make<void>(),
+      resume = yield* Deferred.make<void>();
+    let calls = 0;
+    const job = yield* requests.pipe(
+      Effect.flatMap((request) => request(issued.relativeUrl)),
+      Effect.provide(
+        Layer.mock(GitHubCredentials.GitHubCredentials)({
+          get: (host) =>
+            Deferred.succeed(reached, undefined).pipe(
+              Effect.andThen(Deferred.await(resume)),
+              Effect.as({
+                host,
+                token: Redacted.make("token"),
+                source: "gh" as const,
+                fingerprint: "mock",
+              }),
+            ),
+        }),
+      ),
+      Effect.provideService(
+        HttpClient.HttpClient,
+        HttpClient.make((request) => {
+          calls++;
+          return Effect.succeed(
+            HttpClientResponse.fromWeb(
+              request,
+              new Response("picture", { status: 200, headers: { "content-type": "image/png" } }),
+            ),
+          );
+        }),
+      ),
+      Effect.result,
+      Effect.forkChild,
+    );
+    yield* Deferred.await(reached);
+    yield* f.sql`UPDATE auth_sessions SET resource_grant = ${encodeGrant(grantA)}, authority_revision = authority_revision + 1 WHERE session_id = 'owner'`;
+    yield* Deferred.succeed(resume, undefined);
+    const result = yield* Fiber.join(job);
+    expect(calls).toBe(0);
+    expect(Result.isSuccess(result)).toBe(true);
+    if (Result.isSuccess(result)) expect(result.success.status).toBe(404);
+    yield* denied(githubMediaResponse(asset, {}));
+  }).pipe(Effect.provide(layer)),
+);
+it.effect.each([
+  "media-file",
+  "workspace-file",
+  "draft-relative",
+  "draft-absolute",
+  "media-header",
+  "publication",
+] as const)("image issuance %s await rechecks actual hidden owner", (variant) =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const child = `${f.a}/child`;
+    yield* f.fs.makeDirectory(child);
+    const png = new Uint8Array(24);
+    png.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+    new DataView(png.buffer).setUint32(16, 390);
+    new DataView(png.buffer).setUint32(20, 844);
+    const targetPath = `${child}/image.png`;
+    yield* f.fs.writeFile(targetPath, png);
+    const resource =
+      variant === "workspace-file"
+        ? { _tag: "workspace-file" as const, threadId: activeA, path: "child/image.png" }
+        : variant.startsWith("draft")
+          ? {
+              _tag: "draft-workspace-file" as const,
+              cwd: f.a,
+              path: variant === "draft-relative" ? "child/image.png" : targetPath,
+            }
+          : { _tag: "media-file" as const, threadId: activeA, path: targetPath };
+    yield* f.sql`UPDATE auth_sessions SET scopes = ${JSON.stringify([AuthFilesystemReadScope])} WHERE session_id = 'friend'`;
+    const input = { resource, workspaceRoot: f.a, authority: f.friend };
+    expect((yield* issueAssetUrl(input)).imageDimensions).toEqual({ width: 390, height: 844 });
+    const canonical = yield* f.fs.realPath(targetPath);
+    const secretStore = yield* SecretStore.ServerSecretStore;
+    const reached = yield* Deferred.make<void>(),
+      resume = yield* Deferred.make<void>();
+    let resolutions = 0;
+    const gated = FileSystem.FileSystem.of({
+      ...f.fs,
+      realPath: (target) =>
+        f.fs
+          .realPath(target)
+          .pipe(
+            Effect.tap(() =>
+              target === targetPath || target === canonical
+                ? ++resolutions === (variant === "media-header" ? 6 : 3) &&
+                  variant !== "publication"
+                  ? Deferred.succeed(reached, undefined).pipe(
+                      Effect.andThen(Deferred.await(resume)),
+                    )
+                  : Effect.void
+                : Effect.void,
+            ),
+          ),
+    });
+    const job = yield* issueAssetUrl(input).pipe(
+      Effect.provideService(FileSystem.FileSystem, gated),
+      Effect.provideService(SecretStore.ServerSecretStore, {
+        ...secretStore,
+        getOrCreateRandom: (name, bytes) =>
+          secretStore
+            .getOrCreateRandom(name, bytes)
+            .pipe(
+              Effect.tap(() =>
+                variant === "publication"
+                  ? Deferred.succeed(reached, undefined).pipe(
+                      Effect.andThen(Deferred.await(resume)),
+                    )
+                  : Effect.void,
+              ),
+            ),
+      }),
+      Effect.result,
+      Effect.forkChild,
+    );
+    yield* Deferred.await(reached);
+    yield* f.sql`UPDATE projection_projects SET workspace_root = ${child} WHERE project_id = ${projectB}`;
+    yield* Deferred.succeed(resume, undefined);
+    const result = yield* Fiber.join(job);
+    expect(Result.isFailure(result)).toBe(true);
+    if (Result.isFailure(result)) expect(isDenied(result.failure)).toBe(true);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(["redirect", "response", "clock", "body"] as const)(
+  "GitHub media rechecks current SQL authority after %s wait",
+  (wait) =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const issued = yield* issueAssetUrl({
+        resource: {
+          _tag: "github-media",
+          cwd: f.a,
+          url: "https://raw.githubusercontent.com/o/r/main/shot.png",
+        },
+        authority: f.owner,
+      });
+      const asset = yield* f.resolve(issued.relativeUrl);
+      if (asset?.kind !== "github-media") return yield* Effect.die("Expected GitHub media");
+      const reached = yield* Deferred.make<void>(),
+        resume = yield* Deferred.make<void>();
+      const pause = Deferred.succeed(reached, undefined).pipe(
+        Effect.andThen(Deferred.await(resume)),
+      );
+      const clock = yield* Clock.Clock;
+      let calls = 0;
+      const pending = yield* githubMediaResponse(asset, { range: "bytes=2-4" }).pipe(
+        Effect.provide(
+          Layer.mock(GitHubCredentials.GitHubCredentials)({
+            get: (host) =>
+              Effect.succeed({
+                host,
+                token: Redacted.make("token"),
+                source: "gh" as const,
+                fingerprint: "mock",
+              }),
+          }),
+        ),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make((request) => {
+            calls++;
+            const response = HttpClientResponse.fromWeb(
+              request,
+              new Response("234", {
+                status: wait === "redirect" ? 302 : 206,
+                headers: {
+                  "content-type": "image/png",
+                  location: "https://objects.example.test/shot.png",
+                  "content-range": "bytes 2-4/10",
+                },
+              }),
+            );
+            return wait === "redirect" || wait === "response"
+              ? pause.pipe(Effect.as(response))
+              : Effect.succeed(response);
+          }),
+        ),
+        Effect.provideService(Clock.Clock, {
+          ...clock,
+          currentTimeMillis:
+            wait === "clock"
+              ? pause.pipe(Effect.andThen(clock.currentTimeMillis))
+              : clock.currentTimeMillis,
+        }),
+        Effect.flatMap((response) => {
+          if (wait !== "body") return Effect.void;
+          expect(response.status).toBe(206);
+          expect(response.headers["cache-control"]).toBe("private, no-store");
+          if (response.body._tag !== "Stream") return Effect.die("Expected media stream");
+          return pause.pipe(
+            Effect.andThen(
+              Stream.runDrain(
+                response.body.stream.pipe(
+                  Stream.mapError((error) => {
+                    if (!isDenied(error))
+                      throw new Error("Unexpected media stream error", { cause: error });
+                    return error;
+                  }),
+                ),
+              ),
+            ),
+          );
+        }),
+        Effect.result,
+        Effect.forkChild,
+      );
+      yield* Deferred.await(reached);
+      yield* f.sql`UPDATE auth_sessions SET resource_grant = ${encodeGrant(grantA)}, authority_revision = authority_revision + 1 WHERE session_id = 'owner'`;
+      yield* Deferred.succeed(resume, undefined);
+      const result = yield* Fiber.join(pending);
+      expect(calls).toBe(1);
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result)) expect(isDenied(result.failure)).toBe(true);
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect("bound and legacy GitHub media preserve range, redirect credentials and body", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    for (const authority of [f.owner, undefined]) {
+      const issued = yield* issueAssetUrl({
+        resource: {
+          _tag: "github-media",
+          cwd: f.a,
+          url: "https://raw.githubusercontent.com/o/r/main/shot.png",
+        },
+        ...(authority === undefined ? {} : { authority }),
+      });
+      const asset = yield* f.resolve(issued.relativeUrl);
+      if (asset?.kind !== "github-media") return yield* Effect.die("Expected GitHub media");
+      const authHeaders: Array<string | undefined> = [];
+      const response = yield* githubMediaResponse(asset, {
+        range: "bytes=2-4",
+        "if-range": '"etag"',
+      }).pipe(
+        Effect.provide(
+          Layer.mock(GitHubCredentials.GitHubCredentials)({
+            get: (host) =>
+              Effect.succeed({
+                host,
+                token: Redacted.make("token"),
+                source: "gh" as const,
+                fingerprint: "mock",
+              }),
+          }),
+        ),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make((request) => {
+            authHeaders.push(request.headers.authorization);
+            expect(request.headers.range).toBe("bytes=2-4");
+            expect(request.headers["if-range"]).toBe('"etag"');
+            return Effect.succeed(
+              HttpClientResponse.fromWeb(
+                request,
+                new Response(authHeaders.length === 1 ? null : "234", {
+                  status: authHeaders.length === 1 ? 302 : 206,
+                  headers: {
+                    "content-type": "image/png",
+                    location: "https://objects.example.test/shot.png",
+                    "content-range": "bytes 2-4/10",
+                  },
+                }),
+              ),
+            );
+          }),
+        ),
+      );
+      expect(response.status).toBe(206);
+      expect(authHeaders).toEqual(["Bearer token", undefined]);
+      expect(response.headers["cache-control"]).toBe(
+        authority === undefined ? "private, max-age=3600" : "private, no-store",
+      );
+      const web = HttpServerResponse.toWeb(response);
+      expect(yield* Effect.promise(() => web.text())).toBe("234");
+    }
+  }).pipe(Effect.provide(layer)),
 );

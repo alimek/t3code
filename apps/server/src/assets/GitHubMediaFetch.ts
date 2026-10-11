@@ -1,3 +1,5 @@
+import { type EnvironmentAuthorizationError } from "@t3tools/contracts";
+import * as Stream from "effect/Stream";
 import * as Mime from "effect/http/Mime";
 import { githubMediaFileName } from "@t3tools/shared/githubMedia";
 import * as Clock from "effect/Clock";
@@ -73,6 +75,7 @@ const fetchFollowingRedirects = Effect.fn("GitHubMediaFetch.fetchFollowingRedire
   url: string,
   headers: Record<string, string>,
   token: Redacted.Redacted | null,
+  check: Effect.Effect<void, EnvironmentAuthorizationError>,
 ) {
   const httpClient = HttpClient.withScope(yield* HttpClient.HttpClient);
   let target = url;
@@ -82,6 +85,7 @@ const fetchFollowingRedirects = Effect.fn("GitHubMediaFetch.fetchFollowingRedire
     // a token — deciding that from the target, not from the hop count, is what makes it so.
     const authorization =
       token !== null && isCredentialedHost(target) ? `Bearer ${Redacted.value(token)}` : null;
+    yield* check;
     const response: HttpClientResponse.HttpClientResponse = yield* httpClient
       .execute(
         HttpClientRequest.get(target).pipe(
@@ -94,6 +98,7 @@ const fetchFollowingRedirects = Effect.fn("GitHubMediaFetch.fetchFollowingRedire
         ),
       )
       .pipe(Effect.provideService(FetchHttpClient.RequestInit, MANUAL_REDIRECT));
+    yield* check;
     const location = response.headers.location;
     if (response.status < 300 || response.status >= 400) return response;
     // A chain this long is not GitHub answering with bytes, and its body is not the media.
@@ -109,23 +114,34 @@ const fetchFollowingRedirects = Effect.fn("GitHubMediaFetch.fetchFollowingRedire
  * only thing that distinguishes a readable private attachment from a 404.
  */
 export const githubMediaResponse = Effect.fn("GitHubMediaFetch.githubMediaResponse")(function* (
-  asset: { readonly url: string; readonly cwd: string; readonly expiresAt: number },
+  asset: {
+    readonly url: string;
+    readonly cwd: string;
+    readonly expiresAt: number;
+    readonly check?: Effect.Effect<void, EnvironmentAuthorizationError>;
+  },
   requestHeaders: Record<string, string | undefined>,
 ) {
   // Both media hosts are served by github.com's account, which is the host `gh` stores it under.
+  const check = asset.check ?? Effect.void;
+  yield* check;
   const token = yield* githubToken;
+  yield* check;
   const forwarded: Record<string, string> = {};
   for (const name of FORWARDED_REQUEST_HEADERS) {
     const value = requestHeaders[name];
     if (value !== undefined) forwarded[name] = value;
   }
-  const response = yield* fetchFollowingRedirects(asset.url, forwarded, token);
+  const response = yield* fetchFollowingRedirects(asset.url, forwarded, token, check);
   // An upload GitHub hosts never changes under its URL, so the only thing a cached copy must
   // not outlive is the signed URL that granted it — which is the same bound the URL itself has.
   const remainingSeconds = Math.floor((asset.expiresAt - (yield* Clock.currentTimeMillis)) / 1000);
+  yield* check;
   const headers: Record<string, string> = {
     "cache-control":
-      remainingSeconds > 0 ? `private, max-age=${remainingSeconds}` : "private, no-store",
+      asset.check === undefined && remainingSeconds > 0
+        ? `private, max-age=${remainingSeconds}`
+        : "private, no-store",
     "x-content-type-options": "nosniff",
   };
   if (response === null) return HttpServerResponse.empty({ status: 502, headers });
@@ -156,7 +172,7 @@ export const githubMediaResponse = Effect.fn("GitHubMediaFetch.githubMediaRespon
   if (contentType === SVG_CONTENT_TYPE) {
     headers["content-security-policy"] = SVG_CONTENT_SECURITY_POLICY;
   }
-  return HttpServerResponse.stream(response.stream, {
+  return HttpServerResponse.stream(response.stream.pipe(Stream.tap(() => check)), {
     status: response.status,
     headers,
     contentType,

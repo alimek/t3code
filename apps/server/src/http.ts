@@ -442,6 +442,10 @@ export const layerAssetRoute = HttpRouter.add(
     }
     if (asset.kind === "github-media") {
       return yield* githubMediaResponse(asset, request.headers).pipe(
+        Effect.catchTags({
+          EnvironmentAuthorizationError: () =>
+            Effect.succeed(HttpServerResponse.text("Not Found", { status: 404 })),
+        }),
         Effect.tapError((cause) =>
           Effect.logWarning("Failed to fetch GitHub media.", { url: asset.url, cause }),
         ),

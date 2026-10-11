@@ -356,6 +356,7 @@ const readImageDimensionsFromOpenFile = (
   check
     .pipe(Effect.andThen(readMediaFileHeader(filePath, file, IMAGE_DIMENSIONS_HEADER_BYTES)))
     .pipe(
+      Effect.tap(() => check),
       Effect.map(readImageDimensions),
       Effect.catch((error) =>
         error._tag === "EnvironmentAuthorizationError" ? Effect.fail(error) : Effect.succeed(null),
@@ -389,10 +390,9 @@ const finalizeAbsoluteMediaFileAsset = Effect.fn("AssetAccess.finalizeAbsoluteMe
     readonly requestedPath: string;
     readonly resource: AssetResource;
     readonly expiresAt: number;
-    readonly check?: Effect.Effect<
-      void,
-      import("@t3tools/contracts").EnvironmentAuthorizationError
-    >;
+    readonly check?: (
+      filePath: string,
+    ) => Effect.Effect<void, import("@t3tools/contracts").EnvironmentAuthorizationError>;
   }) {
     const path = yield* Path.Path;
     const canonicalFile = yield* resolveCanonicalFile(input.requestedPath).pipe(
@@ -407,14 +407,15 @@ const finalizeAbsoluteMediaFileAsset = Effect.fn("AssetAccess.finalizeAbsoluteMe
       return yield* new AssetPreviewTypeValidationError({ resource: input.resource });
     }
     const wantsDimensions = HEADER_IMAGE_EXTENSIONS.has(path.extname(canonicalFile).toLowerCase());
-    yield* input.check ?? Effect.void;
+    const check = input.check?.(canonicalFile) ?? Effect.void;
+    yield* check;
     const opened = yield* openMediaFile(canonicalFile).pipe(
       Effect.flatMap((file) =>
         file === null
           ? Effect.succeed(null)
           : Effect.map(
               wantsDimensions
-                ? readImageDimensionsFromOpenFile(canonicalFile, file, input.check)
+                ? readImageDimensionsFromOpenFile(canonicalFile, file, check)
                 : Effect.succeed(null),
               (dimensions) => ({
                 identity: { device: file.info.dev.toString(), inode: file.info.ino.toString() },
@@ -423,10 +424,13 @@ const finalizeAbsoluteMediaFileAsset = Effect.fn("AssetAccess.finalizeAbsoluteMe
             ),
       ),
       Effect.scoped,
-      Effect.mapError(
-        (cause) => new AssetWorkspaceAssetInspectionError({ resource: input.resource, cause }),
+      Effect.mapError((cause) =>
+        cause._tag === "EnvironmentAuthorizationError"
+          ? cause
+          : new AssetWorkspaceAssetInspectionError({ resource: input.resource, cause }),
       ),
     );
+    yield* check;
     if (!opened) {
       return yield* new AssetWorkspaceAssetNotFoundError({ resource: input.resource });
     }
@@ -440,6 +444,7 @@ const finalizeAbsoluteMediaFileAsset = Effect.fn("AssetAccess.finalizeAbsoluteMe
       },
       fileName: path.basename(canonicalFile),
       imageDimensions: opened.dimensions,
+      check,
     };
   },
 );
@@ -450,10 +455,9 @@ const finalizeWorkspaceFileAsset = Effect.fn("AssetAccess.finalizeWorkspaceFileA
     readonly requestedPath: string;
     readonly resource: AssetResource;
     readonly expiresAt: number;
-    readonly check?: Effect.Effect<
-      void,
-      import("@t3tools/contracts").EnvironmentAuthorizationError
-    >;
+    readonly check?: (
+      filePath: string,
+    ) => Effect.Effect<void, import("@t3tools/contracts").EnvironmentAuthorizationError>;
   }) {
     const path = yield* Path.Path;
     const fileSystem = yield* FileSystem.FileSystem;
@@ -503,10 +507,12 @@ const finalizeWorkspaceFileAsset = Effect.fn("AssetAccess.finalizeWorkspaceFileA
           }),
       ),
     );
+    const check = input.check?.(canonicalFile) ?? Effect.void;
+    yield* check;
     const imageDimensions = HEADER_IMAGE_EXTENSIONS.has(
       path.extname(resolved.relativePath).toLowerCase(),
     )
-      ? yield* readImageDimensionsFromHeader(canonicalFile, input.check)
+      ? yield* readImageDimensionsFromHeader(canonicalFile, check)
       : null;
     return {
       claims: isWorkspaceImagePreviewPath(resolved.relativePath)
@@ -526,6 +532,7 @@ const finalizeWorkspaceFileAsset = Effect.fn("AssetAccess.finalizeWorkspaceFileA
           },
       fileName: path.basename(resolved.relativePath),
       imageDimensions,
+      check,
     };
   },
 );
@@ -551,10 +558,40 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
-  const context = yield* Effect.context<Effect.Services<ReturnType<typeof authorizeAsset>>>();
-  const check = authorizeAsset(authority, input.resource, input.workspaceRoot).pipe(
-    Effect.provide(context),
-  );
+  const context =
+    yield* Effect.context<
+      Effect.Services<ReturnType<typeof authorizeAsset> | ReturnType<typeof authorizeAssetFile>>
+    >();
+  const checkFile = (
+    canonicalFile?: string,
+    requestedFile?: string,
+  ): Effect.Effect<void, import("@t3tools/contracts").EnvironmentAuthorizationError> =>
+    Effect.gen(function* () {
+      yield* authorizeAsset(authority, input.resource, input.workspaceRoot);
+      if (!resourceRestricted((yield* current(authority, scope))?.resourceGrant)) return;
+      const root =
+        input.resource._tag === "draft-workspace-file"
+          ? (input.workspaceRoot ?? input.resource.cwd)
+          : "cwd" in input.resource
+            ? input.resource.cwd
+            : input.workspaceRoot;
+      const requested =
+        requestedFile ??
+        ("path" in input.resource ? input.resource.path : input.projectFaviconPath);
+      if (requested === undefined && canonicalFile === undefined) return;
+      if (root === undefined) return yield* threadReadDenied();
+      if (requested !== undefined)
+        yield* authorizeAssetFile(
+          authority,
+          input.resource,
+          root,
+          path.resolve(root, expandHomePathWith(requested, path)),
+        );
+      if (canonicalFile !== undefined)
+        yield* authorizeAssetFile(authority, input.resource, root, canonicalFile);
+    }).pipe(Effect.provide(context));
+  const check = checkFile();
+  let publicationCheck = check;
   if (
     binding !== undefined &&
     restricted &&
@@ -611,11 +648,12 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
         requestedPath,
         resource: input.resource,
         expiresAt,
-        check,
+        check: checkFile,
       });
       claims = finalized.claims;
       fileName = finalized.fileName;
       imageDimensions = finalized.imageDimensions;
+      publicationCheck = finalized.check;
       break;
     }
     case "workspace-file": {
@@ -638,11 +676,12 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
         requestedPath: input.resource.path,
         resource: input.resource,
         expiresAt,
-        check,
+        check: checkFile,
       });
       claims = finalized.claims;
       fileName = finalized.fileName;
       imageDimensions = finalized.imageDimensions;
+      publicationCheck = finalized.check;
       break;
     }
     case "draft-workspace-file": {
@@ -662,11 +701,12 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
           requestedPath: input.resource.path,
           resource: input.resource,
           expiresAt,
-          check,
+          check: checkFile,
         });
         claims = finalized.claims;
         fileName = finalized.fileName;
         imageDimensions = finalized.imageDimensions;
+        publicationCheck = finalized.check;
         break;
       }
       const workspaceRoot = yield* workspacePaths.normalizeWorkspaceRoot(draftWorkspaceRoot).pipe(
@@ -683,11 +723,12 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
         requestedPath: input.resource.path,
         resource: input.resource,
         expiresAt,
-        check,
+        check: checkFile,
       });
       claims = finalized.claims;
       fileName = finalized.fileName;
       imageDimensions = finalized.imageDimensions;
+      publicationCheck = finalized.check;
       break;
     }
     case "attachment": {
@@ -817,9 +858,11 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
             };
       if (sourceFaviconPath && canonicalFaviconPath) {
         const crypto = yield* Crypto.Crypto;
-        if (binding !== undefined && restricted)
-          yield* authorizeAssetFile(authority, input.resource, workspaceRoot, canonicalFaviconPath);
-        yield* check;
+        publicationCheck = checkFile(
+          canonicalFaviconPath,
+          path.resolve(workspaceRoot, sourceFaviconPath),
+        );
+        yield* publicationCheck;
         const faviconBytes = yield* fileSystem.readFile(canonicalFaviconPath).pipe(
           Effect.mapError(
             (cause) =>
@@ -829,6 +872,7 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
               }),
           ),
         );
+        yield* publicationCheck;
         const revision = yield* crypto.digest("SHA-256", faviconBytes).pipe(
           Effect.map(Hex.encode),
           Effect.mapError(
@@ -912,11 +956,11 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
       PROJECT_FAVICON_TOKEN_BUCKET_MS;
     claims = { ...claims, expiresAt };
   }
-  yield* authorizeAsset(authority, input.resource, input.workspaceRoot);
   if (binding !== undefined) {
     const latest = yield* captureBinding(authority, scope);
     if (latest?.authorityRevision !== binding.authorityRevision) return yield* threadReadDenied();
   }
+  yield* publicationCheck;
   const encodedPayload = base64UrlEncode(
     encodeAssetClaims(
       binding === undefined
