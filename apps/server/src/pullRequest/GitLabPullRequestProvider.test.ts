@@ -1,4 +1,5 @@
 import { assert, describe, expect, it, vi } from "@effect/vitest";
+import { AuthOrchestrationReadScope, EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -212,3 +213,35 @@ describe("rewriting what has already been said", () => {
     }),
   );
 });
+
+it.effect.each(["listNotes", "listCommits", "listDiscussions", "listReactions"] as const)(
+  "activity preserves typed denial from %s instead of returning a partial conversation",
+  (method) =>
+    Effect.gen(function* () {
+      const denial = new EnvironmentAuthorizationError({
+        requiredScope: AuthOrchestrationReadScope,
+        message: "fixture denial",
+      });
+      const provider = yield* make.pipe(
+        Effect.provide(
+          Layer.mock(GitLabPullRequestCli.GitLabPullRequestCli)({
+            listNotes: () => Effect.succeed({ comments: [], truncated: false }),
+            listCommits: () => Effect.succeed([]),
+            listDiscussions: () => Effect.succeed({ threads: [], truncated: false }),
+            listReactions: () => Effect.succeed({ reactions: [], reactionsByNoteId: new Map() }),
+            [method]: () => Effect.fail(denial),
+          }),
+        ),
+      );
+      expect(
+        yield* provider
+          .getChangeRequestActivity({
+            cwd: "/w",
+            host: "gitlab.com",
+            repository: "acme/web",
+            number: 7,
+          })
+          .pipe(Effect.flip),
+      ).toBe(denial);
+    }),
+);

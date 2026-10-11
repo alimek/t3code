@@ -1,3 +1,7 @@
+import {
+  beforeCurrentWorkspaceEffect,
+  recoverWorkspaceError,
+} from "../auth/workspaceReadAccess.ts";
 import * as Effect from "effect/Effect";
 import * as Semaphore from "effect/Semaphore";
 import type { PullRequestCapabilities, PullRequestViewerPermissions } from "@t3tools/contracts";
@@ -189,15 +193,20 @@ export const make = Effect.gen(function* () {
    */
   const locations = new Map<string, AzureDevOpsRepositoryLocation>();
 
-  const locationOf = (input: { readonly cwd: string; readonly number: number }) => {
+  const locationOf = Effect.fn("AzureDevOpsPullRequestProvider.locationOf")(function* (input: {
+    readonly cwd: string;
+    readonly number: number;
+  }) {
     const key = `${input.cwd} ${input.number}`;
+    yield* beforeCurrentWorkspaceEffect;
     const held = locations.get(key);
     if (held !== undefined) {
       locations.delete(key);
       locations.set(key, held);
-      return Effect.succeed(held);
+      return held;
     }
-    return cli.getPullRequest({ cwd: input.cwd, number: input.number }).pipe(
+    return yield* cli.getPullRequest({ cwd: input.cwd, number: input.number }).pipe(
+      Effect.tap(() => beforeCurrentWorkspaceEffect),
       Effect.map((pullRequest) => {
         const location = pullRequest.location;
         if (location === null) return null;
@@ -209,7 +218,7 @@ export const make = Effect.gen(function* () {
         return location;
       }),
     );
-  };
+  });
 
   /**
    * Everything a diff read needs before it can ask for a file: where the repository lives, and
@@ -370,7 +379,7 @@ export const make = Effect.gen(function* () {
                   }),
                 ),
                 Effect.map((listed) => listed.changes.length),
-                Effect.orElseSucceed(() => 0),
+                recoverWorkspaceError(() => 0),
               );
         const detail: ProviderChangeRequestDetail = {
           ...toChangeRequest(pullRequest),
@@ -404,7 +413,7 @@ export const make = Effect.gen(function* () {
                 })
                 .pipe(
                   Effect.map((comments) => ({ comments, truncated: false })),
-                  Effect.orElseSucceed(() => ({ comments: [], truncated: true })),
+                  recoverWorkspaceError(() => ({ comments: [], truncated: true })),
                 )
           ).pipe(
             Effect.map((conversation): ProviderChangeRequestActivity => ({

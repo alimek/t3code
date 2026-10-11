@@ -1,3 +1,4 @@
+import { beforeCurrentWorkspaceEffect } from "../auth/workspaceReadAccess.ts";
 import * as Clock from "effect/Clock";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
@@ -77,9 +78,11 @@ export const makeChecksRevalidator = Effect.gen(function* () {
       const credential = yield* GitHubApi.PinnedGitHubCredential;
       if (credential === null) return yield* read;
       const key = `${credential.credentialFingerprint}\0${input.host}\0${input.repository}\0${input.number}`;
+      yield* beforeCurrentWorkspaceEffect;
       const entry = yield* Cache.get(entries, key);
       return yield* entry.gate.withPermit(
         Effect.gen(function* () {
+          yield* beforeCurrentWorkspaceEffect;
           if (!entry.supported) return yield* read;
           const fail = (status: number) =>
             new GitHubApi.GitHubApiResponseError({
@@ -90,6 +93,7 @@ export const makeChecksRevalidator = Effect.gen(function* () {
           /** Whether the endpoint has a next page, or null where the host cannot say. */
           const get = (endpoint: string, head = false) =>
             Effect.gen(function* () {
+              yield* beforeCurrentWorkspaceEffect;
               const previous = entry.validators.get(endpoint);
               const response = yield* api
                 .rest({
@@ -101,17 +105,26 @@ export const makeChecksRevalidator = Effect.gen(function* () {
                 .pipe(
                   Effect.catchTags({
                     GitHubApiNotFoundError: () =>
-                      Effect.sync(() => {
-                        entry.supported = false;
-                        return null;
-                      }),
+                      beforeCurrentWorkspaceEffect.pipe(
+                        Effect.andThen(
+                          Effect.sync(() => {
+                            entry.supported = false;
+                            return null;
+                          }),
+                        ),
+                      ),
                     GitHubApiResponseError: (error) =>
-                      Effect.sync(() => {
-                        entry.supported = !UNSUPPORTED_STATUSES.has(error.status);
-                        return null;
-                      }),
+                      beforeCurrentWorkspaceEffect.pipe(
+                        Effect.andThen(
+                          Effect.sync(() => {
+                            entry.supported = !UNSUPPORTED_STATUSES.has(error.status);
+                            return null;
+                          }),
+                        ),
+                      ),
                   }),
                 );
+              yield* beforeCurrentWorkspaceEffect;
               if (response === null) {
                 entry.value = null;
                 return null;
@@ -125,6 +138,7 @@ export const makeChecksRevalidator = Effect.gen(function* () {
                 const decoded = yield* decodeHead(response.body).pipe(
                   Effect.mapError(() => fail(response.status)),
                 );
+                yield* beforeCurrentWorkspaceEffect;
                 if (entry.head?.head.sha !== decoded.head.sha) entry.validators.clear();
                 entry.head = decoded;
               }
@@ -161,6 +175,7 @@ export const makeChecksRevalidator = Effect.gen(function* () {
             }
           }
           const now = yield* Clock.currentTimeMillis;
+          yield* beforeCurrentWorkspaceEffect;
           if (entry.value !== null && now - entry.readAt < 5 * 60_000) return entry.value;
           // Every page of the head's runs was just confirmed current, so the read filters them
           // rather than listing the runs a second time.
@@ -177,6 +192,7 @@ export const makeChecksRevalidator = Effect.gen(function* () {
                 }
               : null;
           const fresh = yield* read.pipe(Effect.provideService(KnownWorkflowRuns, known));
+          yield* beforeCurrentWorkspaceEffect;
           const value = {
             state: fresh.state,
             checks: fresh.checks,

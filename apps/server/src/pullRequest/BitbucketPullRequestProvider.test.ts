@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import { AuthOrchestrationReadScope, EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
@@ -19,8 +20,8 @@ for (const operation of [
   "listComments",
   "listCommits",
 ] as const) {
-  it.effect.each(["response", "body read"])(
-    `preserves rate limits from ${operation} on %s errors while recovering other optional-read failures`,
+  it.effect.each(["response", "body read", "authorization"])(
+    `preserves rate limits and authorization from ${operation} on %s errors while recovering ordinary optional-read failures`,
     (variant) =>
       Effect.gen(function* () {
         const pullRequest = Result.getOrThrow(
@@ -33,7 +34,11 @@ for (const operation of [
             "links": { "html": { "href": "https://bitbucket.org/acme/web/pull-requests/1" } }
           }`),
         );
-        for (const status of [429, 403]) {
+        const denial = new EnvironmentAuthorizationError({
+          requiredScope: AuthOrchestrationReadScope,
+          message: "fixture denial",
+        });
+        for (const status of variant === "authorization" ? [403] : [429, 403]) {
           const provider = yield* make.pipe(
             Effect.provide(
               Layer.mock(BitbucketPullRequestApi.BitbucketPullRequestApi)({
@@ -46,19 +51,21 @@ for (const operation of [
                 listCommits: () => Effect.succeed([]),
                 [operation]: () =>
                   Effect.fail(
-                    variant === "response"
-                      ? new BitbucketApi.BitbucketResponseError({
-                          operation: "request",
-                          status,
-                          responseBodyLength: 0,
-                          retryAt: 120_000,
-                        })
-                      : new BitbucketApi.BitbucketResponseBodyReadError({
-                          operation: "request",
-                          status,
-                          cause: new Error("response stream failed"),
-                          retryAt: 120_000,
-                        }),
+                    variant === "authorization"
+                      ? denial
+                      : variant === "response"
+                        ? new BitbucketApi.BitbucketResponseError({
+                            operation: "request",
+                            status,
+                            responseBodyLength: 0,
+                            retryAt: 120_000,
+                          })
+                        : new BitbucketApi.BitbucketResponseBodyReadError({
+                            operation: "request",
+                            status,
+                            cause: new Error("response stream failed"),
+                            retryAt: 120_000,
+                          }),
                   ),
               }),
             ),
@@ -72,7 +79,10 @@ for (const operation of [
           const result = yield* operation === "listComments" || operation === "listCommits"
             ? Effect.result(provider.getChangeRequestActivity(reference))
             : Effect.result(provider.getChangeRequest(reference));
-          if (status === 429) {
+          if (variant === "authorization") {
+            expect(result._tag).toBe("Failure");
+            if (result._tag === "Failure") expect(result.failure).toBe(denial);
+          } else if (status === 429) {
             expect(result).toMatchObject({
               _tag: "Failure",
               failure: { reason: "rate-limited", retryAt: 120_000 },

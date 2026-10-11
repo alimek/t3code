@@ -1,4 +1,9 @@
-import { recoverWorkspaceError } from "../auth/workspaceReadAccess.ts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
+import {
+  beforeCurrentWorkspaceEffect,
+  workspaceEffectAdmission,
+  recoverWorkspaceError,
+} from "../auth/workspaceReadAccess.ts";
 import { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -205,7 +210,9 @@ export const makeDiscovery = Effect.gen(function* () {
     label: discovery.label,
     installHint: discovery.installHint,
     probe: Effect.fn("GitHubSourceControlProvider.discovery")(function* (cwd: string) {
-      const settings = yield* serverSettings.getSettings.pipe(
+      const settings = yield* beforeCurrentWorkspaceEffect.pipe(
+        Effect.andThen(serverSettings.getSettings),
+        Effect.tap(() => beforeCurrentWorkspaceEffect),
         Effect.map((current) => current.github),
         recoverWorkspaceError(() => DEFAULT_SERVER_SETTINGS.github),
       );
@@ -215,6 +222,7 @@ export const makeDiscovery = Effect.gen(function* () {
         spec: { ...discovery, parseAuth: (input) => parseGitHubAuth(input, settings) },
       });
       // A token saved in Settings wins over the environment, which wins over gh.
+      yield* beforeCurrentWorkspaceEffect;
       const savedToken = (settings.tokens["github.com"] ?? "").trim() !== "";
       const variable = environmentTokenVariable(environment);
       const tokenSource = savedToken ? "the token saved in Settings" : variable;
@@ -522,9 +530,15 @@ export const make = Effect.gen(function* () {
   const rest = (input: GitHubApi.GitHubRestInput, notFoundDetail?: string) =>
     api.rest(input).pipe(Effect.mapError((error) => fromGitHubApiError(error, notFoundDetail)));
 
-  const headResolver = RequestResolver.makeGrouped<PullRequestsByHeadRead, string>({
-    key: ({ request, context }) =>
-      [
+  // Pending keys isolate external entries without interning and retaining every caller.
+  const headResolver = RequestResolver.makeWith<PullRequestsByHeadRead>({
+    delay: Effect.yieldNow,
+    collectWhile: () => true,
+    batchKey: (entry) => {
+      const { request, context } = entry;
+      const admission = Context.getOrElse(context, workspaceEffectAdmission, () => undefined);
+      if (admission !== undefined && admission.authority !== trustedReadAuthority) return entry;
+      return [
         request.host,
         request.owner,
         request.name,
@@ -532,44 +546,48 @@ export const make = Effect.gen(function* () {
         Context.getOrElse(context, GitHubApi.PinnedGitHubCredential, () => null)
           ?.credentialFingerprint ?? "",
         Context.getOrElse(context, SourceControlRateLimit.CredentialScope, () => ""),
-      ].join("\0"),
-    resolver: (entries) => {
+      ].join("\0");
+    },
+    runAll: (entries) => {
       const [first] = entries;
-      const { host, owner, name, allowReserve } = first.request;
-      const query = buildPullRequestsByHeadQuery(entries.map((entry) => entry.request));
-      return graphqlJson(
-        {
-          host,
-          operation: "listPullRequestsByHead",
-          query: query.document,
-          variables: { owner, name, ...query.variables },
-          allowReserve,
-          // Up to 50 heads of 100 rows each. A default branch such as `main` can match a hundred
-          // fork pull requests, so the usual cap would cut the answer short.
-          maxResponseBytes: HEAD_LOOKUP_MAX_RESPONSE_BYTES,
-        },
-        decodePullRequestsByHead,
-        "GitHub returned an invalid change request list.",
-      ).pipe(
-        Effect.flatMap((decoded) =>
-          decoded.data.repository === null
-            ? Effect.fail(notFound("The repository could not be read."))
-            : Effect.succeed(decoded.data.repository),
-        ),
-        Effect.map((aliases) => {
-          for (const [index, entry] of entries.entries()) {
-            const alias = aliases[`h${index}`];
-            entry.completeUnsafe(
-              Exit.succeed(alias == null ? [] : decodeGitHubPullRequestEntries(alias.nodes)),
-            );
-          }
-        }),
-        Effect.catchCause((cause) =>
-          Effect.sync(() => {
-            for (const entry of entries) entry.completeUnsafe(Exit.failCause(cause));
+      return Effect.gen(function* () {
+        yield* beforeCurrentWorkspaceEffect;
+        const { host, owner, name, allowReserve } = first.request;
+        const query = buildPullRequestsByHeadQuery(entries.map((entry) => entry.request));
+        return yield* graphqlJson(
+          {
+            host,
+            operation: "listPullRequestsByHead",
+            query: query.document,
+            variables: { owner, name, ...query.variables },
+            allowReserve,
+            // Up to 50 heads of 100 rows each. A default branch such as `main` can match a hundred
+            // fork pull requests, so the usual cap would cut the answer short.
+            maxResponseBytes: HEAD_LOOKUP_MAX_RESPONSE_BYTES,
+          },
+          decodePullRequestsByHead,
+          "GitHub returned an invalid change request list.",
+        ).pipe(
+          Effect.flatMap((decoded) =>
+            decoded.data.repository === null
+              ? Effect.fail(notFound("The repository could not be read."))
+              : Effect.succeed(decoded.data.repository),
+          ),
+          Effect.map((aliases) => {
+            for (const [index, entry] of entries.entries()) {
+              const alias = aliases[`h${index}`];
+              entry.completeUnsafe(
+                Exit.succeed(alias == null ? [] : decodeGitHubPullRequestEntries(alias.nodes)),
+              );
+            }
           }),
-        ),
-      );
+          Effect.catchCause((cause) =>
+            Effect.sync(() => {
+              for (const entry of entries) entry.completeUnsafe(Exit.failCause(cause));
+            }),
+          ),
+        );
+      }).pipe(Effect.provideContext(first.context));
     },
   }).pipe(RequestResolver.batchN(HEAD_LOOKUPS_PER_DOCUMENT));
   const interactiveHeadResolver = headResolver.pipe(

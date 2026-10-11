@@ -353,6 +353,7 @@ export const make = Effect.gen(function* () {
 
   const credential: GitHubApi["Service"]["credential"] = Effect.fn("GitHubApi.credential")(
     function* (host) {
+      yield* beforeCurrentWorkspaceEffect;
       const normalized = normalizeHost(host);
       const pinned = yield* PinnedGitHubCredential;
       if (pinned !== null) {
@@ -366,6 +367,7 @@ export const make = Effect.gen(function* () {
         return { token: pinned.token, fingerprint: pinned.credentialFingerprint };
       }
       const held = yield* credentials.get(normalized);
+      yield* beforeCurrentWorkspaceEffect;
       return { token: held.token, fingerprint: held.fingerprint };
     },
   );

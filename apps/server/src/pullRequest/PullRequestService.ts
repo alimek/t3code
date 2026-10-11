@@ -407,6 +407,9 @@ const requestAccess = Context.Reference<
       readonly authority: ThreadReadAuthority;
       readonly scope: AuthEnvironmentScope;
       readonly admissions: Map<ProjectId, WorkspaceAccess.WorkspaceActionAdmission>;
+      readonly checkSql: (
+        inherited?: Effect.Effect<void, EnvironmentAuthorizationError>,
+      ) => Effect.Effect<void, EnvironmentAuthorizationError>;
     }
   | undefined
 >("t3/PullRequestService/access", { defaultValue: () => undefined });
@@ -433,7 +436,7 @@ const checkAccess = Effect.gen(function* () {
   const access = yield* currentAccess;
   for (const admission of access.admissions.values())
     yield* admission.beforeEffect(admission.input.cwd);
-  yield* currentAccess;
+  yield* access.checkSql();
 });
 
 const firstAdmittedSuccess = <A, E, R>(
@@ -675,6 +678,32 @@ function withRateLimitBackoff(
   },
 ): PullRequestProviderApi {
   const key = { provider: api.kind, host };
+  const withAdmission = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    options?.admission === undefined
+      ? effect
+      : Effect.gen(function* () {
+          const inherited = yield* WorkspaceAccess.workspaceEffectAdmission;
+          const admission = options.admission!;
+          yield* checkAccess;
+          const access = yield* currentAccess;
+          return yield* effect.pipe(
+            Effect.provideService(WorkspaceAccess.workspaceEffectAdmission, {
+              ...admission,
+              // Host documents may name several projects. Recheck every captured participant
+              // after adapter waits, not only the checkout that supplied the API/credential.
+              beforeEffect: (cwd, scope) =>
+                checkAccess.pipe(
+                  Effect.andThen(
+                    inherited === undefined
+                      ? Effect.void
+                      : inherited.beforeEffect(inherited.input.cwd),
+                  ),
+                  Effect.andThen(admission.beforeEffect(cwd, scope)),
+                  Effect.andThen(access.checkSql(inherited?.checkSql)),
+                ),
+            }),
+          );
+        });
   const protect = <A>(
     operation: string,
     effect: Effect.Effect<A, ProviderError>,
@@ -696,24 +725,7 @@ function withRateLimitBackoff(
             }),
       ),
       Effect.flatMap((lease) =>
-        (options?.admission === undefined || !admit
-          ? effect
-          : Effect.gen(function* () {
-              const inherited = yield* WorkspaceAccess.workspaceEffectAdmission;
-              if (inherited !== undefined) yield* inherited.beforeEffect(inherited.input.cwd);
-              yield* options.admission!.beforeEffect(options.admission!.input.cwd);
-              return yield* effect.pipe(
-                Effect.provideService(WorkspaceAccess.workspaceEffectAdmission, {
-                  ...options.admission!,
-                  beforeEffect: (cwd, scope) =>
-                    (inherited === undefined
-                      ? Effect.void
-                      : inherited.beforeEffect(inherited.input.cwd)
-                    ).pipe(Effect.andThen(options.admission!.beforeEffect(cwd, scope))),
-                }),
-              );
-            })
-        ).pipe(
+        (admit ? withAdmission(effect) : effect).pipe(
           Effect.provideService(AllowGitHubReserve, allowPaused),
           Effect.tap(() => (admit ? checkAccess : Effect.void)),
           Effect.tap(() => limits.recordSuccess({ ...key, lease })),
@@ -772,7 +784,10 @@ function withRateLimitBackoff(
               readonly viewer: string;
               readonly credentialFingerprint: string;
             }) => Effect.Effect<A, E, R>,
-          ) => checkAccess.pipe(Effect.andThen(api.withVerifiedCredential!(input, use))),
+          ) =>
+            checkAccess.pipe(
+              Effect.andThen(withAdmission(api.withVerifiedCredential!(input, use))),
+            ),
         }),
     listChangeRequests: wrap("listChangeRequests", api.listChangeRequests),
     ...(api.listChangeRequestsAcross === undefined
@@ -881,14 +896,31 @@ export const make = Effect.gen(function* () {
     scope: AuthEnvironmentScope,
     operation: Effect.Effect<A, E, R>,
   ) =>
-    Effect.suspend(() =>
-      checkAccess.pipe(
+    Effect.suspend(() => {
+      const admissions = new Map<ProjectId, WorkspaceAccess.WorkspaceActionAdmission>();
+      const checkSql = (inherited?: Effect.Effect<void, EnvironmentAuthorizationError>) => {
+        const checked = Effect.gen(function* () {
+          yield* inherited ?? Effect.void;
+          for (const admission of admissions.values()) yield* admission.checkSql;
+          yield* currentAccess;
+        });
+        // Canonical preflight stays outside SQL. One final snapshot checks every participant
+        // after the last preflight await, including the selected adapter's own checkout.
+        return authority === trustedReadAuthority || admissions.size === 0
+          ? checked
+          : sql
+              .withTransaction(checked)
+              .pipe(
+                Effect.mapError((error) => (isAuthorizationError(error) ? error : denied(scope))),
+              );
+      };
+      return checkAccess.pipe(
         Effect.andThen(operation),
         Effect.tap(() => checkAccess),
         Effect.tapError(() => checkAccess),
-        Effect.provideService(requestAccess, { authority, scope, admissions: new Map() }),
-      ),
-    );
+        Effect.provideService(requestAccess, { authority, scope, admissions, checkSql }),
+      );
+    });
   const captureProject = Effect.fnUntraced(function* (projectId: ProjectId, cwd: string) {
     yield* checkAccess;
     const access = yield* currentAccess;

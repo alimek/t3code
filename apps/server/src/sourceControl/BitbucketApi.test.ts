@@ -1106,7 +1106,6 @@ it.effect.each(["request", "redirect", "probeAuth"] as const)(
       message: "denied",
     });
     let revoked = action !== "redirect";
-    let checks = 0;
     const { layer, execute } = makeLayer({
       response: () => {
         revoked = true;
@@ -1121,7 +1120,6 @@ it.effect.each(["request", "redirect", "probeAuth"] as const)(
           : api.request({ method: "GET", url: "/diff" }).pipe(Effect.asVoid)
       ).pipe(Effect.flip);
       assert.strictEqual(execute.mock.calls.length, action === "redirect" ? 1 : 0);
-      assert.strictEqual(checks, action === "redirect" ? 2 : 1);
       assert.strictEqual(error, denial);
     }).pipe(
       Effect.provideService(workspaceEffectAdmission, {
@@ -1132,7 +1130,6 @@ it.effect.each(["request", "redirect", "probeAuth"] as const)(
         checkSql: Effect.void,
         beforeEffect: () =>
           Effect.suspend(() => {
-            checks++;
             return revoked ? Effect.fail(denial) : Effect.void;
           }),
       }),

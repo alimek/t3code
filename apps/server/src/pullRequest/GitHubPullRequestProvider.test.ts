@@ -3,7 +3,11 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
-import type { PullRequestReaction } from "@t3tools/contracts";
+import {
+  AuthOrchestrationReadScope,
+  EnvironmentAuthorizationError,
+  type PullRequestReaction,
+} from "@t3tools/contracts";
 
 import { decodePullRequestDetailJson } from "./gitHubPullRequestJson.ts";
 import * as GitHubApi from "../sourceControl/GitHubApi.ts";
@@ -1067,3 +1071,57 @@ describe("loginAvatarUrl", () => {
     }
   });
 });
+
+it.effect.each(["avatars", "activity", "viewer fallback", "workflow unavailable"] as const)(
+  "preserves typed denial from %s without optional recovery or another read",
+  (stage) =>
+    Effect.gen(function* () {
+      const denial = new EnvironmentAuthorizationError({
+        requiredScope: AuthOrchestrationReadScope,
+        message: "fixture denial",
+      });
+      let fallback = 0;
+      const provider = yield* make.pipe(
+        Effect.provide(
+          Layer.mock(GitHubPullRequestApi.GitHubPullRequestApi)({
+            revalidateChecks: (_input, read) => read,
+            listPullRequests: () =>
+              Effect.succeed({ items: [], truncated: false, continues: true }),
+            listActorAvatars: () => Effect.fail(denial),
+            getPullRequestActivity: () =>
+              Effect.succeed({ author: null, comments: [], commits: [] }),
+            listReviewThreadComments: () => Effect.fail(denial),
+            getPullRequestDetail: () =>
+              stage === "viewer fallback" ? Effect.fail(denial) : Effect.succeed(openDetail),
+            listWorkflowRunsRequiringApproval: () => Effect.fail(denial),
+            getViewerAccess: () =>
+              Effect.sync(() => {
+                fallback++;
+                return coreFields.viewerAccess;
+              }),
+          }),
+        ),
+      );
+      const input = { cwd: "/w", host: "github.com", repository: "acme/web", number: 7 };
+      const result = yield* (
+        stage === "avatars"
+          ? provider
+              .listChangeRequests({
+                ...input,
+                state: "open",
+                involvement: "all",
+                viewer: "viewer",
+                limit: 10,
+              })
+              .pipe(Effect.asVoid)
+          : stage === "activity"
+            ? provider.getChangeRequestActivity(input).pipe(Effect.asVoid)
+            : stage === "viewer fallback"
+              ? provider.getViewerPermissions(input).pipe(Effect.asVoid)
+              : provider.getChangeRequest(input).pipe(Effect.asVoid)
+      ).pipe(Effect.result);
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result)) expect(result.failure).toBe(denial);
+      expect(fallback).toBe(0);
+    }),
+);

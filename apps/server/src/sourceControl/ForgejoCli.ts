@@ -260,6 +260,7 @@ export const make = Effect.gen(function* () {
       );
 
   const readKeys = Effect.fn("ForgejoCli.readKeys")(function* (cwd: string) {
+    yield* beforeCurrentWorkspaceEffect;
     for (const path of forgejoKeysPaths({
       platform: yield* HostProcessPlatform,
       home: NodeOS.homedir(),
@@ -268,6 +269,7 @@ export const make = Effect.gen(function* () {
         : {}),
       ...(globalThis.process.env.APPDATA ? { appData: globalThis.process.env.APPDATA } : {}),
     })) {
+      yield* beforeCurrentWorkspaceEffect;
       const exists = yield* fileSystem.exists(path).pipe(
         Effect.mapError(
           () =>
@@ -279,6 +281,7 @@ export const make = Effect.gen(function* () {
             }),
         ),
       );
+      yield* beforeCurrentWorkspaceEffect;
       if (!exists) continue;
       const raw = yield* fileSystem.readFileString(path).pipe(
         Effect.mapError(
@@ -291,6 +294,7 @@ export const make = Effect.gen(function* () {
             }),
         ),
       );
+      yield* beforeCurrentWorkspaceEffect;
       const decoded = parseForgejoKeys(raw);
       if (Result.isFailure(decoded))
         return yield* new ForgejoCliError({
@@ -333,6 +337,7 @@ export const make = Effect.gen(function* () {
     if (input.command === "fj") {
       const keys = yield* readKeys(input.cwd).pipe(Effect.result);
       if (Result.isFailure(keys)) {
+        if (keys.failure._tag === "EnvironmentAuthorizationError") return yield* keys.failure;
         // Stale credentials from an uninstalled fj must not disable an available tea login.
         const available = yield* execute({ command: "fj", cwd: input.cwd, args: ["version"] }).pipe(
           Effect.result,
@@ -456,6 +461,7 @@ export const make = Effect.gen(function* () {
     const keys = yield* readKeys(cwd);
     const token = keys.hosts[login.name]?.token;
     const now = yield* Clock.currentTimeMillis;
+    yield* beforeCurrentWorkspaceEffect;
     const cached = authenticated.get(login.url);
     if (token && cached?.token === token && now - cached.time < 30_000) return token;
     yield* execute({ command: "fj", cwd, args: ["--host", login.url, "whoami"] });
@@ -468,6 +474,7 @@ export const make = Effect.gen(function* () {
         reason: "authentication",
         detail: "fj has no credentials for this server. Authenticate again with fj.",
       });
+    yield* beforeCurrentWorkspaceEffect;
     authenticated.set(login.url, { token: refreshed, time: now });
     return refreshed;
   }, authLock.withPermits(1));
@@ -526,14 +533,15 @@ export const make = Effect.gen(function* () {
           allowNonZeroExit: true,
         })
         .pipe(
-          Effect.mapError(
-            (cause) =>
-              new ForgejoCliError({
-                command: "tea",
-                cwd: input.cwd,
-                detail: "Could not resolve the Forgejo repository remote.",
-                cause,
-              }),
+          Effect.mapError((cause) =>
+            cause._tag === "EnvironmentAuthorizationError"
+              ? cause
+              : new ForgejoCliError({
+                  command: "tea",
+                  cwd: input.cwd,
+                  detail: "Could not resolve the Forgejo repository remote.",
+                  cause,
+                }),
           ),
         );
       if (input.host) {

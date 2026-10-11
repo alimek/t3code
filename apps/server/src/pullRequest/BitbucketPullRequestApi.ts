@@ -1,3 +1,4 @@
+import { beforeCurrentWorkspaceEffect } from "../auth/workspaceReadAccess.ts";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
@@ -591,7 +592,9 @@ export const make = Effect.gen(function* () {
   const revisionPatches = yield* Cache.makeWith(
     (key: string) => {
       const [repository, number] = JSON.parse(key) as [string, number];
-      return pullRequestDiff({ repository, number }).pipe(
+      return beforeCurrentWorkspaceEffect.pipe(
+        Effect.andThen(pullRequestDiff({ repository, number })),
+        Effect.tap(() => beforeCurrentWorkspaceEffect),
         Effect.map((diff) => ({
           revisions: parseDiffFileRevisions(diff.patch),
           truncated: diff.truncated,
@@ -682,7 +685,11 @@ export const make = Effect.gen(function* () {
     getFileRevisions: (input) =>
       input.paths.length === 0
         ? Effect.succeed({ revisions: new Map(), complete: false })
-        : Cache.get(revisionPatches, JSON.stringify([input.repository, input.number])).pipe(
+        : beforeCurrentWorkspaceEffect.pipe(
+            Effect.andThen(
+              Cache.get(revisionPatches, JSON.stringify([input.repository, input.number])),
+            ),
+            Effect.tap(() => beforeCurrentWorkspaceEffect),
             Effect.map((diff) => {
               const revisions = new Map(diff.revisions);
               // A patch cut short at the byte ceiling says nothing about the files past the cut,

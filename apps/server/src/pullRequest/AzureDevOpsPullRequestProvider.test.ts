@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import { AuthOrchestrationReadScope, EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
@@ -418,3 +419,31 @@ describe("what one diff slice spends", () => {
     }),
   );
 });
+
+it.effect.each(["changed files", "threads"] as const)(
+  "preserves typed denial from %s instead of returning an unavailable read",
+  (method) =>
+    Effect.gen(function* () {
+      const denial = new EnvironmentAuthorizationError({
+        requiredScope: AuthOrchestrationReadScope,
+        message: "fixture denial",
+      });
+      const provider = yield* make.pipe(
+        Effect.provide(
+          Layer.mock(AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCli)({
+            getPullRequest: () => Effect.succeed(PULL_REQUEST),
+            listIterations: () => Effect.fail(denial),
+            listThreads: () => Effect.fail(denial),
+          }),
+        ),
+      );
+      const input = { cwd: "/w", host: "dev.azure.com", repository: "acme/web", number: 7 };
+      expect(
+        yield* (
+          method === "changed files"
+            ? provider.getChangeRequest(input).pipe(Effect.asVoid)
+            : provider.getChangeRequestActivity(input).pipe(Effect.asVoid)
+        ).pipe(Effect.flip),
+      ).toBe(denial);
+    }),
+);

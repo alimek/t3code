@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { afterEach, assert, expect, it, vi } from "@effect/vitest";
+import { AuthOrchestrationReadScope, EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
@@ -4584,5 +4585,58 @@ layer("GitHubPullRequestApi.layer", (it) => {
 
       assert.strictEqual(lookupsOf.get(HOT), 1);
     }),
+  );
+});
+
+layer("authorization recoveries", (it) => {
+  it.effect("optional stack badges preserve typed denial rather than returning the listing", () =>
+    Effect.gen(function* () {
+      const denial = new EnvironmentAuthorizationError({
+        requiredScope: AuthOrchestrationReadScope,
+        message: "fixture denial",
+      });
+      mockedExecute.mockReturnValueOnce(Effect.succeed(output(pullRequests(1, 1))));
+      mockedStackMemberships.mockReturnValueOnce(Effect.fail(denial));
+      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+      expect(
+        yield* cli
+          .listPullRequests({
+            cwd: "/w",
+            host: "github.com",
+            repository: "acme/web",
+            state: "open",
+            involvement: "all",
+            viewer: "viewer",
+            limit: 10,
+          })
+          .pipe(Effect.flip),
+      ).toBe(denial);
+      expect(mockedExecute).toHaveBeenCalledTimes(1);
+      expect(mockedStackMemberships).toHaveBeenCalledTimes(1);
+    }),
+  );
+  it.effect(
+    "files fallback preserves its typed denial instead of relabeling it as the original HTTP refusal",
+    () =>
+      Effect.gen(function* () {
+        const denial = new EnvironmentAuthorizationError({
+          requiredScope: AuthOrchestrationReadScope,
+          message: "fixture denial",
+        });
+        mockedExecute.mockReturnValueOnce(Effect.fail(diffRefused));
+        mockedExecute.mockReturnValueOnce(Effect.fail(denial));
+        const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+        expect(
+          yield* cli
+            .getPullRequestDiff({
+              cwd: "/w",
+              host: "github.com",
+              repository: "acme/web",
+              number: 7,
+            })
+            .pipe(Effect.flip),
+        ).toBe(denial);
+        expect(mockedExecute).toHaveBeenCalledTimes(2);
+      }),
   );
 });

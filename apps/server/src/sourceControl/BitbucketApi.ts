@@ -671,13 +671,20 @@ export const make = Effect.gen(function* () {
   const apiUrl = (path: string) => `${config.baseUrl.replace(/\/+$/u, "")}${path}`;
 
   // Read on every request so credentials saved in settings apply without a restart.
-  const currentCredential = serverSettings.getSettings.pipe(
+  const currentCredential = beforeCurrentWorkspaceEffect.pipe(
+    Effect.andThen(serverSettings.getSettings),
+    Effect.tap(() => beforeCurrentWorkspaceEffect),
     Effect.map((settings) => resolveCredential(settings.bitbucket, config)),
     Effect.catch((error) =>
-      // No cause: a settings decode error can quote a hand-edited token.
-      Effect.logWarning("failed to read Bitbucket credentials from settings", {
-        operation: error.operation,
-      }).pipe(Effect.as(resolveCredential(DEFAULT_SERVER_SETTINGS.bitbucket, config))),
+      error._tag === "EnvironmentAuthorizationError"
+        ? Effect.fail(error)
+        : // No cause: a settings decode error can quote a hand-edited token.
+          Effect.logWarning("failed to read Bitbucket credentials from settings", {
+            operation: error.operation,
+          }).pipe(
+            Effect.andThen(beforeCurrentWorkspaceEffect),
+            Effect.map(() => resolveCredential(DEFAULT_SERVER_SETTINGS.bitbucket, config)),
+          ),
     ),
   );
 

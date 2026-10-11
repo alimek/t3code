@@ -1,7 +1,11 @@
+import {
+  beforeCurrentWorkspaceEffect,
+  workspaceEffectAdmission,
+} from "../auth/workspaceReadAccess.ts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { removeAgentCredits } from "./mergeMessage.ts";
 import { KnownWorkflowRuns, makeChecksRevalidator } from "./gitHubConditionalChecks.ts";
 import { runGitHubStackAction, type GitHubStackActionError } from "./githubStackActions.ts";
-import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Clock from "effect/Clock";
 import * as Duration from "effect/Duration";
@@ -1126,7 +1130,9 @@ export const make = Effect.gen(function* () {
       const unavailable = () => new GitHubViewerLoginUnavailableError({ cwd: input.cwd });
       const host = input.host.toLowerCase();
       // A missing or signed-out credential keeps its own error, so the page can say which.
+      yield* beforeCurrentWorkspaceEffect;
       const { token, fingerprint: key } = yield* api.credential(host);
+      yield* beforeCurrentWorkspaceEffect;
       const credential = { host, token, credentialFingerprint: key };
       // A cold page may ask several times. Wait per credential and check again after the
       // first verification; cancellation releases the next waiter without losing its request.
@@ -1141,6 +1147,7 @@ export const make = Effect.gen(function* () {
           lock.gate.withPermit(
             Effect.gen(function* () {
               const now = yield* Clock.currentTimeMillis;
+              yield* beforeCurrentWorkspaceEffect;
               const cached = routingIdentities.get(key);
               if (cached !== undefined && now - cached.at < 10 * 60_000)
                 return { ...credential, ...cached.value };
@@ -1155,6 +1162,7 @@ export const make = Effect.gen(function* () {
                 Effect.mapError(unavailable),
               );
               const value = { accountId: String(identity.id), viewer: identity.login };
+              yield* beforeCurrentWorkspaceEffect;
               if (routingIdentities.size >= 128)
                 routingIdentities.delete(routingIdentities.keys().next().value!);
               routingIdentities.set(key, { at: now, value });
@@ -1199,15 +1207,16 @@ export const make = Effect.gen(function* () {
    */
   const nodeIds = new Map<string, string>();
 
-  const pullRequestNodeId = (input: {
+  const pullRequestNodeId = Effect.fn("GitHubPullRequestApi.pullRequestNodeId")(function* (input: {
     readonly cwd: string;
     readonly repository: string;
     readonly host: string;
     readonly number: number;
     readonly operation: string;
-  }): Effect.Effect<string, GitHubPullRequestApiError> => {
+  }): Effect.fn.Return<string, GitHubPullRequestApiError> {
     const { owner, name } = parseRepositorySelector(input.repository);
     const key = `${input.host} ${owner}/${name} ${input.number}`;
+    yield* beforeCurrentWorkspaceEffect;
     const held = nodeIds.get(key);
     if (held !== undefined) {
       // Put back at the end on every hit, so what falls out is the pull request nobody has looked
@@ -1215,9 +1224,9 @@ export const make = Effect.gen(function* () {
       // open review and make it pay a round trip per press.
       nodeIds.delete(key);
       nodeIds.set(key, held);
-      return Effect.succeed(held);
+      return held;
     }
-    return graphqlRead({
+    return yield* graphqlRead({
       cwd: input.cwd,
       host: input.host,
       operation: input.operation,
@@ -1236,7 +1245,7 @@ export const make = Effect.gen(function* () {
         }),
       ),
     );
-  };
+  });
 
   /**
    * Whether a client-given subject actually belongs to the pull request the request names. A
@@ -1306,7 +1315,11 @@ export const make = Effect.gen(function* () {
         ...(input.variables === undefined ? {} : { variables: input.variables }),
         ...(input.allowReserve === true ? { allowReserve: true } : {}),
       })
-      .pipe(Effect.flatMap((raw) => decodeWith(input.cwd, input.operation, input.decode, raw)));
+      .pipe(
+        Effect.tap(() => beforeCurrentWorkspaceEffect),
+        Effect.flatMap((raw) => decodeWith(input.cwd, input.operation, input.decode, raw)),
+        (read) => beforeCurrentWorkspaceEffect.pipe(Effect.andThen(read)),
+      );
 
   /** A REST read whose JSON answer is decoded the same way. */
   const restRead = <A>(input: {
@@ -1316,13 +1329,13 @@ export const make = Effect.gen(function* () {
     readonly path: string;
     readonly decode: (raw: string) => Result.Result<A, unknown>;
   }): Effect.Effect<A, GitHubPullRequestApiError> =>
-    api
-      .rest({ host: input.host, operation: input.operation, path: input.path })
-      .pipe(
-        Effect.flatMap((response) =>
-          decodeWith(input.cwd, input.operation, input.decode, response.body),
-        ),
-      );
+    api.rest({ host: input.host, operation: input.operation, path: input.path }).pipe(
+      Effect.tap(() => beforeCurrentWorkspaceEffect),
+      Effect.flatMap((response) =>
+        decodeWith(input.cwd, input.operation, input.decode, response.body),
+      ),
+      (read) => beforeCurrentWorkspaceEffect.pipe(Effect.andThen(read)),
+    );
 
   /**
    * One page of the patch, read from the files API. GitHub refuses a whole diff past 300 changed
@@ -1746,73 +1759,82 @@ export const make = Effect.gen(function* () {
    * `gh pr view` apiece is most of what it spends. Whatever the batch cannot answer — a selector
    * GraphQL cannot address, a pull request GitHub returned nothing for — is read on its own.
    */
-  const summaryResolver = RequestResolver.makeGrouped<PullRequestSummaryRead, string>({
-    key: ({ request, context }) =>
-      JSON.stringify([
+  // Pending keys isolate external entries without interning and retaining every caller.
+  const summaryResolver = RequestResolver.makeWith<PullRequestSummaryRead>({
+    delay: Effect.yieldNow,
+    collectWhile: () => true,
+    batchKey: (entry) => {
+      const { request, context } = entry;
+      const admission = Context.getOrElse(context, workspaceEffectAdmission, () => undefined);
+      // External requests keep their own current resource and action, even on one account.
+      if (admission !== undefined && admission.authority !== trustedReadAuthority) return entry;
+      return JSON.stringify([
         request.host.toLowerCase(),
         Context.getOrElse(context, GitHubApi.PinnedGitHubCredential, () => null)
           ?.credentialFingerprint ?? null,
         Context.getOrElse(context, SourceControlRateLimit.CredentialScope, () => ""),
-      ]),
-    resolver: (entries) => {
+      ]);
+    },
+    runAll: (entries) => {
       const [first] = entries;
-      const batchable = entries.filter(
-        (entry) => buildPullRequestSummariesGraphQlQuery([entry.request]) !== null,
-      );
-      // Stack membership rides along where GitHub serves stacks, so the background sync can skip
-      // the REST stack read for pull requests that are in none.
-      const document = buildPullRequestSummariesGraphQlQuery(
-        batchable.map((entry) => entry.request),
-        first.request.host === "github.com",
-      );
-      const batched =
-        document === null
-          ? Effect.succeed(new Map<number, GitHubPullRequestSummary>())
-          : graphqlRead({
-              cwd: first.request.cwd,
-              host: first.request.host,
-              operation: "getPullRequestSummary",
-              ...document,
-              decode: decodePullRequestSummariesJson,
+      return Effect.gen(function* () {
+        yield* beforeCurrentWorkspaceEffect;
+        const batchable = entries.filter(
+          (entry) => buildPullRequestSummariesGraphQlQuery([entry.request]) !== null,
+        );
+        // Stack membership rides along where GitHub serves stacks, so the background sync can skip
+        // the REST stack read for pull requests that are in none.
+        const document = buildPullRequestSummariesGraphQlQuery(
+          batchable.map((entry) => entry.request),
+          first.request.host === "github.com",
+        );
+        const batched =
+          document === null
+            ? Effect.succeed(new Map<number, GitHubPullRequestSummary>())
+            : graphqlRead({
+                cwd: first.request.cwd,
+                host: first.request.host,
+                operation: "getPullRequestSummary",
+                ...document,
+                decode: decodePullRequestSummariesJson,
+              });
+        return yield* batched.pipe(
+          // A GraphQL error anywhere fails the whole document — one repository gone or out of
+          // reach — so a batch that could not be read leaves every entry to its own read. A paused
+          // budget is the exception: reading one at a time would only spend what is being saved.
+          Effect.catch((error) =>
+            error._tag === "SourceControlRateLimitPausedError" ||
+            error._tag === "EnvironmentAuthorizationError"
+              ? Effect.fail(error)
+              : Effect.logDebug("batched pull request summary read failed", { error }).pipe(
+                  Effect.as(new Map<number, GitHubPullRequestSummary>()),
+                ),
+          ),
+          Effect.flatMap((summaries) => {
+            const unanswered = entries.filter((entry) => {
+              const summary = summaries.get(batchable.indexOf(entry));
+              if (summary === undefined) return true;
+              entry.completeUnsafe(Exit.succeed(summary));
+              return false;
             });
-      return batched.pipe(
-        // A GraphQL error anywhere fails the whole document — one repository gone or out of
-        // reach — so a batch that could not be read leaves every entry to its own read. A paused
-        // budget is the exception: reading one at a time would only spend what is being saved.
-        Effect.catchCauseIf(
-          (cause) =>
-            !Cause.hasInterruptsOnly(cause) &&
-            !Cause.findErrorOption(cause).pipe(
-              Option.exists((error) => error._tag === "SourceControlRateLimitPausedError"),
-            ),
-          (cause) =>
-            Effect.logDebug("batched pull request summary read failed", { cause }).pipe(
-              Effect.as(new Map<number, GitHubPullRequestSummary>()),
-            ),
-        ),
-        Effect.flatMap((summaries) => {
-          const unanswered = entries.filter((entry) => {
-            const summary = summaries.get(batchable.indexOf(entry));
-            if (summary === undefined) return true;
-            entry.completeUnsafe(Exit.succeed(summary));
-            return false;
-          });
-          return Effect.forEach(
-            unanswered,
-            (entry) =>
-              viewPullRequestSummary(entry.request).pipe(
-                Effect.exit,
-                Effect.map((exit) => entry.completeUnsafe(exit)),
-              ),
-            { concurrency: STAT_REQUEST_CONCURRENCY, discard: true },
-          );
-        }),
-        Effect.catchCause((cause) =>
-          Effect.sync(() => {
-            for (const entry of entries) entry.completeUnsafe(Exit.failCause(cause));
+            return Effect.forEach(
+              unanswered,
+              (entry) =>
+                viewPullRequestSummary(entry.request).pipe(
+                  Effect.provideContext(entry.context),
+                  Effect.exit,
+                  Effect.map((exit) => entry.completeUnsafe(exit)),
+                ),
+              { concurrency: STAT_REQUEST_CONCURRENCY, discard: true },
+            );
           }),
-        ),
-      );
+          Effect.catchCause((cause) =>
+            Effect.sync(() => {
+              for (const entry of entries) entry.completeUnsafe(Exit.failCause(cause));
+            }),
+          ),
+        );
+      }).pipe(Effect.provideContext(first.context));
     },
   }).pipe(
     RequestResolver.setDelay(SUMMARY_BATCH_WINDOW),
@@ -1823,50 +1845,57 @@ export const make = Effect.gen(function* () {
 
   // Every watched pull request on a host in one read per pass. A pull request the batch has no
   // answer for gets null, and its watch reads it in full; a failed batch fails every entry.
-  const watchFingerprintResolver = RequestResolver.makeGrouped<
-    PullRequestWatchFingerprintRead,
-    string
-  >({
-    key: ({ request, context }) =>
-      JSON.stringify([
+  const watchFingerprintResolver = RequestResolver.makeWith<PullRequestWatchFingerprintRead>({
+    delay: Effect.yieldNow,
+    collectWhile: () => true,
+    batchKey: (entry) => {
+      const { request, context } = entry;
+      const admission = Context.getOrElse(context, workspaceEffectAdmission, () => undefined);
+      // External requests keep their own current resource and action, even on one account.
+      if (admission !== undefined && admission.authority !== trustedReadAuthority) return entry;
+      return JSON.stringify([
         request.host.toLowerCase(),
         Context.getOrElse(context, GitHubApi.PinnedGitHubCredential, () => null)
           ?.credentialFingerprint ?? null,
         Context.getOrElse(context, SourceControlRateLimit.CredentialScope, () => ""),
-      ]),
-    resolver: (entries) => {
+      ]);
+    },
+    runAll: (entries) => {
       const [first] = entries;
-      const batchable = entries.filter(
-        (entry) => buildPullRequestWatchFingerprintsGraphQlQuery([entry.request]) !== null,
-      );
-      const document = buildPullRequestWatchFingerprintsGraphQlQuery(
-        batchable.map((entry) => entry.request),
-      );
-      const read =
-        document === null
-          ? Effect.succeed(new Map<number, GitHubPullRequestWatchFingerprint>())
-          : graphqlRead({
-              cwd: first.request.cwd,
-              host: first.request.host,
-              operation: "getPullRequestWatchFingerprint",
-              ...document,
-              decode: decodePullRequestWatchFingerprintsJson,
-            });
-      return read.pipe(
-        Effect.map((fingerprints) => {
-          for (const entry of entries) {
-            const index = batchable.indexOf(entry);
-            entry.completeUnsafe(
-              Exit.succeed(index === -1 ? null : (fingerprints.get(index) ?? null)),
-            );
-          }
-        }),
-        Effect.catchCause((cause) =>
-          Effect.sync(() => {
-            for (const entry of entries) entry.completeUnsafe(Exit.failCause(cause));
+      return Effect.gen(function* () {
+        yield* beforeCurrentWorkspaceEffect;
+        const batchable = entries.filter(
+          (entry) => buildPullRequestWatchFingerprintsGraphQlQuery([entry.request]) !== null,
+        );
+        const document = buildPullRequestWatchFingerprintsGraphQlQuery(
+          batchable.map((entry) => entry.request),
+        );
+        const read =
+          document === null
+            ? Effect.succeed(new Map<number, GitHubPullRequestWatchFingerprint>())
+            : graphqlRead({
+                cwd: first.request.cwd,
+                host: first.request.host,
+                operation: "getPullRequestWatchFingerprint",
+                ...document,
+                decode: decodePullRequestWatchFingerprintsJson,
+              });
+        return yield* read.pipe(
+          Effect.map((fingerprints) => {
+            for (const entry of entries) {
+              const index = batchable.indexOf(entry);
+              entry.completeUnsafe(
+                Exit.succeed(index === -1 ? null : (fingerprints.get(index) ?? null)),
+              );
+            }
           }),
-        ),
-      );
+          Effect.catchCause((cause) =>
+            Effect.sync(() => {
+              for (const entry of entries) entry.completeUnsafe(Exit.failCause(cause));
+            }),
+          ),
+        );
+      }).pipe(Effect.provideContext(first.context));
     },
   }).pipe(
     RequestResolver.setDelay(SUMMARY_BATCH_WINDOW),
@@ -2022,12 +2051,14 @@ export const make = Effect.gen(function* () {
                   }),
                 ),
                 // Optional badges must not take down a listing that already read successfully.
-                Effect.catch(() =>
-                  Effect.logWarning("Pull request stack membership enrichment failed", {
-                    operation: "listPullRequestStackMemberships",
-                    host: input.host,
-                    rows: chunk.length,
-                  }).pipe(Effect.as(chunk)),
+                Effect.catch((error) =>
+                  error._tag === "EnvironmentAuthorizationError"
+                    ? Effect.fail(error)
+                    : Effect.logWarning("Pull request stack membership enrichment failed", {
+                        operation: "listPullRequestStackMemberships",
+                        host: input.host,
+                        rows: chunk.length,
+                      }).pipe(Effect.as(chunk)),
                 ),
               );
             },
@@ -2248,7 +2279,12 @@ export const make = Effect.gen(function* () {
           // the page. Narrowed to a request GitHub answered and refused: a missing credential or
           // a rate limit fails the same way for every request.
           Effect.catchTags({
-            GitHubApiResponseError: (error) => filesPage(1).pipe(Effect.mapError(() => error)),
+            GitHubApiResponseError: (error) =>
+              filesPage(1).pipe(
+                Effect.mapError((fallback) =>
+                  fallback._tag === "EnvironmentAuthorizationError" ? fallback : error,
+                ),
+              ),
           }),
         );
     },

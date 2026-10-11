@@ -1,3 +1,4 @@
+import { recoverWorkspaceError } from "../auth/workspaceReadAccess.ts";
 import * as Effect from "effect/Effect";
 import type {
   PullRequestActor,
@@ -234,6 +235,7 @@ export const make = Effect.gen(function* () {
                 .pipe(
                   Effect.matchEffect({
                     onFailure: (error) =>
+                      error._tag === "EnvironmentAuthorizationError" ||
                       error._tag === "GitHubApiRateLimitError" ||
                       error._tag === "SourceControlRateLimitPausedError"
                         ? Effect.fail(error)
@@ -303,7 +305,7 @@ export const make = Effect.gen(function* () {
               // A listing without faces is still a listing, so a failed lookup falls back to
               // the initials rather than taking the rows down with it.
               .pipe(
-                Effect.orElseSucceed(() => new Map<string, string>()),
+                recoverWorkspaceError(() => new Map<string, string>()),
                 Effect.map((avatarsByLogin) => ({
                   ...page,
                   items: page.items.map((item) => ({
@@ -419,7 +421,7 @@ export const make = Effect.gen(function* () {
           // Line comments live on review threads, which `gh pr view --json` cannot reach. A
           // GraphQL hiccup degrades to a truncated conversation rather than blanking activity.
           cli.listReviewThreadComments(input).pipe(
-            Effect.orElseSucceed(() => ({
+            recoverWorkspaceError(() => ({
               comments: [],
               dismissalsByReviewId: new Map<string, string>(),
               reactions: [],
@@ -536,11 +538,12 @@ export const make = Effect.gen(function* () {
               pullRequest.state === "open" && pullRequest.comparison?.viewerCanUpdate === true,
           }),
         ),
-        Effect.catchIf(
-          (error) =>
-            error._tag !== "GitHubApiRateLimitError" &&
-            error._tag !== "SourceControlRateLimitPausedError",
-          () => lightAccess,
+        Effect.catch((error) =>
+          error._tag === "EnvironmentAuthorizationError" ||
+          error._tag === "GitHubApiRateLimitError" ||
+          error._tag === "SourceControlRateLimitPausedError"
+            ? Effect.fail(error)
+            : lightAccess,
         ),
         Effect.mapError(fail("getViewerPermissions")),
       );

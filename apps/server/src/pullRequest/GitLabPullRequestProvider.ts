@@ -1,3 +1,4 @@
+import { recoverWorkspaceError } from "../auth/workspaceReadAccess.ts";
 import * as Effect from "effect/Effect";
 import type {
   PullRequestCapabilities,
@@ -184,15 +185,15 @@ export const make = Effect.gen(function* () {
         [
           cli
             .listNotes(input)
-            .pipe(Effect.orElseSucceed(() => ({ comments: [], truncated: true }))),
-          cli.listCommits(input).pipe(Effect.orElseSucceed(() => [])),
+            .pipe(recoverWorkspaceError(() => ({ comments: [], truncated: true }))),
+          cli.listCommits(input).pipe(recoverWorkspaceError(() => [])),
           cli
             .listDiscussions(input)
-            .pipe(Effect.orElseSucceed(() => ({ threads: [], truncated: true }))),
+            .pipe(recoverWorkspaceError(() => ({ threads: [], truncated: true }))),
           // The notes endpoint carries no award of any kind, so they are read alongside it. A
           // failed read costs the conversation its reactions rather than its words.
           cli.listReactions(input).pipe(
-            Effect.orElseSucceed(() => ({
+            recoverWorkspaceError(() => ({
               reactions: [] as ReadonlyArray<PullRequestReaction>,
               reactionsByNoteId: new Map<string, ReadonlyArray<PullRequestReaction>>(),
             })),

@@ -1,4 +1,5 @@
 import * as SqlClient from "effect/sql/SqlClient";
+import * as WorkspaceAccess from "../auth/workspaceReadAccess.ts";
 import * as FileSystem from "effect/FileSystem";
 import * as Context from "effect/Context";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -608,6 +609,7 @@ function fakeProvider(
 
 function makeService(input: {
   readonly settings?: ServerSettings;
+  readonly realPath?: FileSystem.FileSystem["realPath"];
   readonly setup?: (
     sql: SqlClient.SqlClient,
   ) => Effect.Effect<void, import("effect/sql/SqlError").SqlError>;
@@ -655,7 +657,7 @@ function makeService(input: {
         SqlitePersistence.layerMemory,
         Layer.succeed(
           FileSystem.FileSystem,
-          FileSystem.makeNoop({ realPath: (path) => Effect.succeed(path) }),
+          FileSystem.makeNoop({ realPath: input.realPath ?? ((path) => Effect.succeed(path)) }),
         ),
         // The real store over a database of its own, so the environment-kept marks are exercised
         // through the SQL that holds them rather than through a stand-in that agrees with itself.
@@ -7715,7 +7717,7 @@ it.effect.each([
     }),
 );
 
-const assertDenied = <A, E, R>(operation: Effect.Effect<A, E, R>) =>
+const assertDenied = <E, R>(operation: Effect.Effect<unknown, E, R>) =>
   operation.pipe(
     Effect.result,
     Effect.map((result) => {
@@ -8183,5 +8185,236 @@ it.effect(
       });
       yield* Fiber.join(received);
       yield* assertDenied(service.subscribeStateChanges(authority));
+    }),
+);
+
+it.effect.each(
+  (["list", "listStats"] as const).flatMap((method) =>
+    (["grant", "root", "membership", "action"] as const).map((cut) => ({ method, cut })),
+  ),
+)(
+  "$method retains B participant admission after the selected A adapter waits ($cut)",
+  ({ method, cut }) =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let database!: SqlClient.SqlClient;
+      let resourceGrant: AuthResourceGrant = {
+        ...grantA,
+        projects: { mode: "explicit", ids: [projectA, projectB] },
+      };
+      let scopes: ReadonlyArray<import("@t3tools/contracts").AuthEnvironmentScope> = [
+        AuthOrchestrationReadScope,
+      ];
+      const authority: ThreadReadAuthority = {
+        current: Effect.sync(() => ({ resourceGrant, scopes })),
+      };
+      const effects: string[] = [];
+      const finalEffect = Deferred.succeed(started, undefined).pipe(
+        Effect.andThen(Deferred.await(release)),
+        Effect.andThen(WorkspaceAccess.beforeCurrentWorkspaceEffect),
+      );
+      const service = yield* makeService({
+        projects: [
+          project({ id: projectA, title: "a", workspaceRoot: "/a", repository: "acme/a" }),
+          project({ id: projectB, title: "b", workspaceRoot: "/b", repository: "acme/b" }),
+        ],
+        setup: (sql) =>
+          Effect.sync(() => {
+            database = sql;
+          }),
+        providers: [
+          fakeProvider("github", {
+            getViewer: () => Effect.succeed("viewer"),
+            listChangeRequestsAcross: ({ repositories }) =>
+              finalEffect.pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    effects.push(...repositories);
+                    return { items: [], truncated: false, continues: false };
+                  }),
+                ),
+              ),
+            listChangeRequestStats: ({ changeRequests }) =>
+              finalEffect.pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    effects.push(...changeRequests.map((ref) => ref.repository));
+                    return [];
+                  }),
+                ),
+              ),
+            listChangeRequests: () =>
+              Effect.sync(() => {
+                effects.push("fallback");
+                return { items: [], truncated: false, continues: false };
+              }),
+          }),
+        ],
+      });
+      const read =
+        method === "list"
+          ? service.list(authority, { state: "open" }).pipe(Effect.asVoid)
+          : service
+              .listStats(authority, {
+                refs: [
+                  { projectId: projectA, repository: "acme/a", host: "github.com", number: 1 },
+                  { projectId: projectB, repository: "acme/b", host: "github.com", number: 2 },
+                ],
+              })
+              .pipe(Effect.asVoid);
+      const pending = yield* assertDenied(read).pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(started);
+      if (cut === "root")
+        yield* database`UPDATE projection_projects SET workspace_root = '/moved' WHERE project_id = ${projectB}`;
+      else if (cut === "membership")
+        yield* database`UPDATE projection_projects SET deleted_at = '2026-10-11T00:00:00Z' WHERE project_id = ${projectB}`;
+      else if (cut === "grant") resourceGrant = grantA;
+      else scopes = [];
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(pending);
+      assert.deepEqual(effects, []);
+    }),
+);
+
+it.effect(
+  "external stale diff refresh keeps the invoking authority and denies a cut before its adapter effect",
+  () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const drained = yield* Deferred.make<void>();
+      let grant = grantA,
+        reads = 0,
+        effects = 0;
+      const authority: ThreadReadAuthority = {
+        current: Effect.sync(() => ({
+          resourceGrant: grant,
+          scopes: [AuthOrchestrationReadScope],
+        })),
+      };
+      const service = yield* makeService({
+        projects: [
+          project({ id: projectA, title: "a", workspaceRoot: "/a", repository: "acme/a" }),
+        ],
+        readCache: { get: (_key, read) => read, invalidate: () => Effect.void },
+        providers: [
+          fakeProvider("github", {
+            getDiff: () =>
+              Effect.gen(function* () {
+                const admission = yield* WorkspaceAccess.workspaceEffectAdmission;
+                assert.strictEqual(admission?.authority, authority);
+                assert.strictEqual(admission?.scope, AuthOrchestrationReadScope);
+                if (++reads === 2) {
+                  yield* Deferred.succeed(started, undefined);
+                  yield* Deferred.await(release);
+                }
+                yield* WorkspaceAccess.beforeCurrentWorkspaceEffect;
+                effects++;
+                return { patch: "old patch", truncated: false, nextCursor: null };
+              }).pipe(
+                Effect.onExit(() =>
+                  reads === 2 ? Deferred.succeed(drained, undefined) : Effect.void,
+                ),
+              ),
+          }),
+        ],
+      });
+      const input = { projectId: projectA, host: "github.com", repository: "acme/a", number: 1 };
+      assert.equal((yield* service.diff(authority, input)).patch, "old patch");
+      yield* TestClock.adjust("61 seconds");
+      assert.equal((yield* service.diff(authority, input)).patch, "old patch");
+      yield* Deferred.await(started);
+      grant = grantNone;
+      yield* Deferred.succeed(release, undefined);
+      yield* Deferred.await(drained);
+      assert.equal(reads, 2);
+      assert.equal(effects, 1);
+    }),
+);
+
+it.effect.each(["list", "listStats"] as const)(
+  "%s denies B owner cut during the selected A adapter's last canonical await",
+  (method) =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const enter = yield* Deferred.make<void>();
+      const canonical = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let database!: SqlClient.SqlClient;
+      let armed = false,
+        checkedB = false,
+        canonicalCalls = 0,
+        held = false,
+        effects = 0;
+      const grant: AuthResourceGrant = {
+        ...grantA,
+        projects: { mode: "explicit", ids: [projectA, projectB] },
+      };
+      const effect = Deferred.succeed(started, undefined).pipe(
+        Effect.andThen(Deferred.await(enter)),
+        Effect.andThen(WorkspaceAccess.beforeCurrentWorkspaceEffect),
+        Effect.tap(() =>
+          Effect.sync(() => {
+            effects++;
+          }),
+        ),
+      );
+      const service = yield* makeService({
+        projects: [
+          project({ id: projectA, title: "a", workspaceRoot: "/a", repository: "acme/a" }),
+          project({ id: projectB, title: "b", workspaceRoot: "/b", repository: "acme/b" }),
+        ],
+        setup: (sql) =>
+          Effect.sync(() => {
+            database = sql;
+          }),
+        realPath: (path) =>
+          Effect.suspend(() => {
+            // Each canonical admission reads the requested path, then the two registered roots.
+            const requested = armed && canonicalCalls++ % 3 === 0;
+            if (requested && path === "/b") checkedB = true;
+            if (requested && checkedB && path === "/a" && !held) {
+              held = true;
+              return Deferred.succeed(canonical, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.as(path),
+              );
+            }
+            return Effect.succeed(path);
+          }),
+        providers: [
+          fakeProvider("github", {
+            listChangeRequestsAcross: () =>
+              effect.pipe(Effect.as({ items: [], truncated: false, continues: false })),
+            listChangeRequestStats: () => effect.pipe(Effect.as([])),
+            listChangeRequests: () =>
+              Effect.sync(() => {
+                effects++;
+                return { items: [], truncated: false, continues: false };
+              }),
+          }),
+        ],
+      });
+      const read =
+        method === "list"
+          ? service.list(testAuthority(grant), { state: "open" }).pipe(Effect.asVoid)
+          : service
+              .listStats(testAuthority(grant), {
+                refs: [
+                  { projectId: projectA, repository: "acme/a", host: "github.com", number: 1 },
+                  { projectId: projectB, repository: "acme/b", host: "github.com", number: 2 },
+                ],
+              })
+              .pipe(Effect.asVoid);
+      const pending = yield* assertDenied(read).pipe(Effect.forkChild({ startImmediately: true }));
+      yield* Deferred.await(started);
+      armed = true;
+      yield* Deferred.succeed(enter, undefined);
+      yield* Deferred.await(canonical);
+      yield* database`UPDATE projection_projects SET workspace_root = '/moved' WHERE project_id = ${projectB}`;
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(pending);
+      assert.equal(effects, 0);
     }),
 );

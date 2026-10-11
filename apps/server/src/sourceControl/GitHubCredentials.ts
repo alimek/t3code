@@ -1,3 +1,7 @@
+import {
+  beforeCurrentWorkspaceEffect,
+  recoverWorkspaceError,
+} from "../auth/workspaceReadAccess.ts";
 import type { EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
@@ -94,7 +98,7 @@ export class GitHubCredentials extends Context.Service<
       host: string,
     ) => Effect.Effect<GitHubCredential, GitHubCredentialUnavailableError>;
     /** Drops the held token after GitHub refused it, so the next read asks its source again. */
-    readonly invalidate: (host: string) => Effect.Effect<void>;
+    readonly invalidate: (host: string) => Effect.Effect<void, EnvironmentAuthorizationError>;
   }
 >()("t3/sourceControl/GitHubCredentials") {}
 
@@ -186,16 +190,20 @@ export const make = Effect.gen(function* () {
 
   /** The Settings choice for a host; unreadable settings fall back to gh's own choice. */
   const hostChoice = (host: string) =>
-    serverSettings.getSettings.pipe(
+    beforeCurrentWorkspaceEffect.pipe(
+      Effect.andThen(serverSettings.getSettings),
+      Effect.tap(() => beforeCurrentWorkspaceEffect),
       Effect.map((settings) => settings.github.hosts[host]),
-      Effect.orElseSucceed(() => undefined),
+      recoverWorkspaceError(() => undefined),
     );
 
   /** A token saved in Settings for the host, read fresh so a saved or removed one applies at once. */
   const savedToken = (host: string) =>
-    serverSettings.getSettings.pipe(
+    beforeCurrentWorkspaceEffect.pipe(
+      Effect.andThen(serverSettings.getSettings),
+      Effect.tap(() => beforeCurrentWorkspaceEffect),
       Effect.map((settings) => settings.github.tokens[host]?.trim() || null),
-      Effect.orElseSucceed(() => null),
+      recoverWorkspaceError(() => null),
     );
 
   /** Cache key: the host plus its pinned account, so a changed pin misses the cache. */
@@ -203,6 +211,7 @@ export const make = Effect.gen(function* () {
     account === undefined ? host : `${host}\u0000${account}`;
 
   const lookup = Effect.fn("GitHubCredentials.lookup")(function* (key: string) {
+    yield* beforeCurrentWorkspaceEffect;
     const [host = key, choice] = key.split("\u0000");
     // An environment token wins over a pinned account, exactly as it does in gh.
     const fromEnv = environmentToken(host, environment);
@@ -216,11 +225,14 @@ export const make = Effect.gen(function* () {
             choice === undefined ? Effect.fail(error) : fromGh(host, undefined),
         }),
       ));
+    yield* beforeCurrentWorkspaceEffect;
+    const fingerprint = yield* fingerprintOf(host, token);
+    yield* beforeCurrentWorkspaceEffect;
     return {
       host,
       token: Redacted.make(token),
       source: fromEnv !== null ? "env" : "gh",
-      fingerprint: yield* fingerprintOf(host, token),
+      fingerprint,
     } satisfies GitHubCredential;
   });
 
@@ -252,19 +264,28 @@ export const make = Effect.gen(function* () {
       // environment and gh. It is read from the secret store each time, so it needs no cache.
       const saved = yield* savedToken(host);
       if (saved !== null) {
+        const fingerprint = yield* fingerprintOf(host, saved);
+        yield* beforeCurrentWorkspaceEffect;
         return {
           host,
           token: Redacted.make(saved),
           source: "settings",
-          fingerprint: yield* fingerprintOf(host, saved),
+          fingerprint,
         } satisfies GitHubCredential;
       }
-      return yield* Cache.get(cache, cacheKey(host, choice?.account));
+      yield* beforeCurrentWorkspaceEffect;
+      return yield* Cache.get(cache, cacheKey(host, choice?.account)).pipe(
+        Effect.tap(() => beforeCurrentWorkspaceEffect),
+      );
     }),
     invalidate: (rawHost) => {
       const host = normalizeHost(rawHost);
       return hostChoice(host).pipe(
-        Effect.flatMap((choice) => Cache.invalidate(cache, cacheKey(host, choice?.account))),
+        Effect.flatMap((choice) =>
+          beforeCurrentWorkspaceEffect.pipe(
+            Effect.andThen(Cache.invalidate(cache, cacheKey(host, choice?.account))),
+          ),
+        ),
       );
     },
   });
