@@ -1,6 +1,7 @@
 import {
   authorizeCommand,
   authorizeCommandAdmission,
+  receiptForMutationAuthority,
   type CommandAdmission,
   type MutationAuthority,
 } from "../auth/CommandAuthorization.ts";
@@ -10471,7 +10472,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           );
 
           if (Option.isSome(existingReceipt)) {
-            const receipt = existingReceipt.value;
+            const receipt = yield* receiptForMutationAuthority(authority, existingReceipt.value);
             if (receipt.status === "rejected") {
               return yield* new OrchestratorCommandPreviouslyRejectedError({
                 commandId: command.commandId,

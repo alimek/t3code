@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import {
+  AuthAllResourceGrant,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   ChatAttachmentId,
@@ -331,6 +332,22 @@ const isAuthorizationError = Schema.is(EnvironmentAuthorizationError);
 const isDispatchError = Schema.is(Orchestrator.OrchestratorDispatchError);
 const isProjectionError = Schema.is(Orchestrator.OrchestratorProjectionError);
 const isSinkError = Schema.is(Sink.EventSinkWriteError);
+const hiddenSourceRejection = Effect.fnUntraced(function* () {
+  const f = yield* makeFixture;
+  const original = {
+    ...hiddenCommands["thread.merge_back"],
+    commandId: CommandId.make("rejected-hidden-source"),
+  };
+  yield* f.sql`UPDATE orchestration_v2_projection_threads SET payload_json = 'malformed B' WHERE thread_id = ${activeB}`;
+  yield* Effect.flip(f.orchestrator.dispatch(trustedMutationAuthority, original));
+  const rows = yield* f.sql<{
+    readonly error: string;
+  }>`SELECT error FROM orchestration_command_receipts WHERE command_id = ${original.commandId}`;
+  assert.lengthOf(rows, 1);
+  const diagnostic = rows[0]!.error;
+  assert.include(diagnostic, activeB);
+  return { ...f, original, diagnostic };
+});
 const denied = Effect.fnUntraced(function* <A, E>(action: Effect.Effect<A, E>) {
   let error: unknown = yield* Effect.flip(action.pipe(Effect.asVoid));
   for (let i = 0; i < 3; i++) {
@@ -344,6 +361,121 @@ const denied = Effect.fnUntraced(function* <A, E>(action: Effect.Effect<A, E>) {
   }
   assert.fail("Expected a resource authorization denial");
 });
+
+it.effect(
+  "historical rejected A receipts hide original B diagnostics from restricted callers",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* hiddenSourceRejection();
+      const replay = rename(f.original.commandId);
+      for (const result of [
+        yield* Effect.flip(f.orchestrator.dispatch(authority, replay)),
+        yield* Effect.flip(f.threads.dispatch(authority, replay)),
+      ]) {
+        assert.notInclude(result.message, activeB);
+        assert.notInclude(JSON.stringify(result), activeB);
+      }
+      const unrestricted: MutationAuthority = {
+        current: Effect.succeed({
+          scopes: [AuthOrchestrationOperateScope],
+          resourceGrant: AuthAllResourceGrant,
+        }),
+      };
+      for (const caller of [trustedMutationAuthority, unrestricted] as const) {
+        const error = yield* Effect.flip(f.orchestrator.dispatch(caller, replay));
+        assert.equal(error._tag, "OrchestratorCommandPreviouslyRejectedError");
+        assert.include(error.message, f.diagnostic);
+      }
+      const persisted = yield* f.sql<{
+        readonly error: string;
+      }>`SELECT error FROM orchestration_command_receipts WHERE command_id = ${replay.commandId}`;
+      assert.equal(persisted[0]!.error, f.diagnostic);
+      yield* f.threads.dispatch(authority, rename("permitted-after-rejected-replay"));
+      assert.equal((yield* f.projections.getThread(activeA)).title, "Allowed rename");
+      const ownCommand = rename("permitted-own-rejection");
+      const own = yield* f.sink.commitRejectedCommand(
+        { authority, command: ownCommand },
+        {
+          commandId: ownCommand.commandId,
+          threadId: activeA,
+          commandType: ownCommand.type,
+          rejectedAt: now,
+          error: "Own A rejection",
+        },
+      );
+      assert.equal(own.status, "rejected");
+      assert.equal(own.error, "Previously rejected.");
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("competing rejected receipts redact opaque detail at both shared EventSink returns", () =>
+  Effect.gen(function* () {
+    const f = yield* hiddenSourceRejection();
+    const thread = yield* f.projections.getThread(activeA);
+    for (const path of ["orchestrator", "commit", "reject"] as const) {
+      const command = rename(`competing-rejection-detail-${path}`);
+      const insert = vi.spyOn(f.receipts, "insertIfAbsent").mockImplementation(() =>
+        f.receipts
+          .upsert({
+            commandId: command.commandId,
+            threadId: activeA,
+            commandType: f.original.type,
+            acceptedAt: now,
+            resultSequence: 0,
+            status: "rejected",
+            error: f.diagnostic,
+          })
+          .pipe(Effect.as(false), Effect.orDie),
+      );
+      try {
+        if (path === "orchestrator") {
+          const error = yield* Effect.flip(f.orchestrator.dispatch(authority, command));
+          assert.equal(error._tag, "OrchestratorCommandPreviouslyRejectedError");
+          assert.notInclude(error.message, activeB);
+          assert.notInclude(JSON.stringify(error), activeB);
+        } else {
+          const admission = { authority, command };
+          const input = {
+            commandId: command.commandId,
+            threadId: activeA,
+            commandType: command.type,
+          };
+          const receipt =
+            path === "commit"
+              ? (yield* f.sink.commitCommand(admission, {
+                  ...input,
+                  acceptedAt: now,
+                  effects: [],
+                  events: [
+                    {
+                      id: EventId.make("rejected-competing-metadata"),
+                      type: "thread.metadata-updated",
+                      threadId: activeA,
+                      occurredAt: now,
+                      payload: { ...thread, title: "Must not commit" },
+                    },
+                  ],
+                })).receipt
+              : yield* f.sink.commitRejectedCommand(admission, {
+                  ...input,
+                  rejectedAt: now,
+                  error: "Own rejected command",
+                });
+          assert.equal(receipt.status, "rejected");
+          assert.equal(receipt.error, "Previously rejected.");
+          assert.notInclude(JSON.stringify(receipt), activeB);
+        }
+      } finally {
+        insert.mockRestore();
+      }
+      assert.equal((yield* f.projections.getThread(activeA)).title, thread.title);
+      const rows = yield* f.sql<{
+        readonly error: string;
+      }>`SELECT error FROM orchestration_command_receipts WHERE command_id = ${command.commandId}`;
+      assert.equal(rows[0]!.error, f.diagnostic);
+    }
+  }).pipe(Effect.provide(layerTest)),
+);
 const rename = (
   id: string,
   threadId = activeA,

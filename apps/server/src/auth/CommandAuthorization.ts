@@ -22,6 +22,7 @@ import {
   trustedReadAuthority,
 } from "./ResourceAuthorization.ts";
 import { deriveProviderThread } from "../orchestration-v2/IdAllocator.ts";
+import type { CommandReceiptV2 } from "../orchestration-v2/CommandReceiptStore.ts";
 import {
   parseThreadSegmentFromAttachmentId,
   PENDING_ATTACHMENT_THREAD_SEGMENT,
@@ -136,6 +137,18 @@ const currentMutationGrant = Effect.fnUntraced(function* (authority: MutationAut
     return yield* mutationDenied();
   return current.resourceGrant;
 });
+
+/** Rejected receipts do not retain original source participants; opaque diagnostics are not admission. */
+export const receiptForMutationAuthority = Effect.fnUntraced(
+  function* (authority: MutationAuthority, receipt: CommandReceiptV2) {
+    if (receipt.status !== "rejected") return receipt;
+    const grant = yield* currentMutationGrant(authority);
+    return grant !== undefined && (grant.projects.mode !== "all" || grant.providers.mode !== "all")
+      ? { ...receipt, error: "Previously rejected." }
+      : receipt;
+  },
+  Effect.mapError(() => mutationDenied()),
+);
 
 const authorizeProjects = Effect.fnUntraced(function* (
   sql: SqlClient.SqlClient,

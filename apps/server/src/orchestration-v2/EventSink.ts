@@ -2,6 +2,7 @@ import {
   authorizeCommandReceipt,
   trustedMutationAuthority,
   authorizeCommandAdmission,
+  receiptForMutationAuthority,
   type CommandAdmission,
 } from "../auth/CommandAuthorization.ts";
 import {
@@ -521,7 +522,7 @@ const layerBase: Layer.Layer<
       );
     });
 
-    const existingCommandResult = (commandId: CommandId) =>
+    const existingCommandResult = (admission: CommandAdmission, commandId: CommandId) =>
       Effect.gen(function* () {
         const existing = yield* commandReceipts.getByCommandId(commandId);
         if (Option.isNone(existing)) {
@@ -533,7 +534,11 @@ const layerBase: Layer.Layer<
           Stream.runCollect,
           Effect.map((events): ReadonlyArray<OrchestrationV2StoredEvent> => Array.from(events)),
         );
-        return { receipt: existing.value, storedEvents };
+        const receipt = yield* receiptForMutationAuthority(
+          admission === trustedMutationAuthority ? admission : admission.authority,
+          existing.value,
+        );
+        return { receipt, storedEvents };
       });
 
     const commitCommandEffect = Effect.fn("orchestrationV2.EventSink.commitCommand")(function* (
@@ -554,7 +559,7 @@ const layerBase: Layer.Layer<
           });
           if (!reserved) {
             yield* authorizeCommandAdmission(sql, admission, input.commandId, input);
-            const existing = yield* existingCommandResult(input.commandId);
+            const existing = yield* existingCommandResult(admission, input.commandId);
             return { ...existing, committed: false as const, cancelledEffectIds: [] };
           }
 
@@ -631,10 +636,16 @@ const layerBase: Layer.Layer<
           const inserted = yield* commandReceipts.insertIfAbsent(receipt);
           yield* authorizeCommandAdmission(sql, admission, input.commandId, input);
           if (inserted) {
-            return receipt;
+            return yield* receiptForMutationAuthority(
+              admission === trustedMutationAuthority ? admission : admission.authority,
+              receipt,
+            );
           }
           const existing = yield* commandReceipts.getByCommandId(input.commandId);
-          return Option.getOrElse(existing, () => receipt);
+          return yield* receiptForMutationAuthority(
+            admission === trustedMutationAuthority ? admission : admission.authority,
+            Option.getOrElse(existing, () => receipt),
+          );
         }),
       );
     });
