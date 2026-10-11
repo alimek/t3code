@@ -198,6 +198,7 @@ function makeHarness(options: HarnessOptions = {}) {
       }),
   );
   const layerLaunch = ThreadLaunch.layer.pipe(
+    Layer.provide(layerDatabase),
     Layer.provide(
       Layer.mergeAll(
         layerExternalServices,
@@ -2077,6 +2078,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     };
     const failed = yield* ThreadMessageIntake.launchThread(trustedMutationAuthority, input).pipe(
       Effect.provideService(ThreadLaunch.ThreadLaunchService, {
+        admit: launches.admit,
         launch: (_authority, request) =>
           launches.launch(trustedMutationAuthority, request).pipe(
             Effect.andThen(

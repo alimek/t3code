@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -59,7 +60,10 @@ describe("AttachmentClaims", () => {
         mimeType: "text/plain",
         sizeBytes: 1,
       }));
-      const claimed = yield* claimPendingAttachments({ threadId: "thread-many", attachments });
+      const claimed = yield* claimPendingAttachments(trustedMutationAuthority, {
+        threadId: "thread-many",
+        attachments,
+      });
       expect(claimed.attachments).toEqual(attachments);
       expect(claimed.claimedPaths).toEqual([]);
     }).pipe(Effect.provide(layerTest)),
@@ -80,7 +84,7 @@ describe("AttachmentClaims", () => {
         sizeBytes: 10 * 1024 * 1024,
       }));
       const result = yield* Effect.exit(
-        claimPendingAttachments({
+        claimPendingAttachments(trustedMutationAuthority, {
           threadId: "thread-image-budget",
           attachments: [pending, ...images],
         }),
@@ -101,7 +105,7 @@ describe("AttachmentClaims", () => {
       });
       const config = yield* ServerConfig.ServerConfig;
 
-      const claimed = yield* claimPendingAttachments({
+      const claimed = yield* claimPendingAttachments(trustedMutationAuthority, {
         threadId: "thread-claims-1",
         attachments: [pending],
       });
@@ -129,7 +133,7 @@ describe("AttachmentClaims", () => {
         mimeType: "image/png",
         sizeBytes: 4,
       };
-      const claimed = yield* claimPendingAttachments({
+      const claimed = yield* claimPendingAttachments(trustedMutationAuthority, {
         threadId: "thread-claims-2",
         attachments: [stored],
       });
@@ -148,7 +152,10 @@ describe("AttachmentClaims", () => {
         sizeBytes: 4,
       };
       const result = yield* Effect.exit(
-        claimPendingAttachments({ threadId: "thread-claims-3", attachments: [missing] }),
+        claimPendingAttachments(trustedMutationAuthority, {
+          threadId: "thread-claims-3",
+          attachments: [missing],
+        }),
       );
       expect(result._tag).toBe("Failure");
     }).pipe(Effect.provide(layerTest)),
@@ -170,7 +177,7 @@ describe("AttachmentClaims", () => {
       const config = yield* ServerConfig.ServerConfig;
 
       const result = yield* Effect.exit(
-        claimPendingAttachments({
+        claimPendingAttachments(trustedMutationAuthority, {
           threadId: "thread-claims-4",
           attachments: [good, mismatched],
         }),
@@ -199,7 +206,7 @@ describe("AttachmentClaims", () => {
       const config = yield* ServerConfig.ServerConfig;
 
       const result = yield* Effect.exit(
-        claimPendingAttachments({
+        claimPendingAttachments(trustedMutationAuthority, {
           threadId: "thread-claims-dupe",
           attachments: [pending, pending],
         }),
@@ -245,7 +252,7 @@ describe("AttachmentClaims", () => {
         },
       }) as FileSystem.FileSystem;
 
-      const claimFiber = yield* claimPendingAttachments({
+      const claimFiber = yield* claimPendingAttachments(trustedMutationAuthority, {
         threadId: "thread-claims-interrupt",
         attachments: [pending],
       }).pipe(Effect.provideService(FileSystem.FileSystem, gatedFileSystem), Effect.forkChild);
@@ -282,7 +289,7 @@ describe("AttachmentClaims", () => {
         bytes: new Uint8Array([9, 9]),
         mimeType: "image/png",
       });
-      const claimed = yield* claimPendingAttachments({
+      const claimed = yield* claimPendingAttachments(trustedMutationAuthority, {
         threadId: "thread-claims-5",
         attachments: [pending],
       });
@@ -305,7 +312,7 @@ describe("AttachmentClaims", () => {
         mimeType: "image/png",
         sizeBytes: 1,
       };
-      const claimed = yield* claimPendingAttachments({
+      const claimed = yield* claimPendingAttachments(trustedMutationAuthority, {
         threadId: "thread-claims-6",
         attachments: [bogus],
       });

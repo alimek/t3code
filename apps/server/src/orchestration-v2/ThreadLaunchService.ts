@@ -1,4 +1,13 @@
-import { trustedMutationAuthority, type MutationAuthority } from "../auth/CommandAuthorization.ts";
+import {
+  authorizeCommand,
+  authorizeCommandReceipt,
+  authorizeMutationTarget,
+  authorizeThreadMutation,
+  receiptForMutationAuthority,
+  trustedMutationAuthority,
+  type MutationAuthority,
+} from "../auth/CommandAuthorization.ts";
+import { requireRegisteredMutationPath } from "../auth/threadWorkspaceAccess.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
@@ -6,6 +15,7 @@ import * as TerminalManager from "../terminal/Manager.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
   CommandId,
+  EnvironmentAuthorizationError,
   type ChatAttachment,
   type MessageId,
   type ModelSelection,
@@ -30,6 +40,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as SqlClient from "effect/sql/SqlClient";
 import {
   buildTemporaryWorktreeBranchName,
   flattenTemporaryWorktreeBranchName,
@@ -46,7 +57,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as IdAllocator from "./IdAllocator.ts";
-import type * as Orchestrator from "./Orchestrator.ts";
+import * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "./ProviderFailure.ts";
 import { randomUuidV4 } from "./RandomUuid.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
@@ -96,6 +107,48 @@ export interface ThreadLaunchInput {
   };
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+}
+
+export function launchCreateCommand(input: ThreadLaunchInput, threadId: ThreadId) {
+  return {
+    type: "thread.create" as const,
+    commandId: input.commandId,
+    threadId,
+    projectId: input.projectId,
+    title: input.title,
+    modelSelection: input.modelSelection,
+    runtimeMode: input.runtimeMode,
+    interactionMode: input.interactionMode,
+    branch: input.workspaceStrategy.branch ?? null,
+    worktreePath:
+      input.workspaceStrategy.type === "existing_worktree"
+        ? input.workspaceStrategy.worktreePath
+        : null,
+    ...(input.importedNativeThread === undefined
+      ? {}
+      : { importedNativeThread: input.importedNativeThread }),
+    createdBy: input.createdBy,
+    creationSource: input.creationSource,
+  };
+}
+
+export function initialMessageCommand(
+  input: ThreadLaunchInput,
+  threadId: ThreadId,
+  message: ThreadLaunchInitialMessage & { readonly messageId: MessageId },
+  workspaceStrategy = input.workspaceStrategy,
+) {
+  return {
+    ...message,
+    type: "message.dispatch" as const,
+    commandId: CommandId.make(`${input.commandId}:initial-message`),
+    threadId,
+    ...(input.generateTitle === true ? { titleSeed: input.title } : {}),
+    modelSelection: input.modelSelection,
+    dispatchMode: { type: "defer_start" as const, workspaceStrategy },
+    createdBy: input.createdBy,
+    creationSource: input.creationSource,
+  };
 }
 
 /** What workspace preparation reads from a launch; a retry rebuilds it from the run. */
@@ -152,6 +205,10 @@ export class ThreadLaunchError extends Schema.TaggedError<ThreadLaunchError>()(
 export class ThreadLaunchService extends Context.Service<
   ThreadLaunchService,
   {
+    readonly admit: (
+      authority: MutationAuthority,
+      input: ThreadLaunchInput,
+    ) => Effect.Effect<ThreadLaunchInput & { readonly threadId: ThreadId }, ThreadLaunchError>;
     readonly launch: (
       authority: MutationAuthority,
       input: ThreadLaunchInput,
@@ -165,6 +222,8 @@ export class ThreadLaunchService extends Context.Service<
 >()("t3/orchestration-v2/ThreadLaunchService") {}
 
 const isThreadLaunchError = Schema.is(ThreadLaunchError);
+const isProjectionError = Schema.is(Orchestrator.OrchestratorProjectionError);
+const isAuthorizationError = Schema.is(EnvironmentAuthorizationError);
 
 function failureDetail(error: unknown): string {
   if (isThreadLaunchError(error)) {
@@ -176,6 +235,7 @@ function failureDetail(error: unknown): string {
 }
 
 const make = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
   const projects = yield* ProjectService.ProjectService;
   const setupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
   const cloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
@@ -196,17 +256,142 @@ const make = Effect.gen(function* () {
   const mapError =
     (input: PreparationInput, operation: ThreadLaunchError["operation"], threadId?: ThreadId) =>
     (cause: unknown) =>
-      new ThreadLaunchError({
-        operation,
-        commandId: input.commandId,
-        projectId: input.projectId,
-        ...(threadId === undefined ? {} : { threadId }),
-        cause,
-      });
+      isThreadLaunchError(cause)
+        ? cause
+        : new ThreadLaunchError({
+            operation,
+            commandId: input.commandId,
+            projectId: input.projectId,
+            ...(threadId === undefined ? {} : { threadId }),
+            cause,
+          });
 
-  const readReceipt = (input: ThreadLaunchInput, commandId: CommandId) =>
-    receipts
-      .getByCommandId(commandId)
+  /** Shared launch admission also runs before intake claims any pending files. */
+  const admitLaunch = Effect.fn("ThreadLaunchService.admitLaunch")(function* (
+    authority: MutationAuthority,
+    input: ThreadLaunchInput,
+  ) {
+    const messageCommandId = CommandId.make(`${input.commandId}:initial-message`);
+    const admittedReceipts = yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* authorizeMutationTarget(sql, authority, { projectId: input.projectId });
+        if (input.reuseExistingThread === true && input.threadId === undefined)
+          return yield* new ThreadLaunchError({
+            operation: "update-thread",
+            commandId: input.commandId,
+            projectId: input.projectId,
+            cause: "Reusing an existing thread requires a thread id.",
+          });
+        yield* authorizeCommandReceipt(sql, authority, input.commandId);
+        yield* authorizeCommandReceipt(sql, authority, messageCommandId);
+        const launchReceipt = yield* receipts.getByCommandId(input.commandId);
+        const messageReceipt = yield* receipts.getByCommandId(messageCommandId);
+        for (const receipt of [launchReceipt, messageReceipt]) {
+          if (Option.isSome(receipt) && receipt.value.status === "rejected") {
+            const safe = yield* receiptForMutationAuthority(authority, receipt.value);
+            return yield* mapError(
+              input,
+              safe.commandId === messageCommandId
+                ? "dispatch-message"
+                : input.reuseExistingThread === true
+                  ? "update-thread"
+                  : "create-thread",
+              input.threadId,
+            )(
+              new Orchestrator.OrchestratorCommandPreviouslyRejectedError({
+                commandId: safe.commandId,
+                commandType: safe.commandType,
+                detail: safe.error ?? "Previously rejected.",
+              }),
+            );
+          }
+        }
+        return { launchReceipt, messageReceipt };
+      }),
+    );
+    const { launchReceipt, messageReceipt } = admittedReceipts;
+    const recovered =
+      Option.isSome(launchReceipt) &&
+      launchReceipt.value.status === "accepted" &&
+      launchReceipt.value.commandType === "thread.create"
+        ? launchReceipt.value.threadId
+        : undefined;
+    const threadId =
+      input.threadId ?? recovered ?? (yield* ids.allocate.thread({ projectId: input.projectId }));
+    yield* authorizeMutationTarget(sql, authority, {
+      threadId,
+      projectId: input.projectId,
+      allowCreate: input.reuseExistingThread !== true,
+    });
+    for (const receipt of [launchReceipt, messageReceipt]) {
+      if (
+        Option.isSome(receipt) &&
+        !Orchestrator.canReplayCommandReceipt(receipt.value.threadId, threadId)
+      )
+        return yield* mapError(
+          input,
+          receipt.value.commandId === messageCommandId
+            ? "dispatch-message"
+            : input.reuseExistingThread === true
+              ? "update-thread"
+              : "create-thread",
+          threadId,
+        )(
+          new Orchestrator.OrchestratorCommandIdConflictError({
+            commandId: receipt.value.commandId,
+            commandType: receipt.value.commandType,
+            receiptThreadId: receipt.value.threadId,
+            commandThreadId: threadId,
+          }),
+        );
+    }
+    yield* authorizeCommand(sql, authority, launchCreateCommand(input, threadId));
+    const initialMessage =
+      input.initialMessage === undefined
+        ? undefined
+        : {
+            ...input.initialMessage,
+            messageId:
+              input.initialMessage.messageId ??
+              (yield* ids.allocate.message({ threadId, ordinal: 1 })),
+          };
+    if (initialMessage !== undefined) {
+      yield* authorizeCommand(
+        sql,
+        authority,
+        initialMessageCommand(input, threadId, initialMessage),
+        input.reuseExistingThread === true ? undefined : { threadId, projectId: input.projectId },
+      );
+    }
+    if (input.workspaceStrategy.type === "existing_worktree")
+      yield* requireRegisteredMutationPath(
+        sql,
+        authority,
+        {
+          threadId,
+          projectId: input.projectId,
+          allowCreate: input.reuseExistingThread !== true,
+        },
+        input.workspaceStrategy.worktreePath,
+      );
+    return { ...input, threadId, ...(initialMessage === undefined ? {} : { initialMessage }) };
+  });
+
+  const readReceipt = (
+    authority: MutationAuthority,
+    input: ThreadLaunchInput,
+    commandId: CommandId,
+  ) =>
+    sql
+      .withTransaction(
+        Effect.gen(function* () {
+          yield* authorizeCommandReceipt(sql, authority, commandId);
+          const receipt = yield* receipts.getByCommandId(commandId);
+          return Option.isSome(receipt)
+            ? Option.some(yield* receiptForMutationAuthority(authority, receipt.value))
+            : receipt;
+        }),
+      )
       .pipe(Effect.mapError(mapError(input, "read-receipt", input.threadId)));
 
   const validateReusableThread = Effect.fn("ThreadLaunchService.validateReusableThread")(function* (
@@ -687,6 +872,9 @@ const make = Effect.gen(function* () {
 
   const launch: ThreadLaunchService["Service"]["launch"] = Effect.fn("ThreadLaunchService.launch")(
     function* (authority, input) {
+      const admitted = yield* admitLaunch(authority, input).pipe(
+        Effect.mapError(mapError(input, "read-receipt")),
+      );
       yield* ProjectCloneTracker.rejectCommandsDuringClone(cloneTracker, {
         type: "thread.create",
         projectId: input.projectId,
@@ -707,7 +895,7 @@ const make = Effect.gen(function* () {
         )("Reusing an existing thread requires a thread id.");
       }
 
-      const launchReceipt = yield* readReceipt(input, input.commandId);
+      const launchReceipt = yield* readReceipt(authority, input, input.commandId);
       return yield* Effect.gen(function* () {
         // A retried launch has no client-supplied id to replay against, so
         // recover the thread id its accepted create was recorded under before
@@ -720,13 +908,11 @@ const make = Effect.gen(function* () {
           launchReceipt.value.commandType === "thread.create"
             ? launchReceipt.value
             : undefined;
-        const candidateThreadId =
-          input.threadId ??
-          reusableLaunchReceipt?.threadId ??
-          (yield* ids.allocate
-            .thread({ projectId: input.projectId })
-            .pipe(Effect.mapError(mapError(input, "create-thread"))));
+        const candidateThreadId = admitted.threadId;
 
+        yield* admitLaunch(authority, admitted).pipe(
+          Effect.mapError(mapError(input, "update-thread", candidateThreadId)),
+        );
         if (reusableLaunchReceipt !== undefined) {
           const shell = yield* threads
             .getThreadShell(candidateThreadId)
@@ -752,12 +938,17 @@ const make = Effect.gen(function* () {
         const workspaceStrategy: ThreadLaunchWorkspaceStrategy =
           input.workspaceStrategy.type === "root" && Option.isNone(launchReceipt)
             ? Option.match(
-                yield* managedFolders
-                  .folderForThread({
-                    projectId: input.projectId,
-                    threadId: candidateThreadId,
-                    text: input.initialMessage?.text ?? input.title,
-                  })
+                yield* sql
+                  .withTransaction(
+                    Effect.gen(function* () {
+                      yield* admitLaunch(authority, admitted);
+                      return yield* managedFolders.folderForThread({
+                        projectId: input.projectId,
+                        threadId: candidateThreadId,
+                        text: input.initialMessage?.text ?? input.title,
+                      });
+                    }),
+                  )
                   .pipe(Effect.mapError(mapError(input, "provision-worktree", candidateThreadId))),
                 {
                   onNone: () => input.workspaceStrategy,
@@ -777,21 +968,9 @@ const make = Effect.gen(function* () {
                 expectedEmpty: true,
               })
             : threads.dispatch(authority, {
-                type: "thread.create",
-                commandId: input.commandId,
-                threadId: candidateThreadId,
-                projectId: input.projectId,
-                title: input.title,
-                modelSelection: input.modelSelection,
-                runtimeMode: input.runtimeMode,
-                interactionMode: input.interactionMode,
+                ...launchCreateCommand(input, candidateThreadId),
                 branch: initialBranch,
                 worktreePath: initialWorktreePath,
-                ...(input.importedNativeThread === undefined
-                  ? {}
-                  : { importedNativeThread: input.importedNativeThread }),
-                createdBy: input.createdBy,
-                creationSource: input.creationSource,
               });
         const claimed = yield* claimDispatch.pipe(
           Effect.mapError(
@@ -813,34 +992,22 @@ const make = Effect.gen(function* () {
         let messageWasAlreadyAccepted = false;
         if (input.initialMessage !== undefined) {
           const messageCommandId = CommandId.make(`${input.commandId}:initial-message`);
-          const messageReceipt = yield* readReceipt(input, messageCommandId);
+          const messageReceipt = yield* readReceipt(authority, input, messageCommandId);
           messageWasAlreadyAccepted = Option.isSome(messageReceipt);
-          const messageId =
-            input.initialMessage.messageId ??
-            (yield* ids.allocate
-              .message({ threadId, ordinal: 1 })
-              .pipe(Effect.mapError(mapError(input, "dispatch-message", threadId))));
+          const message = admitted.initialMessage!;
           const dispatched = yield* threads
-            .dispatch(authority, {
-              type: "message.dispatch",
-              commandId: messageCommandId,
-              threadId,
-              messageId,
-              text: input.initialMessage.text,
-              ...(input.initialMessage.scheduledTaskId === undefined
-                ? {}
-                : { scheduledTaskId: input.initialMessage.scheduledTaskId }),
-              ...(input.initialMessage.senderThreadId === undefined
-                ? {}
-                : { senderThreadId: input.initialMessage.senderThreadId }),
-              attachments: input.initialMessage.attachments,
-              ...(input.initialMessage.context ? { context: input.initialMessage.context } : {}),
-              ...(input.generateTitle === true ? { titleSeed: input.title } : {}),
-              modelSelection: input.modelSelection,
-              dispatchMode: { type: "defer_start", workspaceStrategy },
-              createdBy: input.createdBy,
-              creationSource: input.creationSource,
-            })
+            .dispatch(
+              authority,
+              initialMessageCommand(
+                input,
+                threadId,
+                {
+                  ...message,
+                  messageId: message.messageId!,
+                },
+                workspaceStrategy,
+              ),
+            )
             .pipe(Effect.mapError(mapError(input, "dispatch-message", threadId)));
           const runCreated = dispatched.storedEvents.find(
             (stored) => stored.event.type === "run.created",
@@ -855,6 +1022,9 @@ const make = Effect.gen(function* () {
           }
         }
 
+        yield* admitLaunch(authority, { ...admitted, threadId }).pipe(
+          Effect.mapError(mapError(input, "create-thread", threadId)),
+        );
         const projection = yield* threads
           .getThreadProjection(trustedReadAuthority, threadId)
           .pipe(Effect.mapError(mapError(input, "create-thread", threadId)));
@@ -876,6 +1046,11 @@ const make = Effect.gen(function* () {
               }
             : workspaceStrategy;
         if (shouldSchedule) {
+          yield* admitLaunch(authority, {
+            ...admitted,
+            threadId,
+            workspaceStrategy: preparationStrategy,
+          }).pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
           const ownsPreparation = yield* reservePreparation(input.commandId);
           if (ownsPreparation) {
             yield* Effect.gen(function* () {
@@ -895,6 +1070,11 @@ const make = Effect.gen(function* () {
                         Effect.mapError(mapError(input, "update-thread", threadId)),
                       );
               if (preparationStillRequired) {
+                yield* admitLaunch(authority, {
+                  ...admitted,
+                  threadId,
+                  workspaceStrategy: preparationStrategy,
+                }).pipe(Effect.mapError(mapError(input, "update-thread", threadId)));
                 yield* schedulePreparation(
                   { ...input, workspaceStrategy: preparationStrategy },
                   threadId,
@@ -916,9 +1096,39 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const admitRetry = (authority: MutationAuthority, input: ThreadLaunchRetryInput) =>
+    Effect.gen(function* () {
+      yield* authorizeThreadMutation(sql, authority, input.threadId, input.runId);
+      yield* authorizeCommandReceipt(sql, authority, input.commandId);
+      if (authority === trustedMutationAuthority) return;
+      const stored = yield* sql<{ readonly project: string; readonly workspace: string | null }>`
+        SELECT t.project_id AS project, json_extract(r.payload_json, '$.workspacePreparation.worktreePath') AS workspace
+        FROM orchestration_v2_projection_runs r JOIN orchestration_v2_projection_threads t ON t.thread_id = r.thread_id
+        WHERE r.run_id = ${input.runId} AND r.thread_id = ${input.threadId}
+      `;
+      for (const row of stored)
+        if (row.workspace !== null)
+          yield* requireRegisteredMutationPath(
+            sql,
+            authority,
+            {
+              projectId: ProjectId.make(row.project),
+              threadId: input.threadId,
+            },
+            row.workspace,
+          );
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new Orchestrator.OrchestratorProjectionError({ threadId: input.threadId, cause }),
+      ),
+    );
+
   const retryPreparation: ThreadLaunchService["Service"]["retryPreparation"] = Effect.fn(
     "ThreadLaunchService.retryPreparation",
   )(function* (authority, input) {
+    const admit = admitRetry(authority, input);
+    yield* admit;
     const dispatched = yield* threads.dispatch(authority, {
       type: "prepared-run.retry",
       commandId: input.commandId,
@@ -930,64 +1140,96 @@ const make = Effect.gen(function* () {
     // From here the run is preparing again; anything that stops preparation
     // from being scheduled must fail it, or it would wait in preparing forever.
     const scheduled = yield* Effect.gen(function* () {
+      yield* admit;
       const projection = yield* threads.getThreadProjection(trustedReadAuthority, input.threadId);
       const run = projection.runs.find((candidate) => candidate.id === input.runId);
       const workspacePreparation = run?.workspacePreparation;
       if (run?.status !== "preparing" || workspacePreparation === undefined) return;
+      yield* admit;
       if (!(yield* reservePreparation(input.commandId))) return;
-      yield* scheduleRetriedPreparation(input, projection, run, workspacePreparation).pipe(
+      yield* admit.pipe(
+        Effect.andThen(
+          scheduleRetriedPreparation(authority, input, projection, run, workspacePreparation),
+        ),
         Effect.onError(() => releasePreparation(input.commandId)),
       );
     }).pipe(Effect.exit);
     if (Exit.isFailure(scheduled)) {
+      const failure = Cause.squash(scheduled.cause);
+      if (isProjectionError(failure) && isAuthorizationError(failure.cause)) return yield* failure;
       yield* failPreparedRun(input, input.threadId, input.runId, Cause.squash(scheduled.cause));
     }
     return dispatched;
   });
 
-  const scheduleRetriedPreparation = (
-    input: ThreadLaunchRetryInput,
-    projection: OrchestrationV2ThreadProjection,
-    run: OrchestrationV2ThreadProjection["runs"][number],
-    workspacePreparation: ThreadLaunchWorkspaceStrategy,
-  ) => {
-    const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
-    // A worktree the failed attempt already created is reused, not created again.
-    const reuse =
-      workspacePreparation.type === "worktree" &&
-      projection.thread.worktreePath !== null &&
-      projection.thread.branch !== null
-        ? {
-            strategy: {
-              type: "existing_worktree" as const,
-              worktreePath: projection.thread.worktreePath,
-              branch: projection.thread.branch,
-            },
-            reusedWorktree: { baseRef: workspacePreparation.baseRef },
-          }
-        : null;
-    return schedulePreparation(
-      {
-        commandId: input.commandId,
-        projectId: projection.thread.projectId,
-        workspaceStrategy: reuse?.strategy ?? workspacePreparation,
-        ...(reuse === null ? {} : { reusedWorktree: reuse.reusedWorktree }),
-        ...(message === undefined
-          ? {}
-          : {
-              initialMessage: {
-                text: message.text,
-                attachments: message.attachments,
-                ...(message.context ? { context: message.context } : {}),
+  const scheduleRetriedPreparation = Effect.fn("ThreadLaunchService.scheduleRetriedPreparation")(
+    function* (
+      authority: MutationAuthority,
+      input: ThreadLaunchRetryInput,
+      projection: OrchestrationV2ThreadProjection,
+      run: OrchestrationV2ThreadProjection["runs"][number],
+      workspacePreparation: ThreadLaunchWorkspaceStrategy,
+    ) {
+      const message = projection.messages.find((candidate) => candidate.id === run.userMessageId);
+      // A worktree the failed attempt already created is reused, not created again.
+      const reuse =
+        workspacePreparation.type === "worktree" &&
+        projection.thread.worktreePath !== null &&
+        projection.thread.branch !== null
+          ? {
+              strategy: {
+                type: "existing_worktree" as const,
+                worktreePath: projection.thread.worktreePath,
+                branch: projection.thread.branch,
               },
-            }),
-      },
-      input.threadId,
-      run.id,
-    );
-  };
+              reusedWorktree: { baseRef: workspacePreparation.baseRef },
+            }
+          : null;
+      const workspaceStrategy = reuse?.strategy ?? workspacePreparation;
+      if (workspaceStrategy.type === "existing_worktree")
+        yield* requireRegisteredMutationPath(
+          sql,
+          authority,
+          {
+            projectId: projection.thread.projectId,
+            threadId: input.threadId,
+          },
+          workspaceStrategy.worktreePath,
+        ).pipe(
+          Effect.mapError(
+            (cause) =>
+              new Orchestrator.OrchestratorProjectionError({ threadId: input.threadId, cause }),
+          ),
+        );
+      yield* admitRetry(authority, input);
+      return yield* schedulePreparation(
+        {
+          commandId: input.commandId,
+          projectId: projection.thread.projectId,
+          workspaceStrategy,
+          ...(reuse === null ? {} : { reusedWorktree: reuse.reusedWorktree }),
+          ...(message === undefined
+            ? {}
+            : {
+                initialMessage: {
+                  text: message.text,
+                  attachments: message.attachments,
+                  ...(message.context ? { context: message.context } : {}),
+                },
+              }),
+        },
+        input.threadId,
+        run.id,
+      );
+    },
+  );
 
-  return ThreadLaunchService.of({ launch, retryPreparation });
+  return ThreadLaunchService.of({
+    admit: (authority, input) =>
+      admitLaunch(authority, input).pipe(Effect.mapError(mapError(input, "read-receipt"))),
+    launch,
+    retryPreparation,
+  });
 });
 
 export const layer = Layer.effect(ThreadLaunchService, make);

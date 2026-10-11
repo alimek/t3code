@@ -1,9 +1,17 @@
-import { type MutationAuthority } from "../auth/CommandAuthorization.ts";
+import {
+  authorizeCommandAdmission,
+  authorizeMutationTarget,
+  mutationDenied,
+  trustedMutationAuthority,
+  type MutationAuthority,
+} from "../auth/CommandAuthorization.ts";
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import { appendUserInputAttachmentPaths } from "../provider/userInputAttachments.ts";
 import type { ChatAttachment, OrchestrationV2Command } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
+import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -66,8 +74,9 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
     const prepared = yield* Effect.gen(function* () {
       const attachmentsByQuestionId: import("@t3tools/contracts").UserInputAttachments = {};
       for (const [questionId, attachments] of Object.entries(incomingByQuestionId)) {
-        const claimed = yield* AttachmentClaims.claimPendingAttachments({
+        const claimed = yield* AttachmentClaims.claimPendingAttachments(authority, {
           threadId: command.threadId,
+          command,
           attachments,
         });
         claimedPaths.push(...claimed.claimedPaths);
@@ -131,8 +140,9 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
     (command.type !== "queued-run.edit" || command.attachments === undefined)
   )
     return yield* threads.dispatch(authority, command);
-  const claimed = yield* AttachmentClaims.claimPendingAttachments({
+  const claimed = yield* AttachmentClaims.claimPendingAttachments(authority, {
     threadId: command.threadId,
+    command,
     attachments: command.attachments ?? [],
   });
   return yield* threads
@@ -171,7 +181,18 @@ export const sendToThread = Effect.fn("ThreadMessageIntake.sendToThread")(functi
   input: ThreadManagement.ThreadManagementSendInput,
 ) {
   const threads = yield* ThreadManagement.ThreadManagementService;
-  const claimed = yield* AttachmentClaims.claimPendingAttachments(input);
+  const command = {
+    ...input,
+    type: "message.dispatch" as const,
+    dispatchMode: { type: "start_immediately" as const },
+  };
+  if (authority !== trustedMutationAuthority) {
+    const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
+    if (Option.isNone(sql)) return yield* mutationDenied();
+    yield* authorizeMutationTarget(sql.value, authority, input);
+    yield* authorizeCommandAdmission(sql.value, { authority, command }, input.commandId);
+  }
+  const claimed = yield* AttachmentClaims.claimPendingAttachments(authority, { ...input, command });
   return yield* threads
     .sendToThread(authority, { ...input, attachments: claimed.attachments })
     .pipe(
@@ -198,15 +219,25 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
       message: "Uploaded attachments need a thread id at launch.",
     });
   }
-  const claimed = yield* AttachmentClaims.claimPendingAttachments({
-    threadId: input.threadId,
+  const admitted = yield* launches.admit(authority, input);
+  const message = admitted.initialMessage!;
+  const claimed = yield* AttachmentClaims.claimPendingAttachments(authority, {
+    threadId: admitted.threadId,
+    command: ThreadLaunch.initialMessageCommand(input, admitted.threadId, {
+      ...message,
+      messageId: message.messageId!,
+    }),
+    additionalCommands: [ThreadLaunch.launchCreateCommand(input, admitted.threadId)],
+    ...(input.reuseExistingThread === true
+      ? {}
+      : { creatingThread: { threadId: admitted.threadId, projectId: input.projectId } }),
     attachments: input.initialMessage.attachments,
   });
   return yield* launches
     .launch(authority, {
-      ...input,
+      ...admitted,
       initialMessage: {
-        ...input.initialMessage,
+        ...message,
         attachments: claimed.attachments,
         ...(input.initialMessage.context
           ? {

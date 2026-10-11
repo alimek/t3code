@@ -1392,6 +1392,7 @@ const layerWsRpc = (
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const intakeContext = yield* Effect.context<
+        | SqlClient.SqlClient
         | ThreadManagementService.ThreadManagementService
         | ThreadLaunchService.ThreadLaunchService
         | FileSystem.FileSystem

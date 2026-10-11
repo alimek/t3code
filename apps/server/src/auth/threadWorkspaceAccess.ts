@@ -1,14 +1,75 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import { type ThreadId } from "@t3tools/contracts";
+import { type ThreadId, type ProjectId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import {
   trustedReadAuthority,
   threadReadDenied,
   type ThreadReadAuthority,
 } from "./ResourceAuthorization.ts";
+import type * as SqlClient from "effect/sql/SqlClient";
+import {
+  authorizeMutationTarget,
+  mutationDenied,
+  trustedMutationAuthority,
+  type MutationAuthority,
+} from "./CommandAuthorization.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+
+/** Launch/retry use the same persisted-root association without requiring read scope or hydration. */
+export const requireRegisteredMutationPath = Effect.fn("resourceAuthorization.mutationPath")(
+  function* (
+    sql: SqlClient.SqlClient,
+    authority: MutationAuthority,
+    target: {
+      readonly projectId: ProjectId;
+      readonly threadId?: ThreadId;
+      readonly allowCreate?: boolean;
+    },
+    requested: string,
+  ) {
+    if (authority === trustedMutationAuthority) return;
+    yield* authorizeMutationTarget(sql, authority, target);
+    const current = yield* authority.current;
+    if (
+      current.resourceGrant.projects.mode !== "explicit" &&
+      current.resourceGrant.providers.mode !== "explicit"
+    )
+      return yield* authorizeMutationTarget(sql, authority, target);
+    const roots = yield* sql<{ readonly root: string | null }>`
+    SELECT workspace_root AS root FROM projection_projects WHERE project_id = ${target.projectId} AND deleted_at IS NULL
+    UNION SELECT json_extract(payload_json, '$.worktreePath') FROM orchestration_v2_projection_threads
+      WHERE thread_id = ${target.threadId ?? ""} AND project_id = ${target.projectId} AND deleted_at IS NULL
+  `;
+    yield* requireCanonicalRoot(
+      roots.flatMap((row) => (row.root === null ? [] : [row.root])),
+      requested,
+    ).pipe(Effect.mapError(() => mutationDenied()));
+    yield* authorizeMutationTarget(sql, authority, target);
+  },
+);
+
+const requireCanonicalRoot = Effect.fnUntraced(function* (
+  roots: ReadonlyArray<string>,
+  requested: string,
+) {
+  const canonical = yield* Effect.tryPromise({
+    try: async () => ({
+      path: await NodeFSP.realpath(requested),
+      roots: await Promise.all(roots.map((root) => NodeFSP.realpath(root).catch(() => undefined))),
+    }),
+    catch: () => threadReadDenied(),
+  });
+  if (
+    !canonical.roots.some(
+      (root) =>
+        root !== undefined &&
+        (canonical.path === root || canonical.path.startsWith(`${root}${NodePath.sep}`)),
+    )
+  )
+    return yield* threadReadDenied();
+});
 
 /** Paths are admitted against persisted project/thread roots, never a caller's cwd hint. */
 export const requireRegisteredThreadPath = Effect.fn("resourceAuthorization.threadPath")(function* (
@@ -25,19 +86,5 @@ export const requireRegisteredThreadPath = Effect.fn("resourceAuthorization.thre
     current.resourceGrant?.providers.mode !== "explicit"
   )
     return;
-  const canonical = yield* Effect.tryPromise({
-    try: async () => ({
-      path: await NodeFSP.realpath(requested),
-      roots: await Promise.all(roots.map((root) => NodeFSP.realpath(root).catch(() => undefined))),
-    }),
-    catch: () => threadReadDenied(),
-  });
-  if (
-    !canonical.roots.some(
-      (root) =>
-        root !== undefined &&
-        (canonical.path === root || canonical.path.startsWith(`${root}${NodePath.sep}`)),
-    )
-  )
-    return yield* threadReadDenied();
+  yield* requireCanonicalRoot(roots, requested);
 });

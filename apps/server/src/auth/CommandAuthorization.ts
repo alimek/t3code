@@ -213,16 +213,19 @@ const authorizeSession = Effect.fnUntraced(function* (
   grant: AuthResourceGrant,
   id: string,
   includeDeleted = false,
+  allowUnmaterialized = false,
 ) {
-  const registered = yield* sql<{
-    readonly id: string;
-  }>`SELECT provider_session_id AS id FROM orchestration_v2_projection_provider_sessions WHERE provider_session_id = ${id}`;
+  const registered = yield* sql<{ readonly id: string }>`
+    SELECT provider_session_id AS id FROM orchestration_v2_projection_provider_sessions WHERE provider_session_id = ${id}
+  `;
+  // Deferred launches register the provider-thread owner before the runtime creates its session row.
   const owners = yield* sql<{ readonly id: string }>`
     SELECT thread_id AS id FROM orchestration_v2_projection_provider_sessions WHERE provider_session_id = ${id} AND thread_id IS NOT NULL
     UNION SELECT thread_id FROM orchestration_v2_projection_provider_session_bindings WHERE provider_session_id = ${id}
     UNION SELECT thread_id FROM orchestration_v2_projection_provider_threads WHERE provider_session_id = ${id} AND thread_id IS NOT NULL
   `;
-  if (registered.length === 0 || owners.length === 0) return yield* mutationDenied();
+  if (owners.length === 0 || (!allowUnmaterialized && registered.length === 0))
+    return yield* mutationDenied();
   yield* authorizeOwnerThreadIds(
     sql,
     grant,
@@ -236,12 +239,13 @@ const authorizeAttachments = Effect.fnUntraced(function* (
   grant: AuthResourceGrant,
   ids: ReadonlyArray<string>,
   includeDeleted = false,
+  creatingThread?: ThreadId,
 ) {
   const segments = new Set<string>();
   for (const id of ids) {
     const segment = parseThreadSegmentFromAttachmentId(id);
     if (segment === null) return yield* mutationDenied();
-    // Staged upload ownership and claim/copy admission belong to 04b2/06.
+    // Staged upload ownership belongs to ticket06; claims admit their target and all other sources.
     if (segment !== PENDING_ATTACHMENT_THREAD_SEGMENT) segments.add(segment);
   }
   if (segments.size === 0) return;
@@ -251,6 +255,12 @@ const authorizeAttachments = Effect.fnUntraced(function* (
   }>`SELECT thread_id AS id FROM orchestration_v2_projection_threads`;
   for (const segment of segments) {
     const owners = rows.filter((r) => toSafeThreadAttachmentSegment(r.id) === segment);
+    if (
+      owners.length === 0 &&
+      creatingThread !== undefined &&
+      toSafeThreadAttachmentSegment(creatingThread) === segment
+    )
+      continue;
     // Normalization is not invertible: a colliding or unregistered segment is not authority.
     if (owners.length !== 1) return yield* mutationDenied();
     yield* authorizeOwnerThreadIds(
@@ -319,12 +329,13 @@ const authorizeContext = Effect.fnUntraced(function* (
   sql: SqlClient.SqlClient,
   grant: AuthResourceGrant,
   context: Extract<OrchestrationV2ServerCommand, { type: "message.dispatch" }>["context"],
+  creatingThread?: ThreadId,
 ) {
   for (const record of context?.records ?? []) {
     if (record.kind === "thread" && "threadId" in record)
       yield* authorizeMutationThread(sql, grant, record.threadId);
     if ((record.kind === "image" || record.kind === "file") && "attachmentId" in record)
-      yield* authorizeAttachments(sql, grant, [record.attachmentId]);
+      yield* authorizeAttachments(sql, grant, [record.attachmentId], false, creatingThread);
   }
 });
 
@@ -369,12 +380,91 @@ export const authorizeThreadMutation = Effect.fnUntraced(
   Effect.mapError(() => mutationDenied()),
 );
 
+/** A new target needs a live allowed project; an existing id must prove its actual owner. */
+export const authorizeMutationTarget = Effect.fnUntraced(
+  function* (
+    sql: SqlClient.SqlClient,
+    authority: MutationAuthority,
+    input: {
+      readonly threadId?: ThreadId;
+      readonly projectId: ProjectId;
+      readonly allowCreate?: boolean;
+    },
+  ) {
+    const grant = yield* currentMutationGrant(authority);
+    if (grant === undefined) return;
+    yield* authorizeProjects(sql, grant, [input.projectId]);
+    if (input.threadId === undefined) return;
+    const rows = yield* sql<{ readonly project: string }>`
+      SELECT project_id AS project FROM orchestration_v2_projection_threads WHERE thread_id = ${input.threadId}
+    `;
+    if (rows.length === 0 && input.allowCreate === true) return;
+    if (rows.length !== 1 || rows[0]!.project !== input.projectId) return yield* mutationDenied();
+    yield* authorizeMutationThread(sql, grant, input.threadId);
+  },
+  Effect.mapError(() => mutationDenied()),
+);
+
+/** Claim admission includes the original command, not only the attachments in this copy batch. */
+export const authorizeAttachmentClaim = Effect.fnUntraced(
+  function* (
+    sql: SqlClient.SqlClient,
+    authority: MutationAuthority,
+    input: {
+      readonly threadId: string;
+      readonly attachmentIds: ReadonlyArray<string>;
+      readonly command: OrchestrationV2ServerCommand;
+      readonly additionalCommands?: ReadonlyArray<OrchestrationV2ServerCommand>;
+      readonly creatingThread?: { readonly threadId: ThreadId; readonly projectId: ProjectId };
+    },
+  ) {
+    if (commandTargets(input.command).thread !== input.threadId) return yield* mutationDenied();
+    yield* authorizeCommand(sql, authority, input.command, input.creatingThread);
+    yield* authorizeCommandReceipt(sql, authority, input.command.commandId);
+    const receipt = yield* sql<{ readonly owner: string; readonly status: string }>`
+    SELECT aggregate_id AS owner, status FROM orchestration_command_receipts WHERE command_id = ${input.command.commandId}
+  `;
+    if (receipt.some((row) => row.status === "rejected" || row.owner !== input.threadId))
+      return yield* mutationDenied();
+    if (
+      input.creatingThread !== undefined &&
+      !(input.additionalCommands ?? []).some(
+        (command) =>
+          command.type === "thread.create" &&
+          command.threadId === input.creatingThread?.threadId &&
+          command.projectId === input.creatingThread.projectId,
+      )
+    )
+      return yield* mutationDenied();
+    for (const command of input.additionalCommands ?? []) {
+      yield* authorizeCommand(sql, authority, command);
+      yield* authorizeCommandReceipt(sql, authority, command.commandId);
+      const receipt = yield* sql<{ readonly owner: string; readonly status: string }>`
+      SELECT aggregate_id AS owner, status FROM orchestration_command_receipts WHERE command_id = ${command.commandId}
+    `;
+      if (receipt.some((row) => row.status === "rejected" || row.owner !== input.threadId))
+        return yield* mutationDenied();
+    }
+    const grant = yield* currentMutationGrant(authority);
+    if (grant !== undefined)
+      yield* authorizeAttachments(
+        sql,
+        grant,
+        input.attachmentIds,
+        false,
+        input.creatingThread?.threadId,
+      );
+  },
+  Effect.mapError(() => mutationDenied()),
+);
+
 /** All supplied and stored participants precede importer/planning and are rechecked at commit. */
 export const authorizeCommand = Effect.fn("resourceAuthorization.command")(
   function* (
     sql: SqlClient.SqlClient,
     authority: MutationAuthority,
     command: OrchestrationV2ServerCommand,
+    creatingThread?: { readonly threadId: ThreadId; readonly projectId: ProjectId },
   ) {
     const grant = yield* currentMutationGrant(authority);
     if (grant === undefined) return;
@@ -392,15 +482,28 @@ export const authorizeCommand = Effect.fn("resourceAuthorization.command")(
       }>`SELECT provider_thread_id AS id FROM orchestration_v2_projection_provider_threads WHERE provider_thread_id = ${id}`;
       if (rows.length > 0) yield* authorizeProviderIds(sql, grant, [id]);
     }
+    if (creatingThread !== undefined) {
+      if (command.type !== "message.dispatch" || command.threadId !== creatingThread.threadId)
+        return yield* mutationDenied();
+      yield* authorizeMutationTarget(sql, authority, { ...creatingThread, allowCreate: true });
+    }
     const targets = commandTargets(command);
     if (targets.project !== undefined) yield* authorizeProjects(sql, grant, [targets.project]);
-    for (const id of new Set(targets.threads))
+    for (const id of new Set(targets.threads)) {
+      if (id === creatingThread?.threadId) continue;
       yield* authorizeMutationThread(sql, grant, id, command.type === "thread.delete");
+    }
     if (targets.createdThread !== undefined) {
       const existing = yield* sql<{ readonly id: string }>`
       SELECT thread_id AS id FROM orchestration_v2_projection_threads WHERE thread_id = ${targets.createdThread}
     `;
       if (existing.length > 0) yield* authorizeMutationThread(sql, grant, targets.createdThread);
+      if (command.type === "thread.create")
+        yield* authorizeMutationTarget(sql, authority, {
+          threadId: command.threadId,
+          projectId: command.projectId,
+          allowCreate: true,
+        });
     }
     const runIds = [
       ...("runId" in command ? [command.runId] : []),
@@ -528,11 +631,13 @@ export const authorizeCommand = Effect.fn("resourceAuthorization.command")(
       ]);
     }
     if (command.type === "message.dispatch" || command.type === "queued-run.edit") {
-      yield* authorizeContext(sql, grant, command.context);
+      yield* authorizeContext(sql, grant, command.context, creatingThread?.threadId);
       yield* authorizeAttachments(
         sql,
         grant,
         (command.attachments ?? []).map((a) => a.id),
+        false,
+        creatingThread?.threadId,
       );
     }
     if (command.type === "runtime-request.respond")
@@ -695,7 +800,7 @@ export const authorizeCommandReceipt = Effect.fn("resourceAuthorization.commandR
           );
           break;
         case "session":
-          yield* authorizeSession(sql, grant, row.id, includeDeleted);
+          yield* authorizeSession(sql, grant, row.id, includeDeleted, true);
           break;
         default:
           return yield* mutationDenied();

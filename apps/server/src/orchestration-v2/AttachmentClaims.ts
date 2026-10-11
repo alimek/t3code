@@ -1,10 +1,21 @@
+import {
+  authorizeAttachmentClaim,
+  mutationDenied,
+  trustedMutationAuthority,
+  type MutationAuthority,
+} from "../auth/CommandAuthorization.ts";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as FileSystem from "effect/FileSystem";
 import {
   ChatAttachmentId,
   getProviderAttachmentLimitError,
   type ChatAttachment,
+  type OrchestrationV2ServerCommand,
+  type ThreadId,
+  type ProjectId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import {
@@ -60,10 +71,33 @@ export const releaseClaimedAttachments = Effect.fn("AttachmentClaims.releaseClai
  * pass through untouched.
  */
 export const claimPendingAttachments = Effect.fn("AttachmentClaims.claimPendingAttachments")(
-  function* (input: {
-    readonly threadId: string;
-    readonly attachments: ReadonlyArray<ChatAttachment>;
-  }) {
+  function* (
+    authority: MutationAuthority,
+    input: {
+      readonly threadId: string;
+      readonly attachments: ReadonlyArray<ChatAttachment>;
+      readonly command?: OrchestrationV2ServerCommand;
+      readonly additionalCommands?: ReadonlyArray<OrchestrationV2ServerCommand>;
+      readonly creatingThread?: { readonly threadId: ThreadId; readonly projectId: ProjectId };
+    },
+  ) {
+    // App-owned trusted work needs no SQL admission; external claims fail closed without app context.
+    const withAdmission = <A, E, R>(operation: () => Effect.Effect<A, E, R>) =>
+      Effect.gen(function* () {
+        const effect = Effect.suspend(operation);
+        if (authority === trustedMutationAuthority) return yield* effect;
+        if (input.command === undefined) return yield* mutationDenied();
+        const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
+        if (Option.isNone(sql)) return yield* mutationDenied();
+        return yield* sql.value.withTransaction(
+          authorizeAttachmentClaim(sql.value, authority, {
+            ...input,
+            command: input.command,
+            attachmentIds: input.attachments.map((attachment) => attachment.id),
+          }).pipe(Effect.andThen(effect)),
+        );
+      });
+    yield* withAdmission(() => Effect.void);
     yield* validateAttachmentLimits(input.attachments);
     if (
       new Set(input.attachments.map((attachment) => attachment.id)).size !==
@@ -86,23 +120,29 @@ export const claimPendingAttachments = Effect.fn("AttachmentClaims.claimPendingA
           if (!attachmentIsPendingUpload(attachment)) {
             return attachment;
           }
-          const claim = planAttachmentClaim({
-            attachmentsDir: serverConfig.attachmentsDir,
-            threadId: input.threadId,
-            attachmentId: attachment.id,
-          });
+          const claim = yield* withAdmission(() =>
+            Effect.sync(() =>
+              planAttachmentClaim({
+                attachmentsDir: serverConfig.attachmentsDir,
+                threadId: input.threadId,
+                attachmentId: attachment.id,
+              }),
+            ),
+          );
           if (!claim.ok) {
             return yield* new AttachmentClaimError({
               message: `Attachment '${attachment.name}' cannot be sent: ${claim.reason}.`,
             });
           }
-          const info = yield* fileSystem.stat(claim.currentPath).pipe(
-            Effect.mapError(
-              (cause) =>
-                new AttachmentClaimError({
-                  message: `Attachment '${attachment.name}' cannot be sent: attachment not found.`,
-                  cause,
-                }),
+          const info = yield* withAdmission(() =>
+            fileSystem.stat(claim.currentPath).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new AttachmentClaimError({
+                    message: `Attachment '${attachment.name}' cannot be sent: attachment not found.`,
+                    cause,
+                  }),
+              ),
             ),
           );
           if (Number(info.size) !== attachment.sizeBytes) {
@@ -129,16 +169,18 @@ export const claimPendingAttachments = Effect.fn("AttachmentClaims.claimPendingA
           // cancelled, so the copy and its rollback registration stay in one
           // uninterruptible region: an interrupt landing mid-copy still waits
           // for the write to settle and records the path before cleanup runs.
-          yield* fileSystem.copyFile(claim.currentPath, claim.finalPath).pipe(
-            Effect.mapError(
-              (cause) =>
-                new AttachmentClaimError({
-                  message: `Failed to claim attachment '${attachment.name}' for this thread.`,
-                  cause,
-                }),
+          yield* withAdmission(() =>
+            fileSystem.copyFile(claim.currentPath, claim.finalPath).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new AttachmentClaimError({
+                    message: `Failed to claim attachment '${attachment.name}' for this thread.`,
+                    cause,
+                  }),
+              ),
+              Effect.andThen(Effect.sync(() => claimedPaths.push(claim.finalPath))),
+              Effect.uninterruptible,
             ),
-            Effect.andThen(Effect.sync(() => claimedPaths.push(claim.finalPath))),
-            Effect.uninterruptible,
           );
           return normalized;
         }),
@@ -146,4 +188,5 @@ export const claimPendingAttachments = Effect.fn("AttachmentClaims.claimPendingA
     ).pipe(Effect.onError(() => releaseClaimedAttachments(claimedPaths)));
     return { attachments, claimedPaths } satisfies ClaimedAttachments;
   },
+  Effect.catchTags({ SqlError: () => Effect.fail(mutationDenied()) }),
 );
