@@ -10,6 +10,8 @@ import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Etag from "effect/http/Etag";
 import * as HttpPlatform from "effect/http/HttpPlatform";
@@ -74,6 +76,7 @@ const layerActivatedAuth = Layer.effect(EnvironmentAuth.EnvironmentAuth, Environ
 // Each router gets its own database; the capture hands that router's EnvironmentAuth to its test.
 const makeLayerRoutes = (
   capture: (auth: EnvironmentAuth.EnvironmentAuth["Service"], sql: SqlClient.SqlClient) => void,
+  crypto: Crypto.Crypto,
   activated = false,
 ) =>
   Layer.mergeAll(
@@ -86,7 +89,11 @@ const makeLayerRoutes = (
     ),
     HttpApiBuilder.layer(AuthTestApi).pipe(
       Layer.provide(AuthHttp.layer),
-      Layer.provide(McpOAuthHttp.layer.pipe(Layer.provide(McpOAuth.layer))),
+      Layer.provide(
+        McpOAuthHttp.layer.pipe(
+          Layer.provide(McpOAuth.layer.pipe(Layer.provide(Layer.succeed(Crypto.Crypto, crypto)))),
+        ),
+      ),
       Layer.provide(AuthHttp.layerAuthenticatedAuth),
     ),
   ).pipe(
@@ -129,16 +136,22 @@ const withRoutes = <A, E>(
     sql: SqlClient.SqlClient,
   ) => Effect.Effect<A, E>,
   activated = false,
+  cryptoOverride?: (crypto: Crypto.Crypto) => Crypto.Crypto,
 ) =>
   Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
-    const context = Context.make(Crypto.Crypto, crypto);
+    const selectedCrypto = cryptoOverride?.(crypto) ?? crypto;
+    const context = Context.make(Crypto.Crypto, selectedCrypto);
     let routerAuth: EnvironmentAuth.EnvironmentAuth["Service"] | undefined;
     let routerSql!: SqlClient.SqlClient;
-    const layerRoutes = makeLayerRoutes((auth, sql) => {
-      routerAuth = auth;
-      routerSql = sql;
-    }, activated);
+    const layerRoutes = makeLayerRoutes(
+      (auth, sql) => {
+        routerAuth = auth;
+        routerSql = sql;
+      },
+      selectedCrypto,
+      activated,
+    );
     return yield* Effect.acquireUseRelease(
       Effect.sync(() => HttpRouter.toWebHandler(layerRoutes, { disableLogger: true })),
       (web) =>
@@ -672,8 +685,109 @@ it.live(
           expect(rows[0]?.count).toBe(1);
           expect(
             yield* auth.authenticateMcpClient(externalRequest).pipe(Effect.flip),
-          ).toMatchObject({ _tag: "ServerAuthInvalidCredentialError" });
+          ).toMatchObject({
+            _tag: "ServerAuthInvalidCredentialError",
+            cause: { _tag: "EnvironmentAuthorizationError" },
+          });
         }),
       true,
     ),
+);
+
+it.live.each([
+  "resource grant",
+  "approval scope",
+  "requested scope",
+  "revocation",
+  "none",
+] as const)("browser OAuth publication reloads SQL authority after crypto: %s", (cut) =>
+  Effect.gen(function* () {
+    const reached = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    let hold = false;
+    let generatedCode = "";
+    return yield* withRoutes(
+      (handler, auth, sql) =>
+        Effect.gen(function* () {
+          const clientId = yield* registeredClientId(handler);
+          const params = authorizeParams(clientId);
+          const pairing = yield* auth.issuePairingCredential({
+            scopes: [...AuthAdministrativeScopes],
+          });
+          const response = yield* handler(
+            at("/api/auth/browser-session", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: encodeJson({ credential: pairing.credential }),
+            }),
+          );
+          const cookie = response.headers.get("set-cookie")!.split(";", 1)[0]!;
+          const details = yield* handler(postJson("/oauth/mcp/approval", params, cookie)).pipe(
+            Effect.flatMap(json<{ csrfToken: string }>),
+          );
+          hold = true;
+          const pending = yield* decide(
+            handler,
+            params,
+            {
+              _tag: "browser-session",
+              access: "auto",
+              csrfToken: details.csrfToken,
+            },
+            cookie,
+          ).pipe(Effect.forkChild);
+          yield* Deferred.await(reached);
+          if (cut === "resource grant")
+            yield* sql`UPDATE auth_sessions SET resource_grant = ${JSON.stringify(grantA)}`;
+          else if (cut === "approval scope" || cut === "requested scope")
+            yield* sql`UPDATE auth_sessions SET scopes = ${JSON.stringify(
+              AuthAdministrativeScopes.filter(
+                (scope) =>
+                  scope !== (cut === "approval scope" ? "access:write" : "orchestration:operate"),
+              ),
+            )}`;
+          else if (cut === "revocation")
+            yield* sql`UPDATE auth_sessions SET revoked_at = '2026-01-01T00:00:00.000Z'`;
+          yield* Deferred.succeed(release, undefined);
+          const decision = yield* Fiber.join(pending);
+          expect(decision.status).toBe(cut === "none" ? 200 : 400);
+          if (cut !== "none") expect(decision.redirectTo).toBeUndefined();
+          else expect(new URL(decision.redirectTo!).searchParams.get("code")).toBe(generatedCode);
+          // Knowing the random bytes must not redeem a code withheld by the current cut.
+          const exchanged = yield* handler(
+            at(
+              "/oauth/mcp/token",
+              form({
+                grant_type: "authorization_code",
+                code: generatedCode,
+                redirect_uri: params.redirect_uri,
+                client_id: clientId,
+                code_verifier: verifier,
+                resource: `${ORIGIN}/mcp`,
+              }),
+            ),
+          );
+          expect(exchanged.status).toBe(cut === "none" ? 200 : 400);
+          const rows = yield* sql<{
+            count: number;
+          }>`SELECT COUNT(*) AS count FROM auth_sessions WHERE subject = 'mcp-client'`;
+          expect(rows[0]?.count).toBe(cut === "none" ? 1 : 0);
+        }),
+      true,
+      (crypto) => ({
+        ...crypto,
+        randomBytes: (length) =>
+          Effect.gen(function* () {
+            const bytes = yield* crypto.randomBytes(length);
+            if (hold) {
+              hold = false;
+              generatedCode = Buffer.from(bytes).toString("base64url");
+              yield* Deferred.succeed(reached, undefined);
+              yield* Deferred.await(release);
+            }
+            return bytes;
+          }),
+      }),
+    );
+  }).pipe(Effect.scoped),
 );

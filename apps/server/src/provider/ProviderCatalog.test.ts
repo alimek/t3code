@@ -24,6 +24,9 @@ import * as Instances from "./ProviderInstanceRegistry.ts";
 import * as Manifest from "./ModelManifest.ts";
 import type { ProviderInstance } from "./ProviderDriver.ts";
 import { type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
+import * as Catalog from "./ProviderCatalog.ts";
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { providerCatalog, restrictedServerConfig } from "./ProviderCatalog.ts";
 
 const isServerProvider = Schema.is(ServerProvider);
@@ -192,4 +195,96 @@ it.effect(
       });
       expect(refreshes).toBe(1);
     }).pipe(Effect.scoped),
+);
+
+it.effect("restricted catalog service owns cached config, refresh and current stream cuts", () =>
+  Effect.gen(function* () {
+    const selected = yield* Ref.make<AuthResourceGrant>(AuthAllResourceGrant);
+    const scopes = yield* Ref.make<ReadonlyArray<typeof AuthOrchestrationReadScope>>([
+      AuthOrchestrationReadScope,
+    ]);
+    const reached = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    let descriptorReads = 0;
+    const current: ThreadReadAuthority = {
+      current: Effect.all({
+        resourceGrant: Ref.get(selected),
+        scopes: Ref.get(scopes),
+      }),
+    };
+    const environment: ServerConfig["environment"] = {
+      environmentId: "test" as ServerConfig["environment"]["environmentId"],
+      label: "test",
+      platform: { os: "linux", arch: "x64" },
+      serverVersion: "1",
+      capabilities: { repositoryIdentity: false },
+    };
+    const auth: ServerConfig["auth"] = {
+      policy: "loopback-browser",
+      bootstrapMethods: ["one-time-token"],
+      sessionMethods: ["browser-session-cookie"],
+      sessionCookieName: "test",
+    };
+    const catalog = yield* Catalog.ProviderCatalog.pipe(
+      Effect.provide(
+        Catalog.layer.pipe(
+          Layer.provide(
+            Layer.succeed(ServerEnvironment.ServerEnvironment, {
+              getEnvironmentId: Effect.succeed(environment.environmentId),
+              getDescriptor: Effect.sync(() => {
+                descriptorReads++;
+                return environment;
+              }),
+            }),
+          ),
+          Layer.provide(
+            Layer.succeed(EnvironmentAuth.EnvironmentAuth, {
+              getDescriptor: () => Effect.succeed(auth),
+            } as EnvironmentAuth.EnvironmentAuth["Service"]),
+          ),
+          Layer.provide(
+            Layer.succeed(Registry.ProviderRegistry, {
+              getProviders: Effect.succeed([snapshot]),
+              refresh: () => Effect.die("Catalog must not refresh credentials"),
+              refreshInstance: () => Effect.die("Catalog must not refresh credentials"),
+              refreshWorkspaceSnapshot: () => Effect.die("Catalog must not probe workspaces"),
+              getProviderMaintenanceCapabilitiesForInstance: () => Effect.die("No maintenance"),
+              setProviderMaintenanceActionState: () => Effect.die("No maintenance"),
+              streamChanges: Stream.fromEffect(
+                Effect.gen(function* () {
+                  yield* Deferred.succeed(reached, undefined);
+                  yield* Deferred.await(release);
+                  return [snapshot];
+                }),
+              ),
+            }),
+          ),
+        ),
+      ),
+    );
+    // Owner transport continues through its inherited implementation without catalog work.
+    expect(yield* catalog.restrictedConfig(current)).toBeUndefined();
+    expect(yield* catalog.restrictedRefresh(current)).toBeUndefined();
+    expect(yield* catalog.restrictedSubscription(current)).toBeUndefined();
+    expect(descriptorReads).toBe(0);
+    yield* Ref.set(selected, grant);
+    const config = yield* catalog.restrictedConfig(current);
+    expect(isServerConfig(config)).toBe(true);
+    expect(config?.providers[0]?.models.map((model) => model.slug)).toEqual(["one"]);
+    expect(JSON.stringify(config)).not.toContain("secret");
+    expect(yield* catalog.restrictedRefresh(current)).toEqual({ providers: config?.providers });
+    const initial = yield* catalog.restrictedSubscription(current);
+    if (initial === undefined) return yield* Effect.die("Expected restricted subscription");
+    const events = yield* initial.pipe(Stream.take(1), Stream.runCollect);
+    expect(events).toEqual([{ version: 1, type: "snapshot", config }]);
+    const updates = yield* catalog.restrictedSubscription(current);
+    if (updates === undefined) return yield* Effect.die("Expected restricted updates");
+    const pending = yield* updates.pipe(Stream.runCollect, Effect.forkChild);
+    yield* Deferred.await(reached);
+    yield* Ref.set(scopes, []);
+    yield* Deferred.succeed(release, undefined);
+    expect(yield* Fiber.join(pending).pipe(Effect.flip)).toMatchObject({
+      _tag: "EnvironmentAuthorizationError",
+    });
+  }).pipe(Effect.scoped),
 );

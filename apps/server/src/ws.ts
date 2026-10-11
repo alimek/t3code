@@ -1,5 +1,5 @@
-import { providerCatalog, restrictedServerConfig } from "./provider/ProviderCatalog.ts";
-import { authorizeExtraTool, resourceRestricted } from "./auth/ToolAuthorization.ts";
+import * as ProviderCatalog from "./provider/ProviderCatalog.ts";
+import { authorizeExtraTool } from "./auth/ToolAuthorization.ts";
 import {
   type WorkspaceActionAdmission,
   recoverWorkspaceError,
@@ -1498,6 +1498,9 @@ const layerWsRpc = (
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+      const providerCatalog = yield* ProviderCatalog.ProviderCatalog.pipe(
+        Effect.provide(ProviderCatalog.layer),
+      );
       const modelManifest = yield* ModelManifest.ModelManifest;
       const providerVersionCache = yield* ProviderMaintenance.ProviderVersionCache;
       const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
@@ -1929,16 +1932,8 @@ const layerWsRpc = (
 
       const loadServerConfig = (options: { readonly usageLimitsCommand: boolean }) =>
         Effect.gen(function* () {
-          const current = yield* readAuthority.current;
-          if (resourceRestricted(current.resourceGrant)) {
-            const environment = yield* serverEnvironment.getDescriptor;
-            const auth = yield* serverAuth.getDescriptor();
-            return restrictedServerConfig(
-              environment,
-              auth,
-              yield* providerCatalog(readAuthority, yield* providerRegistry.getProviders),
-            );
-          }
+          const restricted = yield* providerCatalog.restrictedConfig(readAuthority);
+          if (restricted !== undefined) return restricted;
           yield* authorizeExtraTool(readAuthority);
           const keybindingsConfig = yield* keybindings.loadConfigState;
           const currentProviders = yield* providerRegistry.getProviders;
@@ -2433,14 +2428,8 @@ const layerWsRpc = (
           ),
         [WS_METHODS.serverRefreshProviders]: (input) =>
           Effect.gen(function* () {
-            const current = yield* readAuthority.current;
-            if (resourceRestricted(current.resourceGrant))
-              return {
-                providers: yield* providerCatalog(
-                  readAuthority,
-                  yield* providerRegistry.getProviders,
-                ),
-              };
+            const restricted = yield* providerCatalog.restrictedRefresh(readAuthority);
+            if (restricted !== undefined) return restricted;
             yield* authorizeExtraTool(readAuthority);
             // Only explicit catalog refreshes bypass T3's caches. Workspace
             // discovery and background status checks retain their timers.
@@ -3277,28 +3266,10 @@ const layerWsRpc = (
         [WS_METHODS.subscribeServerConfig]: (input) =>
           Stream.unwrap(
             Effect.gen(function* () {
+              const restricted = yield* providerCatalog.restrictedSubscription(readAuthority);
+              if (restricted !== undefined) return restricted;
               const usageLimitsCommand = input.usageLimitsCommand === true;
               const config = yield* loadServerConfig({ usageLimitsCommand });
-              if (resourceRestricted((yield* readAuthority.current).resourceGrant))
-                return Stream.concat(
-                  Stream.fromEffect(
-                    providerCatalog(readAuthority, config.providers).pipe(
-                      Effect.map((providers) => ({
-                        version: 1 as const,
-                        type: "snapshot" as const,
-                        config: restrictedServerConfig(config.environment, config.auth, providers),
-                      })),
-                    ),
-                  ),
-                  providerRegistry.streamChanges.pipe(
-                    Stream.mapEffect((providers) => providerCatalog(readAuthority, providers)),
-                    Stream.map((providers) => ({
-                      version: 1 as const,
-                      type: "providerStatuses" as const,
-                      payload: { providers },
-                    })),
-                  ),
-                );
               const keybindingsUpdates = keybindings.streamChanges.pipe(
                 Stream.map((event) => ({
                   version: 1 as const,

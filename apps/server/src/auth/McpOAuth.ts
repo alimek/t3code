@@ -407,12 +407,32 @@ const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => undefined),
     );
 
-  const mintCode = (authorization: AuthorizationRequest, access: AuthMcpClientAccess) =>
+  const authorizeBrowserApproval = (input: Parameters<McpOAuth["Service"]["approve"]>[0]) =>
     Effect.gen(function* () {
+      if (input.decision._tag !== "browser-session") return;
+      const session = yield* approvingBrowserSession(input.request, input.authorization);
+      if (
+        session === undefined ||
+        !timingSafeEqualBase64Url(input.decision.csrfToken, session.csrfToken) ||
+        !EnvironmentAuth.mcpClientScopes(input.decision.access).every((scope) =>
+          session.scopes.includes(scope),
+        )
+      ) {
+        return yield* new McpOAuthPageError({
+          description: "Your session cannot approve this request. Enter a pairing code instead.",
+        });
+      }
+    });
+
+  const mintCode = (input: Parameters<McpOAuth["Service"]["approve"]>[0]) =>
+    Effect.gen(function* () {
+      const { authorization, decision } = input;
       const now = yield* Clock.currentTimeMillis;
       const code = Buffer.from(yield* crypto.randomBytes(32).pipe(Effect.orDie)).toString(
         "base64url",
       );
+      // Crypto can yield: reload browser authority at the publication boundary.
+      yield* authorizeBrowserApproval(input);
       yield* Ref.update(codes, (current) => {
         const next = new Map(
           Array.from(current).filter(([, pending]) => pending.expiresAtMs > now),
@@ -423,7 +443,7 @@ const make = Effect.gen(function* () {
           redirectUri: authorization.redirectUri,
           codeChallenge: authorization.codeChallenge,
           resource: authorization.resource,
-          access,
+          access: decision.access,
           expiresAtMs: now + AUTHORIZATION_CODE_TTL_MS,
         });
         return next;
@@ -449,20 +469,9 @@ const make = Effect.gen(function* () {
           ),
         );
       } else {
-        const session = yield* approvingBrowserSession(input.request, input.authorization);
-        if (
-          session === undefined ||
-          !timingSafeEqualBase64Url(decision.csrfToken, session.csrfToken) ||
-          !EnvironmentAuth.mcpClientScopes(decision.access).every((scope) =>
-            session.scopes.includes(scope),
-          )
-        ) {
-          return yield* new McpOAuthPageError({
-            description: "Your session cannot approve this request. Enter a pairing code instead.",
-          });
-        }
+        yield* authorizeBrowserApproval(input);
       }
-      const code = yield* mintCode(input.authorization, decision.access);
+      const code = yield* mintCode(input);
       yield* Effect.logInfo("Approved an MCP client sign-in.", {
         client: input.authorization.client.name,
         access: decision.access,

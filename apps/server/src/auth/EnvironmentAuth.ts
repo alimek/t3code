@@ -1378,7 +1378,8 @@ export const make = Effect.gen(function* () {
       Effect.tap((session) =>
         authorizeResourceTool(session.resourceGrant).pipe(
           Effect.mapError(
-            (error) => new ServerAuthInvalidCredentialError({ diagnostic: error.message }),
+            (error) =>
+              new ServerAuthInvalidCredentialError({ diagnostic: error.message, cause: error }),
           ),
         ),
       ),
