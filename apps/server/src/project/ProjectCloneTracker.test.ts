@@ -1,5 +1,9 @@
+import { trustedMutationAuthority, type MutationAuthority } from "../auth/CommandAuthorization.ts";
 import { describe, expect, it } from "@effect/vitest";
 import {
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  AuthAllResourceGrant,
   OrchestrationDispatchCommandError,
   ProjectId,
   SourceControlRepositoryError,
@@ -28,6 +32,7 @@ it.effect("filters clone snapshot and live collection paths and remote metadata"
       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
       for (const id of [projectA, projectB])
         yield* tracker.start(
+          trustedMutationAuthority,
           {
             ...startInput,
             projectId: id,
@@ -77,6 +82,7 @@ const startInput = {
 function makeHarness(options?: {
   readonly clone?: SourceControlRepositoryService.SourceControlRepositoryService["Service"]["cloneRepository"];
 }) {
+  const prepared: string[] = [];
   const created: Array<{ projectId: ProjectId; workspaceRoot: string }> = [];
   const cloned: Array<ProjectId> = [];
   const discarded: Array<string> = [];
@@ -91,11 +97,14 @@ function makeHarness(options?: {
     Layer.provide(
       Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
         prepareClone: (input) =>
-          Effect.succeed({
-            destinationPath: input.destinationPath,
-            remoteUrl: input.remoteUrl ?? "",
-            cloneUrl: input.remoteUrl ?? "",
-            repository: null,
+          Effect.sync(() => {
+            prepared.push(input.destinationPath);
+            return {
+              destinationPath: input.destinationPath,
+              remoteUrl: input.remoteUrl ?? "",
+              cloneUrl: input.remoteUrl ?? "",
+              repository: null,
+            };
           }),
         cloneRepository:
           options?.clone ??
@@ -109,7 +118,7 @@ function makeHarness(options?: {
       }),
     ),
   );
-  return { layer, hooks, created, cloned, discarded };
+  return { layer, hooks, prepared, created, cloned, discarded };
 }
 
 describe("ProjectCloneTracker", () => {
@@ -135,7 +144,7 @@ describe("ProjectCloneTracker", () => {
       );
       yield* Effect.yieldNow;
 
-      const result = yield* tracker.start(startInput, harness.hooks);
+      const result = yield* tracker.start(trustedMutationAuthority, startInput, harness.hooks);
       expect(result.cwd).toBe("/workspace/t3code");
       // The project exists before git runs so the draft can open immediately.
       expect(harness.created).toEqual([{ projectId, workspaceRoot: "/workspace/t3code" }]);
@@ -179,7 +188,7 @@ describe("ProjectCloneTracker", () => {
     });
     return Effect.gen(function* () {
       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
-      yield* tracker.start(startInput, harness.hooks);
+      yield* tracker.start(trustedMutationAuthority, startInput, harness.hooks);
       yield* Effect.yieldNow;
       const failed = yield* tracker.get(projectId);
       expect(failed).toMatchObject({ phase: "failed", error: "fatal: repository not found" });
@@ -197,7 +206,7 @@ describe("ProjectCloneTracker", () => {
     const harness = makeHarness({ clone: () => Effect.never });
     return Effect.gen(function* () {
       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
-      yield* tracker.start(startInput, harness.hooks);
+      yield* tracker.start(trustedMutationAuthority, startInput, harness.hooks);
       yield* Effect.yieldNow;
 
       expect(yield* tracker.cancel(projectId)).toBe(true);
@@ -219,7 +228,7 @@ describe("ProjectCloneTracker", () => {
     };
     return Effect.gen(function* () {
       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
-      yield* tracker.start(startInput, hooks);
+      yield* tracker.start(trustedMutationAuthority, startInput, hooks);
       yield* Effect.yieldNow;
       expect((yield* tracker.get(projectId))?.phase).toBe("done");
       expect(yield* tracker.cancel(projectId)).toBe(false);
@@ -258,7 +267,7 @@ describe("ProjectCloneTracker", () => {
     );
     return Effect.gen(function* () {
       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
-      const result = yield* tracker.start(startInput, harness.hooks);
+      const result = yield* tracker.start(trustedMutationAuthority, startInput, harness.hooks);
       yield* Effect.yieldNow;
       expect(result.remoteUrl).toBe("https://github.com/octocat/t3code.git");
       expect(cloneUrls).toEqual(["https://user:s3cret@github.com/octocat/t3code.git"]);
@@ -269,7 +278,7 @@ describe("ProjectCloneTracker", () => {
     const harness = makeHarness({ clone: () => Effect.never });
     return Effect.gen(function* () {
       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
-      yield* tracker.start(startInput, harness.hooks);
+      yield* tracker.start(trustedMutationAuthority, startInput, harness.hooks);
       yield* Effect.yieldNow;
       yield* tracker.discard(projectId);
       expect(yield* tracker.get(projectId)).toBeNull();
@@ -286,11 +295,11 @@ describe("ProjectCloneTracker", () => {
     };
     return Effect.gen(function* () {
       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
-      const error = yield* Effect.flip(tracker.start(startInput, hooks));
+      const error = yield* Effect.flip(tracker.start(trustedMutationAuthority, startInput, hooks));
       expect(error.message).toContain("workspace root exists");
       expect(yield* tracker.get(projectId)).toBeNull();
       // The destination is free again for a corrected attempt.
-      yield* tracker.start(startInput, harness.hooks);
+      yield* tracker.start(trustedMutationAuthority, startInput, harness.hooks);
       yield* Effect.yieldNow;
       expect((yield* tracker.get(projectId))?.phase).toBe("done");
     }).pipe(Effect.provide(harness.layer));
@@ -314,7 +323,9 @@ describe("ProjectCloneTracker", () => {
     );
     return Effect.gen(function* () {
       const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
-      const error = yield* Effect.flip(tracker.start(startInput, harness.hooks));
+      const error = yield* Effect.flip(
+        tracker.start(trustedMutationAuthority, startInput, harness.hooks),
+      );
       expect(error.message).toContain("not empty");
       expect(harness.created).toEqual([]);
       expect(yield* tracker.get(projectId)).toBeNull();
@@ -351,3 +362,26 @@ describe("parseGitCloneProgressLine", () => {
     expect(parseGitCloneProgressLine("fatal: repository not found")).toBeNull();
   });
 });
+
+it.effect(
+  "restricted and view-only clone creation denies before repository preparation or project effects",
+  () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+      for (const current of [
+        { scopes: [AuthOrchestrationOperateScope], resourceGrant: grantA },
+        { scopes: [AuthOrchestrationReadScope], resourceGrant: AuthAllResourceGrant },
+      ]) {
+        const authority: MutationAuthority = { current: Effect.succeed(current) };
+        expect((yield* Effect.flip(tracker.start(authority, startInput, harness.hooks)))._tag).toBe(
+          "EnvironmentAuthorizationError",
+        );
+      }
+      expect(harness.prepared).toEqual([]);
+      expect(harness.created).toEqual([]);
+      expect(harness.cloned).toEqual([]);
+      expect(yield* tracker.get(projectId)).toBeNull();
+    }).pipe(Effect.provide(harness.layer), Effect.scoped);
+  },
+);

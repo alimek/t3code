@@ -272,7 +272,7 @@ const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
     // Project creation has no user model choice; only the bootstrap thread
     // gets an automatic selection, and an explicit project default wins.
     const threadModelSelection = getAutoBootstrapThreadModelSelection();
-    const { project } = yield* projects.bootstrap({
+    const { project } = yield* projects.bootstrap(trustedMutationAuthority, {
       commandId: CommandId.make(yield* randomUUID),
       projectId: ProjectId.make(yield* randomUUID),
       title: path.basename(serverConfig.cwd) || "project",

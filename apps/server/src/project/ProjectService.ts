@@ -1,13 +1,20 @@
-import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
+import {
+  authorizeProjectCommand,
+  authorizeCommandAdmission,
+  mutationDenied,
+  type MutationAuthority,
+  type CommandAdmission,
+} from "../auth/CommandAuthorization.ts";
 import {
   CommandId,
+  EnvironmentAuthorizationError,
   type OrchestrationProjectShell,
   ProjectId,
   type Project,
   type ProjectCreatePayload,
   type ProjectUpdatePayload,
   type ProjectSnapshot,
-  type ThreadId,
+  ThreadId,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
@@ -17,6 +24,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
@@ -27,6 +35,7 @@ import {
   encodeProjectCommandRejection,
   planProjectCommand,
   type ProjectCommand,
+  ProjectCommandNotEmptyError,
 } from "../orchestration-v2/ProjectCommands.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
@@ -108,20 +117,31 @@ export type ProjectServiceError =
   | ProjectNotFoundError
   | ProjectConflictError
   | ProjectNotEmptyError
-  | ProjectOperationError;
+  | ProjectOperationError
+  | EnvironmentAuthorizationError;
 
 export class ProjectService extends Context.Service<
   ProjectService,
   {
-    readonly create: (input: ProjectCreateInput) => Effect.Effect<Project, ProjectServiceError>;
+    readonly create: (
+      authority: MutationAuthority,
+      input: ProjectCreateInput,
+    ) => Effect.Effect<Project, ProjectServiceError>;
     readonly bootstrap: (
+      authority: MutationAuthority,
       input: ProjectBootstrapInput,
     ) => Effect.Effect<
       { readonly project: Project; readonly created: boolean },
       ProjectServiceError
     >;
-    readonly update: (input: ProjectUpdateInput) => Effect.Effect<Project, ProjectServiceError>;
-    readonly delete: (input: ProjectDeleteInput) => Effect.Effect<Project, ProjectServiceError>;
+    readonly update: (
+      authority: MutationAuthority,
+      input: ProjectUpdateInput,
+    ) => Effect.Effect<Project, ProjectServiceError>;
+    readonly delete: (
+      authority: MutationAuthority,
+      input: ProjectDeleteInput,
+    ) => Effect.Effect<Project, ProjectServiceError>;
     readonly getById: (
       projectId: ProjectId,
       options?: { readonly includeDeleted?: boolean },
@@ -149,6 +169,7 @@ export class ProjectService extends Context.Service<
 >()("t3/project/ProjectService") {}
 
 export const make = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
   const projects = yield* ProjectStore.ProjectStoreV2;
   const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
@@ -219,16 +240,45 @@ export const make = Effect.gen(function* () {
         ),
       );
 
+  const isAuthorizationError = Schema.is(EnvironmentAuthorizationError);
+  const isNotEmptyError = Schema.is(ProjectCommandNotEmptyError);
+  const isSinkWriteError = Schema.is(EventSink.EventSinkWriteError);
+  const mutationError = (
+    operation: ProjectOperationError["operation"],
+    projectId: ProjectId,
+    cause: unknown,
+  ) => {
+    if (isAuthorizationError(cause)) return cause;
+    if (isNotEmptyError(cause)) return new ProjectNotEmptyError({ projectId });
+    if (isSinkWriteError(cause)) {
+      if (isAuthorizationError(cause.cause)) return cause.cause;
+      if (isNotEmptyError(cause.cause)) return new ProjectNotEmptyError({ projectId });
+    }
+    return new ProjectOperationError({ operation, projectId, cause });
+  };
+
+  const admit = (
+    authority: MutationAuthority,
+    command: Parameters<typeof authorizeProjectCommand>[2],
+  ) =>
+    sql
+      .withTransaction(authorizeProjectCommand(sql, authority, command))
+      .pipe(Effect.mapError(() => mutationDenied()));
+
   /**
    * Plan one command against rows read under its locks, then commit its event or
    * its rejection. A reused command id resolves to the receipt it already has.
    */
-  const commit = Effect.fn("ProjectService.commit")(function* (command: ProjectCommand) {
+  const commit = Effect.fn("ProjectService.commit")(function* (
+    authority: MutationAuthority,
+    command: ProjectCommand,
+  ) {
     const { projectId } = command;
     const dispatchError = (cause: unknown) =>
-      new ProjectOperationError({ operation: "dispatch-project-command", projectId, cause });
+      mutationError("dispatch-project-command", projectId, cause);
     const workspaceRoot = command.type === "project.delete" ? undefined : command.workspaceRoot;
     const planAndCommit = Effect.gen(function* () {
+      yield* admit(authority, command);
       const project = Option.getOrUndefined(yield* readRow(projectId, { includeDeleted: true }));
       const workspaceOwner =
         workspaceRoot === undefined
@@ -249,22 +299,28 @@ export const make = Effect.gen(function* () {
         now,
       });
       if (Result.isSuccess(planned)) {
-        const { receipt } = yield* eventSink.commitProjectCommand({
+        const { receipt } = yield* eventSink.commitProjectCommand(
+          { authority, command },
+          {
+            commandId: command.commandId,
+            projectId,
+            commandType: command.type,
+            acceptedAt: now,
+            event: planned.success,
+          },
+        );
+        return receipt;
+      }
+      return yield* eventSink.commitRejectedProjectCommand(
+        { authority, command },
+        {
           commandId: command.commandId,
           projectId,
           commandType: command.type,
-          acceptedAt: now,
-          event: planned.success,
-        });
-        return receipt;
-      }
-      return yield* eventSink.commitRejectedProjectCommand({
-        commandId: command.commandId,
-        projectId,
-        commandType: command.type,
-        rejectedAt: now,
-        error: encodeProjectCommandRejection(planned.failure),
-      });
+          rejectedAt: now,
+          error: encodeProjectCommandRejection(planned.failure),
+        },
+      );
     });
     const receipt = yield* projectLocks
       .withLock(
@@ -339,13 +395,14 @@ export const make = Effect.gen(function* () {
   });
 
   const create: ProjectService["Service"]["create"] = Effect.fn("ProjectService.create")(
-    function* (input) {
+    function* (authority, input) {
+      yield* admit(authority, { ...input, type: "project.create" });
       const workspaceRoot = yield* normalizeWorkspaceRoot({
         projectId: input.projectId,
         workspaceRoot: input.workspaceRoot,
         createIfMissing: input.createWorkspaceRootIfMissing ?? false,
       });
-      yield* commit({
+      yield* commit(authority, {
         type: "project.create",
         commandId: input.commandId,
         projectId: input.projectId,
@@ -353,13 +410,15 @@ export const make = Effect.gen(function* () {
         workspaceRoot,
         ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
       });
+      yield* admit(authority, { ...input, type: "project.create" });
       yield* projectEnrichment.invalidate([workspaceRoot]);
       return yield* readCommitted(input.projectId);
     },
   );
 
   const update: ProjectService["Service"]["update"] = Effect.fn("ProjectService.update")(
-    function* (input) {
+    function* (authority, input) {
+      yield* admit(authority, { ...input, type: "project.meta.update" });
       const existing = yield* readRow(input.projectId);
       if (Option.isNone(existing)) {
         return yield* new ProjectNotFoundError({ projectId: input.projectId });
@@ -372,12 +431,12 @@ export const make = Effect.gen(function* () {
               projectId: input.projectId,
               workspaceRoot: input.workspaceRoot,
             });
-      yield* commit({
+      yield* commit(authority, {
         type: "project.meta.update",
         commandId: input.commandId,
         projectId: input.projectId,
         ...(input.title === undefined ? {} : { title: input.title }),
-        ...(workspaceRoot === previousRoot ? {} : { workspaceRoot }),
+        ...(input.workspaceRoot === undefined ? {} : { workspaceRoot }),
         ...(input.defaultModelSelection === undefined
           ? {}
           : { defaultModelSelection: input.defaultModelSelection }),
@@ -389,6 +448,7 @@ export const make = Effect.gen(function* () {
           : { defaultThreadEnvMode: input.defaultThreadEnvMode }),
         ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
       });
+      yield* admit(authority, { ...input, type: "project.meta.update" });
       if (workspaceRoot !== previousRoot) {
         yield* projectEnrichment.invalidate([previousRoot, workspaceRoot]);
       }
@@ -397,18 +457,47 @@ export const make = Effect.gen(function* () {
   );
 
   const bootstrap: ProjectService["Service"]["bootstrap"] = Effect.fn("ProjectService.bootstrap")(
-    function* (input) {
-      const existing = yield* getByWorkspaceRoot(input.workspaceRoot);
-      if (Option.isSome(existing)) return { project: existing.value, created: false };
-      return { project: yield* create(input), created: true };
+    function* (authority, input) {
+      yield* admit(authority, { ...input, type: "project.create" });
+      const workspaceRoot = yield* normalizeWorkspaceRoot({ workspaceRoot: input.workspaceRoot });
+      const existing = yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* authorizeProjectCommand(sql, authority, { ...input, type: "project.create" });
+            return yield* projects.findActiveByWorkspaceRoot(workspaceRoot);
+          }),
+        )
+        .pipe(Effect.mapError((cause) => mutationError("read-project", input.projectId, cause)));
+      if (Option.isSome(existing)) {
+        yield* admit(authority, { ...input, type: "project.create" });
+        return { project: yield* hydrate(existing.value), created: false };
+      }
+      return { project: yield* create(authority, input), created: true };
     },
   );
 
   /** Delete one child thread durably; a stable command id makes a retry resume the cascade. */
   const deleteChildThread = Effect.fn("ProjectService.deleteChildThread")(function* (
+    authority: MutationAuthority,
     input: ProjectDeleteInput,
     threadId: ThreadId,
   ) {
+    const command = {
+      type: "thread.delete" as const,
+      commandId: CommandId.make(`${input.commandId}:delete-thread:${threadId}`),
+      threadId,
+    };
+    const admission = { authority, command, projectId: input.projectId } satisfies CommandAdmission;
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        yield* authorizeProjectCommand(sql, authority, { ...input, type: "project.delete" });
+        yield* authorizeCommandAdmission(sql, admission, command.commandId);
+      }),
+    );
+    const rows = yield* sql<{ readonly deleted: string | null; readonly project: string }>`
+      SELECT deleted_at AS deleted, project_id AS project FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}
+    `;
+    if (rows[0]?.project !== input.projectId || rows[0].deleted !== null) return;
     yield* legacyImporter.ensureTranscript(threadId);
     const projection = yield* threadProjections.getThreadRecords(threadId, [
       "runs",
@@ -421,11 +510,6 @@ export const make = Effect.gen(function* () {
     if (projection.thread.deletedAt !== null || projection.thread.projectId !== input.projectId) {
       return;
     }
-    const command = {
-      type: "thread.delete" as const,
-      commandId: CommandId.make(`${input.commandId}:delete-thread:${threadId}`),
-      threadId,
-    };
     const now = yield* DateTime.now;
     const plan = yield* planThreadDeletion({
       command,
@@ -434,7 +518,7 @@ export const make = Effect.gen(function* () {
       now,
       idAllocator,
     });
-    const committed = yield* eventSink.commitCommand(trustedMutationAuthority, {
+    const committed = yield* eventSink.commitCommand(admission, {
       commandId: command.commandId,
       commandType: command.type,
       threadId,
@@ -457,20 +541,15 @@ export const make = Effect.gen(function* () {
 
   /** Refuse a non-empty project without force, else delete its live threads first. */
   const deleteChildThreads = Effect.fn("ProjectService.deleteChildThreads")(function* (
+    authority: MutationAuthority,
     input: ProjectDeleteInput,
   ) {
     const { projectId } = input;
-    // The V2 shell is the only record of which threads are live.
-    const snapshot = yield* threadProjections
-      .getShellSnapshot()
-      .pipe(
-        Effect.mapError(
-          (cause) => new ProjectOperationError({ operation: "list-threads", projectId, cause }),
-        ),
-      );
-    const projectThreads = [...snapshot.threads, ...snapshot.archivedThreads].filter(
-      (thread) => thread.projectId === projectId,
-    );
+    yield* admit(authority, { ...input, type: "project.delete" });
+    const projectThreads = yield* sql<{ readonly id: string }>`
+      SELECT thread_id AS id FROM orchestration_v2_projection_threads
+      WHERE project_id = ${projectId} AND deleted_at IS NULL ORDER BY thread_id
+    `.pipe(Effect.mapError((cause) => mutationError("list-threads", projectId, cause)));
     if (projectThreads.length > 0 && input.force !== true) {
       return yield* new ProjectNotEmptyError({ projectId });
     }
@@ -479,20 +558,19 @@ export const make = Effect.gen(function* () {
       projectThreads,
       (thread) =>
         threadCommands
-          .withLock(thread.id, deleteChildThread(input, thread.id))
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectOperationError({ operation: "delete-thread", projectId, cause }),
-            ),
-          ),
+          .withLock(
+            ThreadId.make(thread.id),
+            deleteChildThread(authority, input, ThreadId.make(thread.id)),
+          )
+          .pipe(Effect.mapError((cause) => mutationError("delete-thread", projectId, cause))),
       { concurrency: 1, discard: true },
     );
   });
 
   const deleteProject: ProjectService["Service"]["delete"] = Effect.fn("ProjectService.delete")(
-    function* (input) {
+    function* (authority, input) {
       const { projectId } = input;
+      yield* admit(authority, { ...input, type: "project.delete" });
       // A deleted row still reaches commit, so a retried command id replays its
       // receipt and any other command id is rejected as not found.
       const existing = yield* readRow(projectId, { includeDeleted: true });
@@ -501,9 +579,10 @@ export const make = Effect.gen(function* () {
       }
 
       if (existing.value.deletedAt === null) {
-        yield* deleteChildThreads(input);
+        yield* deleteChildThreads(authority, input);
       }
-      yield* commit({ type: "project.delete", commandId: input.commandId, projectId });
+      yield* commit(authority, { type: "project.delete", commandId: input.commandId, projectId });
+      yield* admit(authority, { ...input, type: "project.delete" });
       yield* projectEnrichment.invalidate([existing.value.workspaceRoot]);
       return yield* readCommitted(projectId);
     },

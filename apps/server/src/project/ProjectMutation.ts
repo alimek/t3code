@@ -1,3 +1,4 @@
+import { type MutationAuthority } from "../auth/CommandAuthorization.ts";
 import { type ProjectMutation } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
@@ -7,11 +8,12 @@ type ProjectMutations = Pick<ProjectService["Service"], "create" | "delete" | "u
 
 export const projectMutationOperation = Effect.fn("projectMutationOperation")(function* (
   projects: ProjectMutations,
+  authority: MutationAuthority,
   mutation: ProjectMutation,
 ) {
   switch (mutation.type) {
     case "project.create":
-      return yield* projects.create({
+      return yield* projects.create(authority, {
         commandId: mutation.commandId,
         projectId: mutation.projectId,
         title: mutation.title,
@@ -26,7 +28,7 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
       });
 
     case "project.update":
-      return yield* projects.update({
+      return yield* projects.update(authority, {
         commandId: mutation.commandId,
         projectId: mutation.projectId,
         ...(mutation.title === undefined ? {} : { title: mutation.title }),
@@ -44,7 +46,7 @@ export const projectMutationOperation = Effect.fn("projectMutationOperation")(fu
       });
 
     case "project.delete":
-      return yield* projects.delete({
+      return yield* projects.delete(authority, {
         commandId: mutation.commandId,
         projectId: mutation.projectId,
         ...(mutation.force === undefined ? {} : { force: mutation.force }),

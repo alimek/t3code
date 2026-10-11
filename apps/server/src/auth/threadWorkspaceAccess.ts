@@ -11,6 +11,7 @@ import {
 import type * as SqlClient from "effect/sql/SqlClient";
 import {
   authorizeMutationTarget,
+  registeredMutationRoots,
   mutationDenied,
   trustedMutationAuthority,
   type MutationAuthority,
@@ -37,15 +38,8 @@ export const requireRegisteredMutationPath = Effect.fn("resourceAuthorization.mu
       current.resourceGrant.providers.mode !== "explicit"
     )
       return yield* authorizeMutationTarget(sql, authority, target);
-    const roots = yield* sql<{ readonly root: string | null }>`
-    SELECT workspace_root AS root FROM projection_projects WHERE project_id = ${target.projectId} AND deleted_at IS NULL
-    UNION SELECT json_extract(payload_json, '$.worktreePath') FROM orchestration_v2_projection_threads
-      WHERE thread_id = ${target.threadId ?? ""} AND project_id = ${target.projectId} AND deleted_at IS NULL
-  `;
-    yield* requireCanonicalRoot(
-      roots.flatMap((row) => (row.root === null ? [] : [row.root])),
-      requested,
-    ).pipe(Effect.mapError(() => mutationDenied()));
+    const roots = yield* registeredMutationRoots(sql, target);
+    yield* requireCanonicalRoot(roots, requested).pipe(Effect.mapError(() => mutationDenied()));
     yield* authorizeMutationTarget(sql, authority, target);
   },
 );

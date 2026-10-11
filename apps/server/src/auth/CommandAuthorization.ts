@@ -22,6 +22,7 @@ import {
   trustedReadAuthority,
 } from "./ResourceAuthorization.ts";
 import { deriveProviderThread } from "../orchestration-v2/IdAllocator.ts";
+import type { ProjectCommand } from "../orchestration-v2/ProjectCommands.ts";
 import type { CommandReceiptV2 } from "../orchestration-v2/CommandReceiptStore.ts";
 import {
   parseThreadSegmentFromAttachmentId,
@@ -36,7 +37,15 @@ export type MutationAuthority =
   | Exclude<ThreadReadAuthority, typeof trustedReadAuthority>;
 export type CommandAdmission =
   | typeof trustedMutationAuthority
-  | { readonly authority: MutationAuthority; readonly command: OrchestrationV2ServerCommand };
+  | {
+      readonly authority: MutationAuthority;
+      readonly command: OrchestrationV2ServerCommand;
+      readonly projectId?: ProjectId;
+    };
+export type ProjectAdmission = {
+  readonly authority: MutationAuthority;
+  readonly command: ProjectCommand;
+};
 
 const encodeIds = Schema.encodeSync(Schema.fromJsonString(Schema.Array(Schema.String)));
 export const mutationDenied = () =>
@@ -140,7 +149,10 @@ const currentMutationGrant = Effect.fnUntraced(function* (authority: MutationAut
 
 /** Rejected receipts do not retain original source participants; opaque diagnostics are not admission. */
 export const receiptForMutationAuthority = Effect.fnUntraced(
-  function* (authority: MutationAuthority, receipt: CommandReceiptV2) {
+  function* <T extends Pick<CommandReceiptV2, "status" | "error">>(
+    authority: MutationAuthority,
+    receipt: T,
+  ) {
     if (receipt.status !== "rejected") return receipt;
     const grant = yield* currentMutationGrant(authority);
     return grant !== undefined && (grant.projects.mode !== "all" || grant.providers.mode !== "all")
@@ -154,18 +166,141 @@ const authorizeProjects = Effect.fnUntraced(function* (
   sql: SqlClient.SqlClient,
   grant: AuthResourceGrant,
   ids: ReadonlyArray<string>,
+  includeDeleted = false,
 ) {
   if (ids.length === 0) return;
   const unique = [...new Set(ids)];
   const rows = yield* sql<{ readonly id: string }>`
     SELECT project_id AS id FROM projection_projects
-    WHERE project_id IN (SELECT value FROM json_each(${encodeIds(unique)})) AND deleted_at IS NULL
+    WHERE project_id IN (SELECT value FROM json_each(${encodeIds(unique)})) AND (${includeDeleted} OR deleted_at IS NULL)
   `;
   if (
     rows.length !== unique.length ||
     rows.some((r) => !resourceGrantAllowsProject(grant, ProjectId.make(r.id)))
   )
     return yield* mutationDenied();
+});
+
+/** Root/bootstrap creation has no safe restricted project association. */
+export const requireUnrestrictedMutation = Effect.fnUntraced(function* (
+  authority: MutationAuthority,
+) {
+  const grant = yield* currentMutationGrant(authority);
+  if (grant !== undefined && (grant.projects.mode !== "all" || grant.providers.mode !== "all"))
+    return yield* mutationDenied();
+});
+
+/** Raw project policy runs before normalization, root lookup or enrichment. */
+export const authorizeProjectCommand = Effect.fnUntraced(
+  function* (
+    sql: SqlClient.SqlClient,
+    authority: MutationAuthority,
+    command: {
+      readonly type: ProjectCommand["type"];
+      readonly commandId: CommandId;
+      readonly projectId: ProjectId;
+      readonly workspaceRoot?: string | undefined;
+      readonly scripts?: unknown;
+    },
+  ) {
+    const grant = yield* currentMutationGrant(authority);
+    if (grant === undefined) return;
+    const restricted = grant.projects.mode !== "all" || grant.providers.mode !== "all";
+    if (
+      restricted &&
+      (command.type === "project.create" ||
+        (command.type === "project.meta.update" &&
+          (command.workspaceRoot !== undefined || command.scripts !== undefined)))
+    )
+      return yield* mutationDenied();
+    // Own deleted rows remain usable for deletion receipts/retries. Missing IDs never become grants.
+    if (restricted) yield* authorizeProjects(sql, grant, [command.projectId], true);
+    yield* authorizeCommandReceipt(sql, authority, command.commandId, true, true);
+  },
+  Effect.mapError(() => mutationDenied()),
+);
+
+export const authorizeProjectAdmission = Effect.fnUntraced(function* (
+  sql: SqlClient.SqlClient,
+  admission: ProjectAdmission,
+  target: {
+    readonly commandId: CommandId;
+    readonly projectId: ProjectId;
+    readonly commandType: string;
+  },
+) {
+  if (
+    !admission?.authority ||
+    !admission.command ||
+    admission.command.commandId !== target.commandId ||
+    admission.command.projectId !== target.projectId ||
+    admission.command.type !== target.commandType
+  )
+    return yield* mutationDenied();
+  yield* authorizeProjectCommand(sql, admission.authority, admission.command);
+});
+
+/** Pure SQL association shared by raw commands and launch/retry canonical path admission. */
+export const registeredMutationRoots = Effect.fnUntraced(function* (
+  sql: SqlClient.SqlClient,
+  target: { readonly projectId: ProjectId; readonly threadId?: ThreadId },
+) {
+  const roots = yield* sql<{ readonly root: string | null }>`
+    SELECT workspace_root AS root FROM projection_projects WHERE project_id = ${target.projectId} AND deleted_at IS NULL
+    UNION SELECT json_extract(payload_json, '$.worktreePath') FROM orchestration_v2_projection_threads
+      WHERE thread_id = ${target.threadId ?? ""} AND project_id = ${target.projectId} AND deleted_at IS NULL
+  `;
+  return roots.flatMap((row) => (row.root === null ? [] : [row.root]));
+});
+
+const requireRegisteredCommandPath = Effect.fnUntraced(function* (
+  sql: SqlClient.SqlClient,
+  target: { readonly projectId: ProjectId; readonly threadId: ThreadId },
+  requested: string,
+) {
+  const foreign = yield* sql`SELECT project_id FROM projection_projects
+    WHERE workspace_root = ${requested} AND project_id != ${target.projectId} LIMIT 1`;
+  if (foreign.length > 0) return yield* mutationDenied();
+  const roots = yield* registeredMutationRoots(sql, target);
+  if (!roots.includes(requested)) return yield* mutationDenied();
+});
+
+/** Direct command bindings use only an already registered root or this thread's workspace.
+ * New worktrees are bound by the app-owned preparation path, which opts into trust explicitly.
+ */
+const authorizeCommandWorkspace = Effect.fnUntraced(function* (
+  sql: SqlClient.SqlClient,
+  grant: AuthResourceGrant,
+  command: OrchestrationV2ServerCommand,
+) {
+  if (grant.projects.mode === "all" && grant.providers.mode === "all") return;
+  if (
+    command.type !== "thread.create" &&
+    command.type !== "thread.metadata.update" &&
+    command.type !== "thread.pull-request.sync"
+  )
+    return;
+  const paths = [
+    "worktreePath" in command ? command.worktreePath : undefined,
+    ...(command.type === "thread.metadata.update" ? [command.expectedWorktreePath] : []),
+    ...(command.type === "thread.pull-request.sync" ? [command.expected.worktreePath] : []),
+  ];
+  if (paths.every((path) => path == null)) return;
+  const owner =
+    command.type === "thread.create"
+      ? command.projectId
+      : (yield* sql<{
+          readonly project: string;
+        }>`SELECT project_id AS project FROM orchestration_v2_projection_threads
+      WHERE thread_id = ${command.threadId}`)[0]?.project;
+  if (owner === undefined) return yield* mutationDenied();
+  for (const path of new Set(paths))
+    if (path != null)
+      yield* requireRegisteredCommandPath(
+        sql,
+        { projectId: ProjectId.make(owner), threadId: command.threadId },
+        path,
+      );
 });
 
 /** Only static projection table/column names from this module reach this resolver. */
@@ -505,6 +640,7 @@ export const authorizeCommand = Effect.fn("resourceAuthorization.command")(
           allowCreate: true,
         });
     }
+    yield* authorizeCommandWorkspace(sql, grant, command);
     const runIds = [
       ...("runId" in command ? [command.runId] : []),
       ...("parentRunId" in command ? [command.parentRunId] : []),
@@ -659,6 +795,7 @@ export const authorizeCommandReceipt = Effect.fn("resourceAuthorization.commandR
     authority: MutationAuthority,
     commandId: CommandId,
     includeDeleted = true,
+    includeDeletedProject = false,
   ) {
     const grant = yield* currentMutationGrant(authority);
     if (grant === undefined) return;
@@ -669,8 +806,49 @@ export const authorizeCommandReceipt = Effect.fn("resourceAuthorization.commandR
     for (const owner of owners) {
       if (owner.kind === "thread")
         yield* authorizeMutationThread(sql, grant, ThreadId.make(owner.id), includeDeleted);
-      else if (owner.kind === "project") yield* authorizeProjects(sql, grant, [owner.id]);
+      else if (owner.kind === "project")
+        yield* authorizeProjects(sql, grant, [owner.id], includeDeletedProject);
       else return yield* mutationDenied();
+    }
+    if (
+      includeDeletedProject &&
+      (grant.projects.mode !== "all" || grant.providers.mode !== "all")
+    ) {
+      const retargets = yield* sql`
+        SELECT sequence FROM orchestration_events WHERE command_id = ${commandId} AND aggregate_kind = 'project'
+          AND (event_type = 'project.created' OR json_type(payload_json, '$.workspaceRoot') IS NOT NULL
+            OR json_type(payload_json, '$.scripts') IS NOT NULL)
+      `;
+      if (retargets.length > 0) return yield* mutationDenied();
+    }
+    const projectReferences = yield* sql<{ readonly id: string | null }>`
+      SELECT json_extract(payload_json, '$.projectId') AS id FROM orchestration_events
+      WHERE command_id = ${commandId} AND aggregate_kind = 'project'
+    `;
+    yield* authorizeProjects(
+      sql,
+      grant,
+      projectReferences.flatMap((row) => (row.id === null ? [] : [row.id])),
+      includeDeletedProject,
+    );
+    if (grant.projects.mode !== "all" || grant.providers.mode !== "all") {
+      const paths = yield* sql<{
+        readonly thread: string;
+        readonly project: string;
+        readonly path: string;
+      }>`
+        SELECT e.stream_id AS thread, t.project_id AS project, json_extract(e.payload_json, '$.worktreePath') AS path
+        FROM orchestration_events e JOIN orchestration_v2_projection_threads t ON t.thread_id = e.stream_id
+        WHERE e.command_id = ${commandId} AND e.aggregate_kind = 'thread'
+          AND e.event_type IN ('thread.created', 'thread.metadata-updated')
+          AND json_extract(e.payload_json, '$.worktreePath') IS NOT NULL
+      `;
+      for (const path of paths)
+        yield* requireRegisteredCommandPath(
+          sql,
+          { projectId: ProjectId.make(path.project), threadId: ThreadId.make(path.thread) },
+          path.path,
+        );
     }
     const references = yield* sql<{ readonly kind: string; readonly id: string }>`
     WITH payloads AS (SELECT event_type, payload_json AS p FROM orchestration_events WHERE command_id = ${commandId} AND aggregate_kind = 'thread'),
@@ -825,6 +1003,16 @@ export const authorizeCommandAdmission = Effect.fnUntraced(function* (
       target.commandType !== admission.command.type)
   )
     return yield* mutationDenied();
+  if (admission.projectId !== undefined) {
+    const rows = yield* sql<{ readonly project: string }>`
+      SELECT t.project_id AS project FROM orchestration_v2_projection_threads t
+      JOIN projection_projects p ON p.project_id = t.project_id
+      WHERE t.thread_id = ${commandTargets(admission.command).thread} AND p.deleted_at IS NULL
+    `;
+    if (rows.length !== 1 || rows[0]!.project !== admission.projectId)
+      return yield* mutationDenied();
+    yield* authorizeMutationTarget(sql, admission.authority, { projectId: admission.projectId });
+  }
   yield* authorizeCommand(sql, admission.authority, admission.command);
   yield* authorizeCommandReceipt(sql, admission.authority, commandId);
 });

@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import {
   AuthAdministrativeScopes,
   CommandId,
@@ -426,7 +427,8 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
       const projects = yield* ProjectService.ProjectService;
       const output = yield* run({
         snapshot,
-        dispatch: (command) => projectMutationOperation(projects, command).pipe(Effect.asVoid),
+        dispatch: (command) =>
+          projectMutationOperation(projects, trustedMutationAuthority, command).pipe(Effect.asVoid),
         mode: "offline",
       });
       yield* Console.log(output);

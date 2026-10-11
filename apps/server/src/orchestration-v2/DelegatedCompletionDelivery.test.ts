@@ -158,7 +158,7 @@ const seedParentWithTerminalTask = (input: {
       `provider-thread:${String(input.threadId).replace("thread:", "")}`,
     );
 
-    yield* projects.create({
+    yield* projects.create(trustedMutationAuthority, {
       commandId: CommandId.make(`command:seed-project:${input.threadId}`),
       projectId: input.projectId,
       title: "Delegated completion delivery",

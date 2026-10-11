@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { CommandId, type Project, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
@@ -107,7 +108,7 @@ it.layer(layerTest)("ProjectService", (it) => {
       } as const;
       yield* TestClock.setTime(Date.parse("2026-06-20T10:00:00.000Z"));
 
-      const created = yield* service.create({
+      const created = yield* service.create(trustedMutationAuthority, {
         commandId: CommandId.make("command:project:create"),
         projectId,
         title: "Project",
@@ -135,7 +136,7 @@ it.layer(layerTest)("ProjectService", (it) => {
       assert.equal(hydratedCreated?.repositoryIdentity?.canonicalKey, "github.com/t3tools/project");
       assert.equal(hydratedCreated?.faviconPath, "/work/project/favicon.svg");
 
-      const updated = yield* service.update({
+      const updated = yield* service.update(trustedMutationAuthority, {
         commandId: CommandId.make("command:project:update"),
         projectId,
         title: "Renamed",
@@ -160,7 +161,7 @@ it.layer(layerTest)("ProjectService", (it) => {
       assert.deepEqual(Option.getOrThrow(byId).projectIcon, updated.projectIcon);
       assert.equal(Option.getOrThrow(byId).faviconPath, updated.faviconPath);
       assert.equal(Option.getOrThrow(byId).defaultThreadEnvMode, "worktree");
-      const reset = yield* service.update({
+      const reset = yield* service.update(trustedMutationAuthority, {
         commandId: CommandId.make("command:project:reset-appearance"),
         projectId,
         autoPull: false,
@@ -177,7 +178,7 @@ it.layer(layerTest)("ProjectService", (it) => {
         [projectId],
       );
 
-      const deleted = yield* service.delete({
+      const deleted = yield* service.delete(trustedMutationAuthority, {
         commandId: CommandId.make("command:project:delete"),
         projectId,
       });
@@ -204,14 +205,14 @@ it.layer(layerTest)("ProjectService", (it) => {
     Effect.gen(function* () {
       const service = yield* ProjectService.ProjectService;
       yield* TestClock.setTime(Date.parse("2026-06-20T10:00:00.000Z"));
-      yield* service.create({
+      yield* service.create(trustedMutationAuthority, {
         commandId: CommandId.make("command:collision:first"),
         projectId: ProjectId.make("project:collision:first"),
         title: "First",
         workspaceRoot: "/work/shared",
       });
       const error = yield* service
-        .create({
+        .create(trustedMutationAuthority, {
           commandId: CommandId.make("command:collision:second"),
           projectId: ProjectId.make("project:collision:second"),
           title: "Second",
@@ -232,8 +233,8 @@ it.layer(layerTest)("ProjectService", (it) => {
         title: "Bootstrap",
         workspaceRoot: "/work/bootstrap/",
       };
-      const first = yield* service.bootstrap(input);
-      const second = yield* service.bootstrap({
+      const first = yield* service.bootstrap(trustedMutationAuthority, input);
+      const second = yield* service.bootstrap(trustedMutationAuthority, {
         ...input,
         commandId: CommandId.make("command:bootstrap:second"),
         projectId: ProjectId.make("project:bootstrap:unused"),
@@ -255,17 +256,17 @@ it.layer(layerTest)("ProjectService", (it) => {
         title: "Retry",
         workspaceRoot: "/work/retry",
       };
-      const first = yield* service.create(input);
+      const first = yield* service.create(trustedMutationAuthority, input);
       // A retry re-plans against the row it created; its receipt still answers.
-      const retried = yield* service.create(input);
+      const retried = yield* service.create(trustedMutationAuthority, input);
       assert.deepEqual(retried, first);
       const updateInput = {
         commandId: CommandId.make("command:retry:update"),
         projectId,
         autoPull: true,
       };
-      yield* service.update(updateInput);
-      yield* service.update(updateInput);
+      yield* service.update(trustedMutationAuthority, updateInput);
+      yield* service.update(trustedMutationAuthority, updateInput);
 
       const committed = yield* sql<{
         readonly sequence: number;
@@ -298,7 +299,7 @@ it.layer(layerTest)("ProjectService", (it) => {
       const service = yield* ProjectService.ProjectService;
       const sql = yield* SqlClient.SqlClient;
       const projectId = ProjectId.make("project:rejected");
-      yield* service.create({
+      yield* service.create(trustedMutationAuthority, {
         commandId: CommandId.make("command:rejected:create"),
         projectId,
         title: "Rejected",
@@ -317,11 +318,14 @@ it.layer(layerTest)("ProjectService", (it) => {
           },
         ],
       };
-      const first = yield* service.update(invalid).pipe(Effect.flip);
+      const first = yield* service.update(trustedMutationAuthority, invalid).pipe(Effect.flip);
       assert.equal(first._tag, "ProjectOperationError");
       // Same id, now a valid payload: the recorded rejection wins.
       const replayed = yield* service
-        .update({ ...invalid, scripts: [{ ...invalid.scripts[0]!, id: "valid" }] })
+        .update(trustedMutationAuthority, {
+          ...invalid,
+          scripts: [{ ...invalid.scripts[0]!, id: "valid" }],
+        })
         .pipe(Effect.flip);
       assert.equal(replayed._tag, "ProjectOperationError");
       assert.include(
@@ -345,20 +349,20 @@ it.layer(layerTest)("ProjectService", (it) => {
     Effect.gen(function* () {
       const service = yield* ProjectService.ProjectService;
       const other = ProjectId.make("project:conflict:mover");
-      yield* service.create({
+      yield* service.create(trustedMutationAuthority, {
         commandId: CommandId.make("command:conflict:holder"),
         projectId: ProjectId.make("project:conflict:holder"),
         title: "Holder",
         workspaceRoot: "/work/conflict",
       });
-      yield* service.create({
+      yield* service.create(trustedMutationAuthority, {
         commandId: CommandId.make("command:conflict:mover"),
         projectId: other,
         title: "Mover",
         workspaceRoot: "/work/conflict-mover",
       });
       const move = yield* service
-        .update({
+        .update(trustedMutationAuthority, {
           commandId: CommandId.make("command:conflict:move"),
           projectId: other,
           workspaceRoot: "/work/conflict",
@@ -376,7 +380,7 @@ it.layer(layerTest)("ProjectService", (it) => {
     Effect.gen(function* () {
       const service = yield* ProjectService.ProjectService;
       const holderId = ProjectId.make("project:freed:holder");
-      yield* service.create({
+      yield* service.create(trustedMutationAuthority, {
         commandId: CommandId.make("command:freed:holder"),
         projectId: holderId,
         title: "Holder",
@@ -388,13 +392,13 @@ it.layer(layerTest)("ProjectService", (it) => {
         title: "Claim",
         workspaceRoot: "/work/freed",
       };
-      const first = yield* service.create(claim).pipe(Effect.flip);
-      yield* service.delete({
+      const first = yield* service.create(trustedMutationAuthority, claim).pipe(Effect.flip);
+      yield* service.delete(trustedMutationAuthority, {
         commandId: CommandId.make("command:freed:delete"),
         projectId: holderId,
       });
       // A fresh plan would now succeed; the recorded conflict still answers.
-      const replayed = yield* service.create(claim).pipe(Effect.flip);
+      const replayed = yield* service.create(trustedMutationAuthority, claim).pipe(Effect.flip);
       assert.deepEqual(replayed, first);
       assert.instanceOf(replayed, ProjectService.ProjectConflictError);
       assert.isTrue(
@@ -408,15 +412,15 @@ it.layer(layerTest)("ProjectService", (it) => {
       const service = yield* ProjectService.ProjectService;
       const sql = yield* SqlClient.SqlClient;
       const projectId = ProjectId.make("project:delete-retry");
-      yield* service.create({
+      yield* service.create(trustedMutationAuthority, {
         commandId: CommandId.make("command:delete-retry:create"),
         projectId,
         title: "Delete retry",
         workspaceRoot: "/work/delete-retry",
       });
       const input = { commandId: CommandId.make("command:delete-retry:delete"), projectId };
-      const deleted = yield* service.delete(input);
-      assert.deepEqual(yield* service.delete(input), deleted);
+      const deleted = yield* service.delete(trustedMutationAuthority, input);
+      assert.deepEqual(yield* service.delete(trustedMutationAuthority, input), deleted);
       const events = yield* sql<{ readonly command_id: string }>`
         SELECT command_id FROM orchestration_events
         WHERE stream_id = ${projectId} AND event_type = 'project.deleted'
@@ -430,18 +434,21 @@ it.layer(layerTest)("ProjectService", (it) => {
       const service = yield* ProjectService.ProjectService;
       const sql = yield* SqlClient.SqlClient;
       const projectId = ProjectId.make("project:deleted-target");
-      yield* service.create({
+      yield* service.create(trustedMutationAuthority, {
         commandId: CommandId.make("command:deleted-target:create"),
         projectId,
         title: "Deleted target",
         workspaceRoot: "/work/deleted-target",
       });
-      yield* service.delete({
+      yield* service.delete(trustedMutationAuthority, {
         commandId: CommandId.make("command:deleted-target:delete"),
         projectId,
       });
       const again = yield* service
-        .delete({ commandId: CommandId.make("command:deleted-target:delete-again"), projectId })
+        .delete(trustedMutationAuthority, {
+          commandId: CommandId.make("command:deleted-target:delete-again"),
+          projectId,
+        })
         .pipe(Effect.flip);
       assert.instanceOf(again, ProjectService.ProjectNotFoundError);
       const events = yield* sql<{ readonly event_type: string }>`
@@ -471,7 +478,7 @@ it.layer(layerTest)("ProjectService", (it) => {
         title: "Atomic",
         workspaceRoot: "/work/atomic",
       };
-      const failure = yield* service.create(input).pipe(Effect.flip);
+      const failure = yield* service.create(trustedMutationAuthority, input).pipe(Effect.flip);
       assert.equal(failure._tag, "ProjectOperationError");
       const leftovers = yield* sql<{ readonly count: number }>`
         SELECT
@@ -481,7 +488,7 @@ it.layer(layerTest)("ProjectService", (it) => {
       `;
       assert.equal(leftovers[0]?.count, 0);
       yield* sql`DROP TRIGGER fail_project_row`;
-      assert.equal((yield* service.create(input)).id, projectId);
+      assert.equal((yield* service.create(trustedMutationAuthority, input)).id, projectId);
     }),
   );
 });
@@ -525,7 +532,7 @@ it.effect(
         const service = yield* ProjectService.ProjectService;
         const projectId = ProjectId.make("project:slow-enrichment");
         const createFiber = yield* service
-          .create({
+          .create(trustedMutationAuthority, {
             commandId: CommandId.make("command:slow-enrichment:create"),
             projectId,
             title: "Slow enrichment",
@@ -541,7 +548,7 @@ it.effect(
         assert.isNull(created.repositoryIdentity);
         assert.isNull(created.faviconPath);
 
-        const updated = yield* service.update({
+        const updated = yield* service.update(trustedMutationAuthority, {
           commandId: CommandId.make("command:slow-enrichment:update"),
           projectId,
           title: "Updated before enrichment",
@@ -612,7 +619,7 @@ it.effect("keeps project snapshots available when optional metadata enrichment f
     yield* Effect.gen(function* () {
       const service = yield* ProjectService.ProjectService;
       const projectId = ProjectId.make("project:failed-enrichment");
-      yield* service.create({
+      yield* service.create(trustedMutationAuthority, {
         commandId: CommandId.make("command:failed-enrichment:create"),
         projectId,
         title: "Still visible",
@@ -658,7 +665,7 @@ it.effect("invalidates workspace-derived metadata when a project moves", () =>
     yield* Effect.gen(function* () {
       const service = yield* ProjectService.ProjectService;
       const projectId = ProjectId.make("project:moved-enrichment");
-      yield* service.create({
+      yield* service.create(trustedMutationAuthority, {
         commandId: CommandId.make("command:moved-enrichment:create"),
         projectId,
         title: "Moved",
@@ -674,7 +681,7 @@ it.effect("invalidates workspace-derived metadata when a project moves", () =>
       );
 
       yield* Ref.set(metadataVersion, 2);
-      yield* service.update({
+      yield* service.update(trustedMutationAuthority, {
         commandId: CommandId.make("command:moved-enrichment:away"),
         projectId,
         workspaceRoot: "/work/temporary",
@@ -682,7 +689,7 @@ it.effect("invalidates workspace-derived metadata when a project moves", () =>
       yield* service.snapshot;
 
       yield* Ref.set(metadataVersion, 3);
-      yield* service.update({
+      yield* service.update(trustedMutationAuthority, {
         commandId: CommandId.make("command:moved-enrichment:return"),
         projectId,
         workspaceRoot: "/work/original",
@@ -707,19 +714,19 @@ it.effect("serializes two projects claiming the same workspace root", () =>
     // Hold the first claim between its plan and its commit.
     const gatedSink = EventSink.EventSinkV2.of({
       ...eventSink,
-      commitProjectCommand: (input) =>
+      commitProjectCommand: (admission, input) =>
         input.projectId === "project:race:first"
           ? Deferred.succeed(firstReachedCommit, undefined).pipe(
               Effect.andThen(Deferred.await(releaseFirst)),
-              Effect.andThen(eventSink.commitProjectCommand(input)),
+              Effect.andThen(eventSink.commitProjectCommand(admission, input)),
             )
-          : eventSink.commitProjectCommand(input),
+          : eventSink.commitProjectCommand(admission, input),
     });
     const service = yield* ProjectService.make.pipe(
       Effect.provideService(EventSink.EventSinkV2, gatedSink),
     );
     const claim = (name: string) =>
-      service.create({
+      service.create(trustedMutationAuthority, {
         commandId: CommandId.make(`command:race:${name}`),
         projectId: ProjectId.make(`project:race:${name}`),
         title: name,
@@ -747,33 +754,40 @@ it.effect("rejects an update that waited on the lock while its project was delet
     // Hold the delete between its plan and its commit, inside the project lock.
     const gatedSink = EventSink.EventSinkV2.of({
       ...eventSink,
-      commitProjectCommand: (input) =>
+      commitProjectCommand: (admission, input) =>
         input.commandType === "project.delete"
           ? Deferred.succeed(deleteReachedCommit, undefined).pipe(
               Effect.andThen(Deferred.await(releaseDelete)),
-              Effect.andThen(eventSink.commitProjectCommand(input)),
+              Effect.andThen(eventSink.commitProjectCommand(admission, input)),
             )
-          : eventSink.commitProjectCommand(input),
+          : eventSink.commitProjectCommand(admission, input),
     });
     const service = yield* ProjectService.make.pipe(
       Effect.provideService(EventSink.EventSinkV2, gatedSink),
     );
     const sql = yield* SqlClient.SqlClient;
     const projectId = ProjectId.make("project:update-race");
-    yield* service.create({
+    yield* service.create(trustedMutationAuthority, {
       commandId: CommandId.make("command:update-race:create"),
       projectId,
       title: "Update race",
       workspaceRoot: "/work/update-race",
     });
     const deletion = yield* service
-      .delete({ commandId: CommandId.make("command:update-race:delete"), projectId })
+      .delete(trustedMutationAuthority, {
+        commandId: CommandId.make("command:update-race:delete"),
+        projectId,
+      })
       .pipe(Effect.forkChild({ startImmediately: true }));
     yield* Deferred.await(deleteReachedCommit);
     const updateCommandId = CommandId.make("command:update-race:update");
     // The update sees the active row, then queues behind the delete's lock.
     const update = yield* service
-      .update({ commandId: updateCommandId, projectId, title: "Too late" })
+      .update(trustedMutationAuthority, {
+        commandId: updateCommandId,
+        projectId,
+        title: "Too late",
+      })
       .pipe(Effect.flip, Effect.forkChild({ startImmediately: true }));
     yield* Effect.yieldNow;
     yield* Deferred.succeed(releaseDelete, undefined);

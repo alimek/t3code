@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import { CommandId, ProjectId, type Project } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -27,15 +28,15 @@ it.effect("preserves every project mutation field", () =>
   Effect.gen(function* () {
     const calls = yield* Ref.make<ReadonlyArray<unknown>>([]);
     const projects: Pick<ProjectService["Service"], "create" | "delete" | "update"> = {
-      create: (input) =>
+      create: (_authority, input) =>
         Ref.update(calls, (entries) => [...entries, input]).pipe(Effect.as(project)),
-      update: (input) =>
+      update: (_authority, input) =>
         Ref.update(calls, (entries) => [...entries, input]).pipe(Effect.as(project)),
-      delete: (input) =>
+      delete: (_authority, input) =>
         Ref.update(calls, (entries) => [...entries, input]).pipe(Effect.as(project)),
     };
 
-    yield* projectMutationOperation(projects, {
+    yield* projectMutationOperation(projects, trustedMutationAuthority, {
       type: "project.create",
       commandId: CommandId.make("command:create"),
       projectId,
@@ -45,7 +46,7 @@ it.effect("preserves every project mutation field", () =>
       defaultModelSelection: null,
       scripts: [],
     });
-    yield* projectMutationOperation(projects, {
+    yield* projectMutationOperation(projects, trustedMutationAuthority, {
       type: "project.update",
       commandId: CommandId.make("command:update"),
       projectId,
@@ -58,7 +59,7 @@ it.effect("preserves every project mutation field", () =>
       defaultThreadEnvMode: null,
       scripts: [],
     });
-    yield* projectMutationOperation(projects, {
+    yield* projectMutationOperation(projects, trustedMutationAuthority, {
       type: "project.delete",
       commandId: CommandId.make("command:delete"),
       projectId,

@@ -1,6 +1,15 @@
+import { trustedMutationAuthority, type MutationAuthority } from "../auth/CommandAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { CommandId, GitCommandError, ProjectId, ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  GitCommandError,
+  ProjectId,
+  ThreadId,
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  AuthAllResourceGrant,
+} from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -10,6 +19,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
 
+import { grantA } from "../orchestration-v2/projectCollectionTestFixtures.ts";
 import * as ServerConfig from "../config.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
@@ -139,7 +149,7 @@ it.effect("offers nothing when the data dir sits inside a Git checkout", () =>
     yield* Effect.gen(function* () {
       const scratch = yield* ManagedProjectFolders.ManagedProjectFolders;
       assert.isTrue(Option.isNone(yield* scratch.scratchRoot));
-      const failure = yield* Effect.flip(scratch.ensureScratchProject);
+      const failure = yield* Effect.flip(scratch.ensureScratchProject(trustedMutationAuthority));
       assert.equal(failure._tag, "ScratchUnavailableError");
     }).pipe(Effect.provide(layer(baseDir)));
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
@@ -152,10 +162,10 @@ it.effect("creates one Scratch project, even for concurrent first requests", () 
       const projects = yield* ProjectService.ProjectService;
       // Without handling the losing creates' conflicts, eight racers fail.
       const racers = yield* Effect.all(
-        Array.from({ length: 8 }, () => scratch.ensureScratchProject),
+        Array.from({ length: 8 }, () => scratch.ensureScratchProject(trustedMutationAuthority)),
         { concurrency: "unbounded" },
       );
-      const again = yield* scratch.ensureScratchProject;
+      const again = yield* scratch.ensureScratchProject(trustedMutationAuthority);
       assert.deepEqual(
         new Set(racers.map((result) => result.projectId)),
         new Set([again.projectId]),
@@ -180,11 +190,14 @@ it.effect("recreates the Scratch folder after it is deleted", () =>
     Effect.gen(function* () {
       const scratch = yield* ManagedProjectFolders.ManagedProjectFolders;
       const fileSystem = yield* FileSystem.FileSystem;
-      const { projectId } = yield* scratch.ensureScratchProject;
+      const { projectId } = yield* scratch.ensureScratchProject(trustedMutationAuthority);
       const root = yield* requireRoot;
       yield* fileSystem.remove(root, { recursive: true });
 
-      assert.equal((yield* scratch.ensureScratchProject).projectId, projectId);
+      assert.equal(
+        (yield* scratch.ensureScratchProject(trustedMutationAuthority)).projectId,
+        projectId,
+      );
       assert.isTrue(yield* fileSystem.exists(root));
 
       yield* fileSystem.remove(root, { recursive: true });
@@ -204,7 +217,7 @@ it.effect("gives each Scratch thread its own folder, named from its message", ()
       const scratch = yield* ManagedProjectFolders.ManagedProjectFolders;
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const { projectId } = yield* scratch.ensureScratchProject;
+      const { projectId } = yield* scratch.ensureScratchProject(trustedMutationAuthority);
       const root = yield* requireRoot;
       const text = "Convert these PNGs to WebP, please!";
       // Two ids with the same tail would collide on the short name.
@@ -259,8 +272,8 @@ it.effect("leaves threads in other projects alone", () =>
       const projects = yield* ProjectService.ProjectService;
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      yield* scratch.ensureScratchProject;
-      const other = yield* projects.create({
+      yield* scratch.ensureScratchProject(trustedMutationAuthority);
+      const other = yield* projects.create(trustedMutationAuthority, {
         commandId: CommandId.make("command:other"),
         projectId: ProjectId.make("project:other"),
         title: "Other",
@@ -345,8 +358,12 @@ it.effect("starts a named project as a committed repository, and suffixes a take
         const root = path.resolve(baseDir, "projects");
         assert.equal(folders.namedProjectsRoot, root);
 
-        const first = yield* folders.createNamedProject({ name: "Pinball Stats" });
-        const second = yield* folders.createNamedProject({ name: "pinball stats" });
+        const first = yield* folders.createNamedProject(trustedMutationAuthority, {
+          name: "Pinball Stats",
+        });
+        const second = yield* folders.createNamedProject(trustedMutationAuthority, {
+          name: "pinball stats",
+        });
 
         assert.equal(first.workspaceRoot, path.join(root, "pinball-stats"));
         assert.equal(second.workspaceRoot, path.join(root, "pinball-stats-2"));
@@ -386,7 +403,9 @@ it.effect("gives concurrent named projects with the same name distinct folders",
         const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
         const projects = yield* ProjectService.ProjectService;
         const created = yield* Effect.all(
-          Array.from({ length: 4 }, () => folders.createNamedProject({ name: "Race" })),
+          Array.from({ length: 4 }, () =>
+            folders.createNamedProject(trustedMutationAuthority, { name: "Race" }),
+          ),
           { concurrency: "unbounded" },
         );
 
@@ -419,7 +438,9 @@ it.effect("keeps a named project and reports why when Git cannot commit", () =>
         );
         process.env.GIT_CONFIG_GLOBAL = path.join(baseDir, "no-identity.gitconfig");
 
-        const result = yield* folders.createNamedProject({ name: "No Identity" });
+        const result = yield* folders.createNamedProject(trustedMutationAuthority, {
+          name: "No Identity",
+        });
 
         assert.include(result.commitError ?? "", "no name or email");
         assert.isTrue(Option.isSome(yield* projects.getById(result.projectId)));
@@ -442,7 +463,7 @@ it.effect("keeps a folder that another project owns when the create conflicts", 
         const taken = path.join(folders.namedProjectsRoot, "taken");
         // A project registered at this path some other way (by hand, or a
         // client that predates the claim) owns the folder the create claims.
-        yield* projects.create({
+        yield* projects.create(trustedMutationAuthority, {
           commandId: CommandId.make("command:owner"),
           projectId: ProjectId.make("project:owner"),
           title: "Owner",
@@ -451,7 +472,9 @@ it.effect("keeps a folder that another project owns when the create conflicts", 
         });
         yield* fileSystem.remove(taken, { recursive: true });
 
-        const failure = yield* Effect.flip(folders.createNamedProject({ name: "Taken" }));
+        const failure = yield* Effect.flip(
+          folders.createNamedProject(trustedMutationAuthority, { name: "Taken" }),
+        );
 
         assert.equal(failure._tag, "NamedProjectCreateError");
         assert.equal(failure.message, "Failed to create the project.");
@@ -476,7 +499,9 @@ it.effect("removes the folder when the project create is rejected for another re
           const fileSystem = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
 
-          const failure = yield* Effect.flip(folders.createNamedProject({ name: "Rejected" }));
+          const failure = yield* Effect.flip(
+            folders.createNamedProject(trustedMutationAuthority, { name: "Rejected" }),
+          );
 
           assert.equal(failure._tag, "NamedProjectCreateError");
           assert.deepEqual(yield* fileSystem.readDirectory(path.resolve(baseDir, "projects")), []);
@@ -488,7 +513,7 @@ it.effect("removes the folder when the project create is rejected for another re
       projects: (real) =>
         ProjectService.ProjectService.of({
           ...real,
-          create: (input) =>
+          create: (_authority, input) =>
             Effect.fail(
               new ProjectService.ProjectOperationError({
                 operation: "dispatch-project-command",
@@ -513,7 +538,7 @@ it.effect("removes the folder when the create is cancelled before the project ex
           const path = yield* Path.Path;
 
           const fiber = yield* folders
-            .createNamedProject({ name: "Cancelled" })
+            .createNamedProject(trustedMutationAuthority, { name: "Cancelled" })
             .pipe(Effect.forkChild);
           yield* Deferred.await(scaffolding);
           assert.deepEqual(yield* fileSystem.readDirectory(path.resolve(baseDir, "projects")), [
@@ -545,7 +570,9 @@ it.effect("removes the folder when the repository cannot be made", () =>
         const fileSystem = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
 
-        const failure = yield* Effect.flip(folders.createNamedProject({ name: "Broken" }));
+        const failure = yield* Effect.flip(
+          folders.createNamedProject(trustedMutationAuthority, { name: "Broken" }),
+        );
 
         assert.equal(failure._tag, "NamedProjectFolderError");
         assert.equal(failure.message, "Failed to create the project folder.");
@@ -569,4 +596,31 @@ it.effect("removes the folder when the repository cannot be made", () =>
       }),
     },
   ),
+);
+
+it.effect(
+  "restricted and view-only project creation never creates Scratch/named folders or runs Git",
+  () =>
+    withScratch(({ baseDir }) =>
+      Effect.gen(function* () {
+        const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
+        const fs = yield* FileSystem.FileSystem;
+        for (const current of [
+          { scopes: [AuthOrchestrationOperateScope], resourceGrant: grantA },
+          { scopes: [AuthOrchestrationReadScope], resourceGrant: AuthAllResourceGrant },
+        ]) {
+          const authority: MutationAuthority = { current: Effect.succeed(current) };
+          assert.equal(
+            (yield* Effect.flip(folders.ensureScratchProject(authority)))._tag,
+            "EnvironmentAuthorizationError",
+          );
+          assert.equal(
+            (yield* Effect.flip(folders.createNamedProject(authority, { name: "Denied" })))._tag,
+            "EnvironmentAuthorizationError",
+          );
+        }
+        assert.isFalse(yield* fs.exists(`${baseDir}/scratch`));
+        assert.isFalse(yield* fs.exists(folders.namedProjectsRoot));
+      }),
+    ),
 );

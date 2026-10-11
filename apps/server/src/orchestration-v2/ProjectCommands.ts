@@ -47,6 +47,11 @@ export interface ProjectDeleteCommand {
 
 export type ProjectCommand = ProjectCreateCommand | ProjectMetaUpdateCommand | ProjectDeleteCommand;
 
+export class ProjectCommandNotEmptyError extends Schema.TaggedError<ProjectCommandNotEmptyError>()(
+  "ProjectCommandNotEmptyError",
+  { projectId: ProjectId },
+) {}
+
 export class ProjectCommandInvariantError extends Schema.TaggedError<ProjectCommandInvariantError>()(
   "ProjectCommandInvariantError",
   {

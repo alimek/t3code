@@ -1,3 +1,7 @@
+import {
+  requireUnrestrictedMutation,
+  type MutationAuthority,
+} from "../auth/CommandAuthorization.ts";
 import type {
   ProjectCloneSnapshot,
   ProjectCloneStage,
@@ -8,6 +12,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   OrchestrationDispatchCommandError,
+  type EnvironmentAuthorizationError,
   PROJECT_CLONE_DETAIL_MAX_LENGTH,
   PROJECT_CLONE_ERROR_MAX_LENGTH,
   SourceControlRepositoryError,
@@ -63,11 +68,14 @@ export class ProjectCloneTracker extends Context.Service<
      * repository is unusable so the caller can report it inline.
      */
     readonly start: (
+      authority: MutationAuthority,
       input: ProjectCloneStartInput,
       hooks: ProjectCloneHooks,
     ) => Effect.Effect<
       ProjectCloneStartResult,
-      SourceControlRepositoryError | OrchestrationDispatchCommandError
+      | SourceControlRepositoryError
+      | OrchestrationDispatchCommandError
+      | EnvironmentAuthorizationError
     >;
     /** Interrupts a running clone and deletes the partial checkout. */
     readonly cancel: (projectId: ProjectId) => Effect.Effect<boolean>;
@@ -95,7 +103,7 @@ export interface ProjectCloneHooks {
     readonly title: string;
     readonly workspaceRoot: string;
     readonly createdAt: string;
-  }) => Effect.Effect<void, OrchestrationDispatchCommandError>;
+  }) => Effect.Effect<void, OrchestrationDispatchCommandError | EnvironmentAuthorizationError>;
   /** Runs after a successful clone so cached repository identity and git status refresh. */
   readonly onCloned: (input: {
     readonly projectId: ProjectId;
@@ -272,7 +280,8 @@ export const make = Effect.gen(function* () {
     });
 
   const start: ProjectCloneTracker["Service"]["start"] = Effect.fn("ProjectCloneTracker.start")(
-    function* (input, hooks) {
+    function* (authority, input, hooks) {
+      yield* requireUnrestrictedMutation(authority);
       const prepared = yield* repositories.prepareClone(input);
       const startedAt = yield* nowIso;
       const snapshot: ProjectCloneSnapshot = {
@@ -436,7 +445,7 @@ export const make = Effect.gen(function* () {
   );
 
   return ProjectCloneTracker.of({
-    start: (input, hooks) => locked(start(input, hooks)),
+    start: (authority, input, hooks) => locked(start(authority, input, hooks)),
     cancel: (projectId) => locked(cancel(projectId)),
     retry: (projectId) => locked(retry(projectId)),
     discard: (projectId) => locked(discard(projectId)),

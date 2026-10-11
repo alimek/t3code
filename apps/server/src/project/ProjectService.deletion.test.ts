@@ -159,7 +159,7 @@ it.effect("retries a partial project deletion without repeating child events or 
         Effect.provideService(EventSink.EventSinkV2, failingEventSink),
       );
       const input = { commandId, projectId, force: true };
-      const failure = yield* service.delete(input).pipe(Effect.flip);
+      const failure = yield* service.delete(trustedMutationAuthority, input).pipe(Effect.flip);
       assert.instanceOf(failure, ProjectService.ProjectOperationError);
       if (failure._tag !== "ProjectOperationError") return assert.fail("Expected a child failure");
       assert.equal(failure.operation, "delete-thread");
@@ -203,7 +203,7 @@ it.effect("retries a partial project deletion without repeating child events or 
       assert.equal(partialCleanup[0]?.thread_id, firstThreadId);
       assert.equal(partialCleanup[0]?.effect_type, "terminal.cleanup");
 
-      const deletedProject = yield* service.delete(input);
+      const deletedProject = yield* service.delete(trustedMutationAuthority, input);
       assert.isNotNull(deletedProject.deletedAt);
       assert.isTrue(Option.isNone(yield* service.getById(projectId)));
       assert.deepEqual(attempts, [firstThreadId, failedThreadId, failedThreadId]);
@@ -312,7 +312,11 @@ it.effect(
           [],
         );
 
-        const deletedProject = yield* service.delete({ commandId, projectId, force: true });
+        const deletedProject = yield* service.delete(trustedMutationAuthority, {
+          commandId,
+          projectId,
+          force: true,
+        });
         assert.isNotNull(deletedProject.deletedAt);
         assert.isTrue(Option.isNone(yield* service.getById(projectId)));
         const projection = yield* projections.getThreadProjection(threadId);
@@ -387,7 +391,7 @@ it.effect("rejects a child deletion command ID already accepted for an unrelated
       assert.equal(accepted.receipt.status, "accepted");
 
       const failure = yield* service
-        .delete({ commandId, projectId, force: true })
+        .delete(trustedMutationAuthority, { commandId, projectId, force: true })
         .pipe(Effect.flip);
       assert.instanceOf(failure, ProjectService.ProjectOperationError);
       if (failure._tag !== "ProjectOperationError") return assert.fail("Expected a child failure");
@@ -438,7 +442,10 @@ it.effect("deletes a project without force once its imported threads were delete
       const service = yield* ProjectService.make;
       yield* importer.reconcileShells;
       const early = yield* service
-        .delete({ commandId: CommandId.make("command:emptied:early"), projectId })
+        .delete(trustedMutationAuthority, {
+          commandId: CommandId.make("command:emptied:early"),
+          projectId,
+        })
         .pipe(Effect.flip);
       assert.equal(early._tag, "ProjectNotEmptyError");
 
@@ -477,7 +484,7 @@ it.effect("deletes a project without force once its imported threads were delete
       `;
       assert.deepEqual(legacy, [{ deleted_at: null }]);
 
-      const deleted = yield* service.delete({
+      const deleted = yield* service.delete(trustedMutationAuthority, {
         commandId: CommandId.make("command:emptied:project-delete"),
         projectId,
       });

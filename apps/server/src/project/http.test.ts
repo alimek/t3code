@@ -147,6 +147,8 @@ it.effect.each([
 
     assert.equal(error._tag, "EnvironmentRequestInvalidError");
     assert.equal(error.code, "invalid_request");
+    if (error._tag === "EnvironmentScopeRequiredError")
+      return assert.fail("Unexpected authorization error");
     assert.equal(error.reason, "invalid_command");
   }),
 );
@@ -169,6 +171,8 @@ it.effect.each([
 
     assert.equal(error._tag, "EnvironmentInternalError");
     assert.equal(error.code, "internal_error");
+    if (error._tag === "EnvironmentScopeRequiredError")
+      return assert.fail("Unexpected authorization error");
     assert.equal(error.reason, "project_mutation_failed");
   }),
 );

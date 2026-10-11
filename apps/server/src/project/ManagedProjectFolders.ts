@@ -1,3 +1,7 @@
+import {
+  requireUnrestrictedMutation,
+  type MutationAuthority,
+} from "../auth/CommandAuthorization.ts";
 /**
  * ManagedProjectFolders - the project folders T3 Code makes for the user under
  * its data dir, rather than ones the user picks:
@@ -9,7 +13,12 @@
  *
  * @module ManagedProjectFolders
  */
-import { CommandId, ProjectId, type ThreadId } from "@t3tools/contracts";
+import {
+  CommandId,
+  ProjectId,
+  type ThreadId,
+  type EnvironmentAuthorizationError,
+} from "@t3tools/contracts";
 import { newProjectFolderName } from "@t3tools/shared/path";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
@@ -97,7 +106,12 @@ export class ManagedProjectFolders extends Context.Service<
     /** The Scratch folder, or None when this environment does not offer one. */
     readonly scratchRoot: Effect.Effect<Option.Option<string>>;
     /** Finds or creates the Scratch project and (re)creates its folder. */
-    readonly ensureScratchProject: Effect.Effect<{ readonly projectId: ProjectId }, ScratchError>;
+    readonly ensureScratchProject: (
+      authority: MutationAuthority,
+    ) => Effect.Effect<
+      { readonly projectId: ProjectId },
+      ScratchError | EnvironmentAuthorizationError
+    >;
     /**
      * Claims a fresh folder for a new thread in the Scratch project, named from
      * the date, its first message, and its id. None for every other project.
@@ -117,13 +131,16 @@ export class ManagedProjectFolders extends Context.Service<
      * why in `commitError`. The folder is removed when the create fails or is
      * cancelled before the project exists, never once another project owns it.
      */
-    readonly createNamedProject: (input: { readonly name: string }) => Effect.Effect<
+    readonly createNamedProject: (
+      authority: MutationAuthority,
+      input: { readonly name: string },
+    ) => Effect.Effect<
       {
         readonly projectId: ProjectId;
         readonly workspaceRoot: string;
         readonly commitError?: string;
       },
-      NamedProjectError
+      NamedProjectError | EnvironmentAuthorizationError
     >;
   }
 >()("t3/project/ManagedProjectFolders") {}
@@ -279,54 +296,65 @@ const make = Effect.gen(function* () {
       .makeDirectory(folder, { recursive: true })
       .pipe(Effect.mapError((cause) => new ScratchFolderError({ folder, cause })));
 
-  const ensureScratchProject: ManagedProjectFolders["Service"]["ensureScratchProject"] = Effect.gen(
-    function* () {
-      const workspaceRoot = yield* scratchRoot.pipe(
-        Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.fail(new ScratchUnavailableError()),
-            onSome: Effect.succeed,
-          }),
+  const ensureScratchProject: ManagedProjectFolders["Service"]["ensureScratchProject"] = Effect.fn(
+    "ManagedProjectFolders.ensureScratchProject",
+  )(function* (authority) {
+    yield* requireUnrestrictedMutation(authority);
+    const workspaceRoot = yield* scratchRoot.pipe(
+      Effect.flatMap(
+        Option.match({
+          onNone: () => Effect.fail(new ScratchUnavailableError()),
+          onSome: Effect.succeed,
+        }),
+      ),
+    );
+    // Re-made on every call, so a deleted Scratch folder still runs threads.
+    yield* makeScratchFolder(workspaceRoot);
+    const id = yield* crypto.randomUUIDv4.pipe(
+      Effect.mapError((cause) => new ScratchProjectError({ workspaceRoot, cause })),
+    );
+    const bootstrapped = yield* projects
+      .bootstrap(authority, {
+        commandId: CommandId.make(`scratch-project:${id}`),
+        projectId: ProjectId.make(id),
+        title: "No project",
+        workspaceRoot,
+      })
+      .pipe(
+        // bootstrap looks the root up before taking the workspace lock, so a
+        // racing create loses with a conflict that names the winner.
+        Effect.catchTags({
+          ProjectConflictError: (conflict) =>
+            Effect.succeed({
+              project: { id: conflict.conflictingProjectId },
+              created: false,
+            }),
+        }),
+        Effect.mapError((cause) =>
+          cause._tag === "EnvironmentAuthorizationError"
+            ? cause
+            : new ScratchProjectError({ workspaceRoot, cause }),
         ),
       );
-      // Re-made on every call, so a deleted Scratch folder still runs threads.
-      yield* makeScratchFolder(workspaceRoot);
-      const id = yield* crypto.randomUUIDv4.pipe(
-        Effect.mapError((cause) => new ScratchProjectError({ workspaceRoot, cause })),
-      );
-      const bootstrapped = yield* projects
-        .bootstrap({
-          commandId: CommandId.make(`scratch-project:${id}`),
-          projectId: ProjectId.make(id),
-          title: "No project",
-          workspaceRoot,
+    if (bootstrapped.created) {
+      // A dashed chat bubble in neutral gray marks Scratch. Set once at
+      // create, so a user's own icon choice is never overwritten.
+      yield* projects
+        .update(authority, {
+          commandId: CommandId.make(`scratch-project-icon:${id}`),
+          projectId: bootstrapped.project.id,
+          projectIcon: { kind: "lucide", name: "message-square-dashed", color: "gray" },
         })
         .pipe(
-          // bootstrap looks the root up before taking the workspace lock, so a
-          // racing create loses with a conflict that names the winner.
-          Effect.catchTags({
-            ProjectConflictError: (conflict) =>
-              Effect.succeed({
-                project: { id: conflict.conflictingProjectId },
-                created: false,
-              }),
-          }),
-          Effect.mapError((cause) => new ScratchProjectError({ workspaceRoot, cause })),
+          Effect.mapError((cause) =>
+            cause._tag === "EnvironmentAuthorizationError"
+              ? cause
+              : new ScratchProjectError({ workspaceRoot, cause }),
+          ),
         );
-      if (bootstrapped.created) {
-        // A dashed chat bubble in neutral gray marks Scratch. Set once at
-        // create, so a user's own icon choice is never overwritten.
-        yield* projects
-          .update({
-            commandId: CommandId.make(`scratch-project-icon:${id}`),
-            projectId: bootstrapped.project.id,
-            projectIcon: { kind: "lucide", name: "message-square-dashed", color: "gray" },
-          })
-          .pipe(Effect.mapError((cause) => new ScratchProjectError({ workspaceRoot, cause })));
-      }
-      return { projectId: bootstrapped.project.id };
-    },
-  );
+    }
+    return { projectId: bootstrapped.project.id };
+  });
 
   const isScratchProject = (projectId: ProjectId, root: string) =>
     projects.getById(projectId).pipe(
@@ -454,7 +482,8 @@ const make = Effect.gen(function* () {
 
   const createNamedProject: ManagedProjectFolders["Service"]["createNamedProject"] = Effect.fn(
     "ManagedProjectFolders.createNamedProject",
-  )(function* (input) {
+  )(function* (authority, input) {
+    yield* requireUnrestrictedMutation(authority);
     const workspaceRoot = yield* claimNamedFolder(input.name);
     const removeFolder = fileSystem.remove(workspaceRoot, { recursive: true }).pipe(Effect.ignore);
     // Until the create is dispatched nothing else can use the folder, so any
@@ -469,7 +498,7 @@ const make = Effect.gen(function* () {
     ]).pipe(Effect.onExit((exit) => (Exit.isSuccess(exit) ? Effect.void : removeFolder)));
     const [commitError, id] = prepared;
     const project = yield* projects
-      .create({
+      .create(authority, {
         commandId: CommandId.make(`named-project:${id}`),
         projectId: ProjectId.make(id),
         title: input.name,
@@ -482,14 +511,19 @@ const make = Effect.gen(function* () {
         // is checked again first, since deleting another project's files is
         // never acceptable.
         Effect.tapError((error) =>
-          error._tag === "ProjectConflictError"
+          error._tag === "ProjectConflictError" || error._tag === "EnvironmentAuthorizationError"
             ? Effect.void
-            : projects.getByWorkspaceRoot(workspaceRoot).pipe(
+            : requireUnrestrictedMutation(authority).pipe(
+                Effect.andThen(projects.getByWorkspaceRoot(workspaceRoot)),
                 Effect.flatMap((owner) => (Option.isNone(owner) ? removeFolder : Effect.void)),
                 Effect.ignore,
               ),
         ),
-        Effect.mapError((cause) => new NamedProjectCreateError({ workspaceRoot, cause })),
+        Effect.mapError((cause) =>
+          cause._tag === "EnvironmentAuthorizationError"
+            ? cause
+            : new NamedProjectCreateError({ workspaceRoot, cause }),
+        ),
       );
     return {
       projectId: project.id,

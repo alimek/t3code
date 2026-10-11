@@ -150,7 +150,7 @@ it.effect("launches a scratch thread into the Scratch project", () =>
       Layer.mock(Project.ProjectService)({}),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
         namedProjectsRoot: "/projects",
-        ensureScratchProject: Effect.succeed({ projectId: scratchProjectId }),
+        ensureScratchProject: () => Effect.succeed({ projectId: scratchProjectId }),
       }),
       Layer.mock(GitVcsDriver.GitVcsDriver)({}),
       NodeServices.layer,
@@ -233,7 +233,7 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
       }),
       Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
       Layer.mock(Project.ProjectService)({
-        create: (input) =>
+        create: (_authority, input) =>
           Effect.sync(() => {
             registered.push(input.workspaceRoot);
             return { ...createdProject, id: input.projectId, workspaceRoot: input.workspaceRoot };
@@ -245,7 +245,7 @@ it.effect("starts a project from just a title when workspaceRoot is omitted", ()
       }),
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
         namedProjectsRoot: "/projects",
-        createNamedProject: (input) =>
+        createNamedProject: (_authority, input) =>
           Effect.sync(() => {
             named.push(input.name);
             return {

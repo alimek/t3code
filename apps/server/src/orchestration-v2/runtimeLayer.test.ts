@@ -344,7 +344,7 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
       const projectId = ProjectId.make("runtime-project-delete-concurrent");
       const threadId = ThreadId.make("runtime-thread-delete-concurrent");
       const updateCommandId = CommandId.make("runtime-thread-delete-concurrent-update");
-      yield* projects.create({
+      yield* projects.create(trustedMutationAuthority, {
         commandId: CommandId.make("runtime-project-delete-concurrent-create"),
         projectId,
         title: "Concurrent deletion",
@@ -407,7 +407,7 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
           ),
         );
         const deleteFiber = yield* projects
-          .delete({
+          .delete(trustedMutationAuthority, {
             commandId: CommandId.make("runtime-project-delete-concurrent-delete"),
             projectId,
             force: true,
@@ -4439,7 +4439,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("pending provider interruption", (
       const projectId = ProjectId.make("runtime-layer-pending-interrupt-project");
       const threadId = ThreadId.make("runtime-layer-pending-interrupt-thread");
 
-      yield* projects.create({
+      yield* projects.create(trustedMutationAuthority, {
         commandId: CommandId.make("runtime-layer-pending-interrupt-project-create"),
         projectId,
         title: "Pending interrupt project",
@@ -4512,7 +4512,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("snooze projection", (it) => {
       const threadId = ThreadId.make("runtime-layer-snoozed-thread");
       const snoozedUntil = "2099-07-25T09:00:00.000Z";
 
-      yield* projects.create({
+      yield* projects.create(trustedMutationAuthority, {
         commandId: CommandId.make("runtime-layer-snoozed-project-create"),
         projectId,
         title: "Snoozed shell projection",
@@ -4587,7 +4587,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("visited projection", (it) => {
       const threadId = ThreadId.make("runtime-layer-visited-thread");
       const visitedAt = "2026-07-24T01:00:00.000Z";
 
-      yield* projects.create({
+      yield* projects.create(trustedMutationAuthority, {
         commandId: CommandId.make("runtime-layer-visited-project-create"),
         projectId,
         title: "Visited shell projection",
@@ -4702,8 +4702,8 @@ it.layer(layerSharedApplicationDataPlaneTest)("shared application data plane", (
         workspaceRoot: "/tmp/runtime-layer-shared-project",
       };
 
-      const created = yield* projects.create(projectInput);
-      const retried = yield* projects.create(projectInput);
+      const created = yield* projects.create(trustedMutationAuthority, projectInput);
+      const retried = yield* projects.create(trustedMutationAuthority, projectInput);
       assert.deepEqual(retried, created);
 
       const delivered = yield* Queue.unbounded<ApplicationStoredEvent>();

@@ -1,4 +1,4 @@
-import { type MutationAuthority } from "./auth/CommandAuthorization.ts";
+import { trustedMutationAuthority, type MutationAuthority } from "./auth/CommandAuthorization.ts";
 import { type OrchestrationV2DomainEvent } from "@t3tools/contracts";
 import {
   authorizeThreadRead,
@@ -1951,7 +1951,7 @@ const layerWsRpc = (
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
       const mutateProject = Effect.fn("ws.projects.mutate")(function* (mutation: ProjectMutation) {
-        const result = yield* projectMutationOperation(projectService, mutation);
+        const result = yield* projectMutationOperation(projectService, mutationAuthority, mutation);
         if (mutation.type === "project.delete")
           yield* projectCloneTracker.discard(mutation.projectId);
         return result;
@@ -2752,10 +2752,10 @@ const layerWsRpc = (
         [WS_METHODS.sourceControlCloneRepository]: (input) =>
           sourceControlRepositories.cloneRepository(input),
         [WS_METHODS.projectCloneStart]: (input) =>
-          projectCloneTracker.start(input, {
+          projectCloneTracker.start(mutationAuthority, input, {
             createProject: (project) =>
               projectService
-                .create({
+                .create(mutationAuthority, {
                   commandId: CommandId.make(`project-clone-create:${project.projectId}`),
                   projectId: project.projectId,
                   title: project.title,
@@ -2764,18 +2764,19 @@ const layerWsRpc = (
                 })
                 .pipe(
                   Effect.asVoid,
-                  Effect.mapError(
-                    (cause) =>
-                      new OrchestrationDispatchCommandError({
-                        message: "Failed to create clone project.",
-                        cause,
-                      }),
+                  Effect.mapError((cause) =>
+                    cause._tag === "EnvironmentAuthorizationError"
+                      ? cause
+                      : new OrchestrationDispatchCommandError({
+                          message: "Failed to create clone project.",
+                          cause,
+                        }),
                   ),
                 ),
             onCloned: (project) =>
               repositoryIdentityResolver.resolve(project.workspaceRoot, { refresh: true }).pipe(
                 Effect.andThen(
-                  projectService.update({
+                  projectService.update(trustedMutationAuthority, {
                     commandId: CommandId.make(`project-clone-done:${project.projectId}`),
                     projectId: project.projectId,
                   }),
@@ -2785,17 +2786,23 @@ const layerWsRpc = (
               ),
           }),
         [WS_METHODS.projectsEnsureScratch]: () =>
-          managedFolders.ensureScratchProject.pipe(
-            Effect.mapError(
-              (cause) => new OrchestrationDispatchCommandError({ message: cause.message, cause }),
+          managedFolders
+            .ensureScratchProject(mutationAuthority)
+            .pipe(
+              Effect.mapError((cause) =>
+                cause._tag === "EnvironmentAuthorizationError"
+                  ? cause
+                  : new OrchestrationDispatchCommandError({ message: cause.message, cause }),
+              ),
             ),
-          ),
         [WS_METHODS.projectsCreateNew]: (input) =>
           managedFolders
-            .createNamedProject(input)
+            .createNamedProject(mutationAuthority, input)
             .pipe(
-              Effect.mapError(
-                (cause) => new OrchestrationDispatchCommandError({ message: cause.message, cause }),
+              Effect.mapError((cause) =>
+                cause._tag === "EnvironmentAuthorizationError"
+                  ? cause
+                  : new OrchestrationDispatchCommandError({ message: cause.message, cause }),
               ),
             ),
         [WS_METHODS.projectCloneCancel]: (input) =>
@@ -2884,16 +2891,17 @@ const layerWsRpc = (
           ),
         [WS_METHODS.projectsMutate]: (mutation) =>
           startup.enqueueCommand(mutateProject(mutation)).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectMutationError({
-                  commandId: mutation.commandId,
-                  message:
-                    cause._tag === "ProjectNotEmptyError"
-                      ? cause.message
-                      : "Failed to mutate project.",
-                  cause,
-                }),
+            Effect.mapError((cause) =>
+              cause._tag === "EnvironmentAuthorizationError"
+                ? cause
+                : new ProjectMutationError({
+                    commandId: mutation.commandId,
+                    message:
+                      cause._tag === "ProjectNotEmptyError"
+                        ? cause.message
+                        : "Failed to mutate project.",
+                    cause,
+                  }),
             ),
           ),
         [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),

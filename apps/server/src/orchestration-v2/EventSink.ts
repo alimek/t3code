@@ -4,6 +4,9 @@ import {
   authorizeCommandAdmission,
   receiptForMutationAuthority,
   type CommandAdmission,
+  type ProjectAdmission,
+  authorizeProjectAdmission,
+  authorizeProjectCommand,
 } from "../auth/CommandAuthorization.ts";
 import {
   CommandId,
@@ -29,6 +32,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import { ProjectCommandNotEmptyError } from "./ProjectCommands.ts";
 import { replayAndBufferProjectedLiveEvents } from "./LiveStreamBudget.ts";
 import type { UnsequencedProjectEvent } from "../persistence/OrchestrationEventStore.ts";
 import { projectDomainEventForWire } from "./WireProjection.ts";
@@ -163,24 +167,30 @@ export interface EventSinkV2Shape {
    * Append a project event, fold it into its row and record the receipt in one
    * transaction. A reused command id commits nothing and returns its receipt.
    */
-  readonly commitProjectCommand: (input: {
-    readonly commandId: CommandId;
-    readonly projectId: ProjectId;
-    readonly commandType: string;
-    readonly acceptedAt: DateTime.Utc;
-    readonly event: UnsequencedProjectEvent;
-  }) => Effect.Effect<
+  readonly commitProjectCommand: (
+    admission: ProjectAdmission,
+    input: {
+      readonly commandId: CommandId;
+      readonly projectId: ProjectId;
+      readonly commandType: string;
+      readonly acceptedAt: DateTime.Utc;
+      readonly event: UnsequencedProjectEvent;
+    },
+  ) => Effect.Effect<
     { readonly receipt: CommandReceiptStore.ProjectCommandReceiptV2; readonly committed: boolean },
     EventSinkV2Error
   >;
   /** Record a rejected project command, or return the receipt its command id already has. */
-  readonly commitRejectedProjectCommand: (input: {
-    readonly commandId: CommandId;
-    readonly projectId: ProjectId;
-    readonly commandType: string;
-    readonly rejectedAt: DateTime.Utc;
-    readonly error: string;
-  }) => Effect.Effect<CommandReceiptStore.ProjectCommandReceiptV2, EventSinkV2Error>;
+  readonly commitRejectedProjectCommand: (
+    admission: ProjectAdmission,
+    input: {
+      readonly commandId: CommandId;
+      readonly projectId: ProjectId;
+      readonly commandType: string;
+      readonly rejectedAt: DateTime.Utc;
+      readonly error: string;
+    },
+  ) => Effect.Effect<CommandReceiptStore.ProjectCommandReceiptV2, EventSinkV2Error>;
   readonly stream: (input?: {
     readonly threadId?: ThreadId;
     readonly afterSequence?: number;
@@ -347,6 +357,23 @@ const layerBase: Layer.Layer<
         yield* Effect.forEach(storedEvents, (stored) => projectionStore.apply(stored.event), {
           concurrency: 1,
         });
+        // Thread creation/retarget and project deletion share the SQL commit boundary.
+        // No live child can be introduced after its project's deletion wins.
+        const changedThreads = new Set(
+          storedEvents.flatMap(({ event }) =>
+            "projectId" in event.payload && "id" in event.payload ? [event.payload.id] : [],
+          ),
+        );
+        for (const threadId of changedThreads) {
+          const invalid = yield* sql`
+            SELECT t.thread_id FROM orchestration_v2_projection_threads t
+            LEFT JOIN projection_projects p ON p.project_id = t.project_id
+            WHERE t.thread_id = ${threadId} AND t.deleted_at IS NULL
+              AND (p.project_id IS NULL OR p.deleted_at IS NOT NULL)
+          `;
+          if (invalid.length > 0)
+            return yield* Effect.fail("A live thread requires a live project.");
+        }
         const sequence = storedEvents.at(-1)?.sequence;
         if (sequence !== undefined) {
           const now = DateTime.formatIso(yield* DateTime.now);
@@ -575,6 +602,8 @@ const layerBase: Layer.Layer<
             );
           }
           yield* applyStoredEvents(storedEvents);
+          if (admission !== trustedMutationAuthority && admission.projectId !== undefined)
+            yield* authorizeCommandAdmission(sql, admission, input.commandId, input);
           if (admission !== trustedMutationAuthority)
             yield* authorizeCommandReceipt(sql, admission.authority, input.commandId);
           yield* effectOutbox.enqueue(input.effects);
@@ -650,21 +679,24 @@ const layerBase: Layer.Layer<
       );
     });
 
-    const existingProjectReceipt = (commandId: CommandId) =>
-      commandReceipts.getProjectByCommandId(commandId).pipe(
-        Effect.flatMap(
-          Option.match({
-            onNone: () =>
-              Effect.fail(`Command ${commandId} was already used by a thread command.` as const),
-            onSome: Effect.succeed,
-          }),
-        ),
-      );
+    const existingProjectReceipt = Effect.fnUntraced(function* (
+      admission: ProjectAdmission,
+      commandId: CommandId,
+    ) {
+      const existing = yield* commandReceipts.getProjectByCommandId(commandId);
+      if (Option.isNone(existing))
+        return yield* Effect.fail("Command id was already used by a thread command.");
+      return yield* receiptForMutationAuthority(admission.authority, existing.value);
+    });
 
     const commitProjectCommandEffect = Effect.fn("orchestrationV2.EventSink.commitProjectCommand")(
-      function* (input: Parameters<EventSinkV2Shape["commitProjectCommand"]>[0]) {
+      function* (
+        admission: ProjectAdmission,
+        input: Parameters<EventSinkV2Shape["commitProjectCommand"]>[1],
+      ) {
         const result = yield* commitThenPublish(
           Effect.gen(function* () {
+            yield* authorizeProjectAdmission(sql, admission, input);
             const reserved: CommandReceiptStore.ProjectCommandReceiptV2 = {
               commandId: input.commandId,
               projectId: input.projectId,
@@ -675,10 +707,39 @@ const layerBase: Layer.Layer<
               error: null,
             };
             if (!(yield* commandReceipts.insertIfAbsent(reserved))) {
-              return { receipt: yield* existingProjectReceipt(input.commandId), event: undefined };
+              yield* authorizeProjectAdmission(sql, admission, input);
+              return {
+                receipt: yield* existingProjectReceipt(admission, input.commandId),
+                event: undefined,
+              };
+            }
+            if (
+              input.event.aggregateId !== input.projectId ||
+              input.event.payload.projectId !== input.projectId ||
+              input.event.commandId !== input.commandId ||
+              input.event.type !==
+                {
+                  "project.create": "project.created",
+                  "project.meta.update": "project.meta-updated",
+                  "project.delete": "project.deleted",
+                }[admission.command.type]
+            )
+              return yield* Effect.fail("Project event does not match its command.");
+            if (input.event.type === "project.meta-updated")
+              yield* authorizeProjectCommand(sql, admission.authority, {
+                ...input.event.payload,
+                type: "project.meta.update",
+                commandId: input.commandId,
+              });
+            if (input.event.type === "project.deleted") {
+              const children = yield* sql`SELECT thread_id FROM orchestration_v2_projection_threads
+                WHERE project_id = ${input.projectId} AND deleted_at IS NULL LIMIT 1`;
+              if (children.length > 0)
+                return yield* new ProjectCommandNotEmptyError({ projectId: input.projectId });
             }
             const event = yield* eventStore.appendProjectEvent(input.event);
             yield* projectStore.apply(event);
+            yield* authorizeCommandReceipt(sql, admission.authority, input.commandId, true, true);
             const receipt = { ...reserved, resultSequence: event.sequence };
             yield* commandReceipts.upsert(receipt);
             return { receipt, event };
@@ -692,9 +753,13 @@ const layerBase: Layer.Layer<
 
     const commitRejectedProjectCommandEffect = Effect.fn(
       "orchestrationV2.EventSink.commitRejectedProjectCommand",
-    )(function* (input: Parameters<EventSinkV2Shape["commitRejectedProjectCommand"]>[0]) {
+    )(function* (
+      admission: ProjectAdmission,
+      input: Parameters<EventSinkV2Shape["commitRejectedProjectCommand"]>[1],
+    ) {
       return yield* sql.withTransaction(
         Effect.gen(function* () {
+          yield* authorizeProjectAdmission(sql, admission, input);
           const receipt: CommandReceiptStore.ProjectCommandReceiptV2 = {
             commandId: input.commandId,
             projectId: input.projectId,
@@ -704,9 +769,11 @@ const layerBase: Layer.Layer<
             status: "rejected",
             error: input.error,
           };
-          return (yield* commandReceipts.insertIfAbsent(receipt))
-            ? receipt
-            : yield* existingProjectReceipt(input.commandId);
+          const inserted = yield* commandReceipts.insertIfAbsent(receipt);
+          yield* authorizeProjectAdmission(sql, admission, input);
+          return inserted
+            ? yield* receiptForMutationAuthority(admission.authority, receipt)
+            : yield* existingProjectReceipt(admission, input.commandId);
         }),
       );
     });
@@ -859,15 +926,15 @@ const layerBase: Layer.Layer<
               }),
           ),
         ),
-      commitProjectCommand: (input) =>
-        commitProjectCommandEffect(input).pipe(
+      commitProjectCommand: (admission, input) =>
+        commitProjectCommandEffect(admission, input).pipe(
           Effect.mapError(
             (cause) =>
               new EventSinkWriteError({ commandId: input.commandId, eventCount: 1, cause }),
           ),
         ),
-      commitRejectedProjectCommand: (input) =>
-        commitRejectedProjectCommandEffect(input).pipe(
+      commitRejectedProjectCommand: (admission, input) =>
+        commitRejectedProjectCommandEffect(admission, input).pipe(
           Effect.mapError(
             (cause) =>
               new EventSinkWriteError({ commandId: input.commandId, eventCount: 0, cause }),

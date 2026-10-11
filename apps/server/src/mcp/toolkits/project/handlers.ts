@@ -80,7 +80,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         const projectId =
           input.scratch === true
             ? (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(
-                Effect.flatMap((folders) => folders.ensureScratchProject),
+                Effect.flatMap((folders) => folders.ensureScratchProject(trustedMutationAuthority)),
                 Effect.mapError(
                   (error) =>
                     new OrchestratorMcpFailure({
@@ -194,7 +194,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           });
         const folders = yield* ManagedProjectFolders.ManagedProjectFolders;
         const created = yield* folders
-          .createNamedProject({ name: input.title })
+          .createNamedProject(trustedMutationAuthority, { name: input.title })
           .pipe(
             Effect.mapError(
               (error) =>
@@ -216,7 +216,12 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       }
       const commandId = yield* newCommandId();
       return yield* projects
-        .create({ ...input, workspaceRoot, commandId, projectId: ProjectId.make(commandId) })
+        .create(trustedMutationAuthority, {
+          ...input,
+          workspaceRoot,
+          commandId,
+          projectId: ProjectId.make(commandId),
+        })
         .pipe(Effect.mapError(projectFailure));
     }),
   ),
@@ -224,7 +229,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     Effect.gen(function* () {
       const projects = yield* Project.ProjectService;
       return yield* projects
-        .update({ ...input, commandId: yield* newCommandId() })
+        .update(trustedMutationAuthority, { ...input, commandId: yield* newCommandId() })
         .pipe(Effect.mapError(projectFailure));
     }),
   ),
@@ -232,7 +237,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     Effect.gen(function* () {
       const projects = yield* Project.ProjectService;
       return yield* projects
-        .delete({ ...input, commandId: yield* newCommandId() })
+        .delete(trustedMutationAuthority, { ...input, commandId: yield* newCommandId() })
         .pipe(Effect.mapError(projectFailure));
     }),
   ),
