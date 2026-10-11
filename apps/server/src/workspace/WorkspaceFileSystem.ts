@@ -1,3 +1,7 @@
+import {
+  beforeCurrentWorkspaceEffect,
+  beforeWorkspaceEffect,
+} from "../auth/workspaceReadAccess.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 /**
  * WorkspaceFileSystem - Effect service contract for workspace file mutations.
@@ -13,6 +17,7 @@ import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 
 import type {
+  EnvironmentAuthorizationError,
   ProjectReadFileInput,
   ProjectReadFileResult,
   ProjectWriteFileInput,
@@ -115,7 +120,9 @@ export class WorkspaceFileSystem extends Context.Service<
       input: ProjectReadFileInput,
     ) => Effect.Effect<
       ProjectReadFileResult,
-      WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
+      | WorkspaceFileSystemError
+      | WorkspacePaths.WorkspacePathOutsideRootError
+      | EnvironmentAuthorizationError
     >;
     /**
      * Write a file relative to the workspace root.
@@ -127,7 +134,9 @@ export class WorkspaceFileSystem extends Context.Service<
       input: ProjectWriteFileInput,
     ) => Effect.Effect<
       ProjectWriteFileResult,
-      WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
+      | WorkspaceFileSystemError
+      | WorkspacePaths.WorkspacePathOutsideRootError
+      | EnvironmentAuthorizationError
     >;
   }
 >()("t3/workspace/WorkspaceFileSystem") {}
@@ -212,7 +221,9 @@ export const make = Effect.gen(function* () {
   const readFile: WorkspaceFileSystem["Service"]["readFile"] = Effect.fn(
     "WorkspaceFileSystem.readFile",
   )(function* (input) {
+    yield* beforeCurrentWorkspaceEffect;
     const target = yield* resolveReadTarget(input);
+    yield* beforeWorkspaceEffect(path.dirname(target.realTargetPath));
     const realTargetPath = target.realTargetPath;
 
     return yield* Effect.acquireUseRelease(
@@ -256,6 +267,7 @@ export const make = Effect.gen(function* () {
             });
           }
 
+          yield* beforeWorkspaceEffect(path.dirname(realTargetPath));
           const bytesToRead = Math.min(stat.size, PROJECT_READ_FILE_MAX_BYTES);
           const buffer = Buffer.alloc(bytesToRead);
           const { bytesRead } = yield* Effect.tryPromise({
@@ -310,6 +322,7 @@ export const make = Effect.gen(function* () {
       relativePath: input.relativePath,
     });
 
+    yield* beforeCurrentWorkspaceEffect;
     yield* fileSystem.makeDirectory(path.dirname(target.absolutePath), { recursive: true }).pipe(
       Effect.mapError(
         (cause) =>
@@ -323,6 +336,33 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
+    const canonicalParent = yield* fileSystem.realPath(path.dirname(target.absolutePath)).pipe(
+      Effect.mapError(
+        () =>
+          new WorkspaceFilePathEscapeError({
+            workspaceRoot: input.cwd,
+            relativePath: input.relativePath,
+            resolvedWorkspaceRoot: input.cwd,
+            resolvedPath: target.absolutePath,
+          }),
+      ),
+    );
+    yield* beforeWorkspaceEffect(canonicalParent);
+    if (yield* fileSystem.exists(target.absolutePath).pipe(Effect.orElseSucceed(() => false))) {
+      const canonicalTarget = yield* fileSystem.realPath(target.absolutePath).pipe(
+        Effect.mapError(
+          () =>
+            new WorkspaceFilePathEscapeError({
+              workspaceRoot: input.cwd,
+              relativePath: input.relativePath,
+              resolvedWorkspaceRoot: input.cwd,
+              resolvedPath: target.absolutePath,
+            }),
+        ),
+      );
+      yield* beforeWorkspaceEffect(path.dirname(canonicalTarget));
+    }
+    yield* beforeCurrentWorkspaceEffect;
     yield* fileSystem.writeFileString(target.absolutePath, input.contents).pipe(
       Effect.mapError(
         (cause) =>

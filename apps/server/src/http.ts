@@ -166,14 +166,21 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
     readonly fileName?: string;
     readonly mimeType?: string;
     readonly file?: OpenMediaFile;
+    readonly check?: Effect.Effect<
+      void,
+      import("@t3tools/contracts").EnvironmentAuthorizationError
+    >;
   },
   rangeHeader?: string,
   ifRangeHeader?: string,
   method: "GET" | "HEAD" = "GET",
 ) {
   const headers = assetResponseHeaders(asset.path, asset);
+  if (asset.check !== undefined) headers["Cache-Control"] = "private, no-store";
+  yield* asset.check ?? Effect.void;
   const mediaFile = asset.file;
   const mediaInfo = mediaFile ? yield* statMediaFile(asset.path, mediaFile) : undefined;
+  yield* asset.check ?? Effect.void;
   const isMedia = /^(?:audio|video)\//i.test(headers["Content-Type"] ?? "");
   if (isMedia) {
     // Host media can change in place. Do not invite conditional range requests
@@ -223,10 +230,13 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
     if (!body) {
       return HttpServerResponse.text("File is too large to preview.", { status: 413 });
     }
-    return HttpServerResponse.stream(body, {
-      status,
-      headers,
-    });
+    return HttpServerResponse.stream(
+      asset.check === undefined ? body : body.pipe(Stream.tap(() => asset.check!)),
+      {
+        status,
+        headers,
+      },
+    );
   }
   return yield* HttpServerResponse.file(asset.path, { status, offset, bytesToRead, headers });
 });
@@ -423,7 +433,11 @@ export const layerAssetRoute = HttpRouter.add(
     if (asset.kind === "bytes") {
       return HttpServerResponse.uint8Array(asset.bytes, {
         contentType: asset.mimeType,
-        headers: { "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" },
+        headers: {
+          "cache-control":
+            asset.check === undefined ? "private, max-age=3600" : "private, no-store",
+          "x-content-type-options": "nosniff",
+        },
       });
     }
     if (asset.kind === "github-media") {
@@ -445,6 +459,10 @@ export const layerAssetRoute = HttpRouter.add(
       request.headers["if-range"],
       request.method === "HEAD" ? "HEAD" : "GET",
     ).pipe(
+      Effect.catchTags({
+        EnvironmentAuthorizationError: () =>
+          Effect.succeed(HttpServerResponse.text("Not Found", { status: 404 })),
+      }),
       Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),
     );
   }),

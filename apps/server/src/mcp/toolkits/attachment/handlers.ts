@@ -33,7 +33,10 @@ export const layer = McpToolAccess.toLayer(AttachmentToolkit, {
     Upload.issueAttachmentUploadUrl(input.upload).pipe(Effect.mapError(unavailable)),
   ),
   t3_attachment_discard: McpToolAccess.writes((input) =>
-    Upload.deletePendingAttachment(input.attachmentId).pipe(Effect.as({})),
+    Upload.deletePendingAttachment(input.attachmentId).pipe(
+      Effect.mapError(unavailable),
+      Effect.as({}),
+    ),
   ),
   t3_thread_send_attachments: McpToolAccess.writesThreads(
     (input) => [input.threadId],

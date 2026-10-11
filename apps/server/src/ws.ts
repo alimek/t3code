@@ -1,3 +1,6 @@
+import { authorizeAsset } from "./assets/AssetAuthority.ts";
+import * as FileAccess from "./workspace/FileAccess.ts";
+import { resourceRestricted } from "./auth/ToolAuthorization.ts";
 import * as ProviderCatalog from "./provider/ProviderCatalog.ts";
 import { authorizeExtraTool } from "./auth/ToolAuthorization.ts";
 import {
@@ -19,7 +22,6 @@ import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
-import * as Base64 from "effect/encoding/Base64";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -64,7 +66,6 @@ import {
   type OrchestrationV2Command,
   type GitActionProgressEvent,
   type GitManagerServiceError,
-  type MessageId,
   type AcpRegistryImportSessionInput,
   type AcpRegistryDeleteSessionInput,
   type AcpRegistryDisableProviderInput,
@@ -107,8 +108,6 @@ import {
   FilesystemBrowseError,
   AssetWorkspaceContextNotFoundError,
   AssetWorkspaceContextResolutionError,
-  ChatAttachmentId,
-  PersistChatAttachmentsError,
   RpcClientId,
   EnvironmentAuthorizationError,
   type ProjectId,
@@ -210,9 +209,11 @@ import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
-import { attachmentRelativePath, createDeterministicAttachmentId } from "./attachmentStore.ts";
-import { parseBase64DataUrl } from "./imageMime.ts";
-import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/AttachmentUpload.ts";
+import {
+  deletePendingAttachment,
+  issueAttachmentUploadUrl,
+  persistChatAttachments,
+} from "./assets/AttachmentUpload.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
@@ -386,73 +387,6 @@ export const withLateEditorConfig = <E, R>(
 function unexpectedCompatibilityError(error: never): never {
   throw new Error(`Unhandled compatibility error: ${String(error)}`);
 }
-
-const persistChatAttachments = Effect.fn("ws.assets.persistChatAttachments")(function* (input: {
-  readonly threadId: ThreadId;
-  readonly messageId: MessageId;
-  readonly attachments: ReadonlyArray<{
-    readonly type: "image";
-    readonly name: string;
-    readonly mimeType: string;
-    readonly sizeBytes: number;
-    readonly dataUrl: string;
-  }>;
-}) {
-  const config = yield* ServerConfig.ServerConfig;
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
-  return yield* Effect.forEach(
-    input.attachments.map((attachment, index) => ({ attachment, index })),
-    Effect.fn("ws.assets.persistChatAttachment")(function* ({ attachment, index }) {
-      const parsed = parseBase64DataUrl(attachment.dataUrl);
-      if (parsed === null || parsed.mimeType !== attachment.mimeType.toLowerCase()) {
-        return yield* new PersistChatAttachmentsError({
-          message: `Attachment ${attachment.name} has an invalid image payload.`,
-        });
-      }
-      const bytes = yield* Effect.fromResult(Base64.decode(parsed.base64)).pipe(
-        Effect.mapError(
-          (cause) =>
-            new PersistChatAttachmentsError({
-              message: `Attachment ${attachment.name} is not valid base64.`,
-              cause,
-            }),
-        ),
-      );
-      if (bytes.byteLength !== attachment.sizeBytes) {
-        return yield* new PersistChatAttachmentsError({
-          message: `Attachment ${attachment.name} size does not match its payload.`,
-        });
-      }
-      const rawId = createDeterministicAttachmentId(input.threadId, `${input.messageId}:${index}`);
-      if (rawId === null) {
-        return yield* new PersistChatAttachmentsError({
-          message: "Could not allocate an attachment identifier.",
-        });
-      }
-      const persisted = {
-        type: "image" as const,
-        id: ChatAttachmentId.make(rawId),
-        name: attachment.name,
-        mimeType: attachment.mimeType,
-        sizeBytes: attachment.sizeBytes,
-      };
-      yield* fileSystem
-        .writeFile(path.join(config.attachmentsDir, attachmentRelativePath(persisted)!), bytes)
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new PersistChatAttachmentsError({
-                message: `Could not persist attachment ${attachment.name}.`,
-                cause,
-              }),
-          ),
-        );
-      return persisted;
-    }),
-    { concurrency: 2 },
-  );
-});
 
 function projectEntriesFailureContext(error: WorkspaceEntries.WorkspaceEntriesError): {
   readonly failure: ProjectEntriesFailure;
@@ -1516,7 +1450,7 @@ const layerWsRpc = (
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
-      const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+      const fileAccess = yield* FileAccess.make;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
@@ -1553,6 +1487,7 @@ const layerWsRpc = (
       const collectionAuthority = sessions.getAuthority(currentSession.sessionId, currentSession);
       const readAuthority: ThreadReadAuthority = {
         current: collectionAuthority.pipe(
+          Effect.map((value) => ({ ...value, sessionId: currentSessionId })),
           Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationReadScope)),
         ),
       };
@@ -1570,6 +1505,7 @@ const layerWsRpc = (
           .pipe(Effect.map((ref) => pullRequestSyncKey(ref)));
       const mutationAuthority: MutationAuthority = {
         current: collectionAuthority.pipe(
+          Effect.map((value) => ({ ...value, sessionId: currentSessionId })),
           Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationOperateScope)),
         ),
       };
@@ -2934,63 +2870,68 @@ const layerWsRpc = (
             ),
           ),
         [WS_METHODS.projectsSearchEntries]: (input) =>
-          workspaceEntries.search(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectSearchEntriesError({
-                  cwd: input.cwd,
-                  queryLength: input.query.length,
-                  limit: input.limit,
-                  ...projectEntriesFailureContext(cause),
-                  cause,
-                }),
+          fileAccess.search(readAuthority, input).pipe(
+            Effect.mapError((cause) =>
+              cause._tag === "EnvironmentAuthorizationError"
+                ? cause
+                : new ProjectSearchEntriesError({
+                    cwd: input.cwd,
+                    queryLength: input.query.length,
+                    limit: input.limit,
+                    ...projectEntriesFailureContext(cause),
+                    cause,
+                  }),
             ),
           ),
         [WS_METHODS.projectsSearchContents]: (input) =>
-          workspaceEntries.searchContents(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectSearchContentsError({
-                  cwd: input.cwd,
-                  queryLength: input.query.length,
-                  limit: input.limit,
-                  ...projectEntriesFailureContext(cause),
-                  cause,
-                }),
+          fileAccess.searchContents(readAuthority, input).pipe(
+            Effect.mapError((cause) =>
+              cause._tag === "EnvironmentAuthorizationError"
+                ? cause
+                : new ProjectSearchContentsError({
+                    cwd: input.cwd,
+                    queryLength: input.query.length,
+                    limit: input.limit,
+                    ...projectEntriesFailureContext(cause),
+                    cause,
+                  }),
             ),
           ),
         [WS_METHODS.projectsListEntries]: (input) =>
-          workspaceEntries.list(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectListEntriesError({
-                  ...input,
-                  ...projectEntriesFailureContext(cause),
-                  cause,
-                }),
+          fileAccess.list(readAuthority, input).pipe(
+            Effect.mapError((cause) =>
+              cause._tag === "EnvironmentAuthorizationError"
+                ? cause
+                : new ProjectListEntriesError({
+                    ...input,
+                    ...projectEntriesFailureContext(cause),
+                    cause,
+                  }),
             ),
           ),
         [WS_METHODS.projectsReadFile]: (input) =>
-          workspaceFileSystem.readFile(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectReadFileError({
-                  ...input,
-                  ...projectFileFailureContext(cause),
-                  cause,
-                }),
+          fileAccess.readFile(readAuthority, input).pipe(
+            Effect.mapError((cause) =>
+              cause._tag === "EnvironmentAuthorizationError"
+                ? cause
+                : new ProjectReadFileError({
+                    ...input,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
             ),
           ),
         [WS_METHODS.projectsWriteFile]: (input) =>
-          workspaceFileSystem.writeFile(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new ProjectWriteFileError({
-                  cwd: input.cwd,
-                  relativePath: input.relativePath,
-                  ...projectFileFailureContext(cause),
-                  cause,
-                }),
+          fileAccess.writeFile(readAuthority, input).pipe(
+            Effect.mapError((cause) =>
+              cause._tag === "EnvironmentAuthorizationError"
+                ? cause
+                : new ProjectWriteFileError({
+                    cwd: input.cwd,
+                    relativePath: input.relativePath,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
             ),
           ),
         [WS_METHODS.projectsMutate]: (mutation) =>
@@ -3020,13 +2961,20 @@ const layerWsRpc = (
                 }),
             ),
           ),
-        [WS_METHODS.attachmentsCreateUploadUrl]: (input) => issueAttachmentUploadUrl(input),
-        [WS_METHODS.attachmentsDelete]: (input) => deletePendingAttachment(input.attachmentId),
+        [WS_METHODS.attachmentsCreateUploadUrl]: (input) =>
+          issueAttachmentUploadUrl(input, readAuthority),
+        [WS_METHODS.attachmentsDelete]: (input) =>
+          deletePendingAttachment(input.attachmentId, readAuthority),
         [WS_METHODS.agentSessionsScan]: () => agentSessionScanner.scan,
         [WS_METHODS.agentSessionsImport]: (input) =>
           agentSessionImporter.importRecentAgentThreads(input),
         [WS_METHODS.assetsCreateUrl]: (input) =>
           Effect.gen(function* () {
+            if (
+              input.resource._tag === "project-favicon" ||
+              input.resource._tag === "draft-workspace-file"
+            )
+              yield* authorizeAsset(readAuthority, input.resource);
             const path = yield* Path.Path;
             // An absolute media path can be linked from a thread on another environment.
             if (
@@ -3035,15 +2983,18 @@ const layerWsRpc = (
               input.resource._tag === "tool-output-image" ||
               // GitHub media names the repository it authenticates through itself.
               input.resource._tag === "github-media" ||
-              (input.resource._tag === "media-file" && path.isAbsolute(input.resource.path))
+              (input.resource._tag === "media-file" &&
+                path.isAbsolute(input.resource.path) &&
+                !resourceRestricted((yield* readAuthority.current).resourceGrant))
             ) {
-              return yield* issueAssetUrl({ resource: input.resource });
+              return yield* issueAssetUrl({ resource: input.resource, authority: readAuthority });
             }
             if (input.resource._tag === "draft-workspace-file") {
               // A project draft names its workspace directly; there is no
               // thread to resolve one from.
               return yield* issueAssetUrl({
                 resource: input.resource,
+                authority: readAuthority,
                 workspaceRoot: input.resource.cwd,
               });
             }
@@ -3069,6 +3020,7 @@ const layerWsRpc = (
               const clone = yield* projectCloneTracker.get(project.value.projectId);
               return yield* issueAssetUrl({
                 resource: input.resource,
+                authority: readAuthority,
                 ...(project.value.faviconPath
                   ? { projectFaviconPath: project.value.faviconPath }
                   : {}),
@@ -3105,11 +3057,14 @@ const layerWsRpc = (
             }
             return yield* issueAssetUrl({
               resource: input.resource,
+              authority: readAuthority,
               workspaceRoot: thread.thread.worktreePath ?? project.value.workspaceRoot,
             });
           }),
         [WS_METHODS.assetsPersistChatAttachments]: (input) =>
-          persistChatAttachments(input).pipe(Effect.map((attachments) => ({ attachments }))),
+          persistChatAttachments(mutationAuthority, input).pipe(
+            Effect.map((attachments) => ({ attachments })),
+          ),
         ...workspaceReadHandlers(
           readAuthority,
           { gitWorkflow, vcsStatusBroadcaster, review, worktreeSetupTracker },

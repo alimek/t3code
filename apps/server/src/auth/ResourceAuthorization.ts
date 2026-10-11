@@ -2,6 +2,7 @@ import {
   AuthOrchestrationReadScope,
   EnvironmentAuthorizationError,
   type AuthResourceGrant,
+  type AuthSessionId,
   type AuthEnvironmentScope,
   ThreadId,
   resourceGrantAllowsProject,
@@ -27,6 +28,8 @@ export type ThreadReadAuthority =
           readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
           readonly resourceGrant: AuthResourceGrant;
           readonly authorityRevision?: number;
+          readonly sessionId?: AuthSessionId;
+          readonly deviceId?: AuthSessionId;
         },
         EnvironmentAuthorizationError
       >;

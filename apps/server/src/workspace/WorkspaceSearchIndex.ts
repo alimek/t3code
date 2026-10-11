@@ -268,7 +268,7 @@ function mapContentMatchRanges(
  * neighbouring character is not a word character, or the match's own edge
  * character is not a word character.
  */
-function isWholeWordRange(
+export function isWholeWordRange(
   line: string,
   range: { readonly start: number; readonly end: number },
 ): boolean {

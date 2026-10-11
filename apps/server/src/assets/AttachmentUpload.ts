@@ -1,3 +1,25 @@
+import * as Base64 from "effect/encoding/Base64";
+import {
+  ChatAttachmentId,
+  PersistChatAttachmentsError,
+  type ThreadId,
+  type MessageId,
+} from "@t3tools/contracts";
+import { trustedMutationAuthority, type MutationAuthority } from "../auth/CommandAuthorization.ts";
+import { authorizeOwnerThreadIds, threadReadDenied } from "../auth/ResourceAuthorization.ts";
+import { attachmentRelativePath, createDeterministicAttachmentId } from "../attachmentStore.ts";
+import { parseBase64DataUrl } from "../imageMime.ts";
+import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import * as SqlClient from "effect/sql/SqlClient";
+import { trustedReadAuthority, type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
+import {
+  AssetBinding,
+  bindingAuthority,
+  captureBinding,
+  encodeBinding,
+  authorizeAttachment,
+  current,
+} from "./AssetAuthority.ts";
 import {
   ATTACHMENT_UPLOAD_URL_TTL_MS,
   type AttachmentCreateUploadUrlInput,
@@ -50,6 +72,7 @@ const AttachmentUploadClaims = Schema.Struct({
   mimeType: Schema.String,
   sizeBytes: Schema.Number,
   expiresAt: Schema.Number,
+  binding: Schema.optionalKey(AssetBinding),
 });
 export type AttachmentUploadClaims = typeof AttachmentUploadClaims.Type;
 
@@ -72,7 +95,9 @@ const loadSigningSecret = Effect.gen(function* () {
 
 export const issueAttachmentUploadUrl = Effect.fn("AttachmentUpload.issueUrl")(function* (
   input: AttachmentCreateUploadUrlInput,
+  authority: ThreadReadAuthority = trustedReadAuthority,
 ) {
+  const binding = yield* captureBinding(authority, AuthOrchestrationOperateScope);
   const secret = yield* loadSigningSecret.pipe(
     Effect.mapError((cause) => new AttachmentUploadSigningKeyError({ cause })),
   );
@@ -98,6 +123,26 @@ export const issueAttachmentUploadUrl = Effect.fn("AttachmentUpload.issueUrl")(f
     attachmentType === "file" ? attachmentFileExtension(input.name) : undefined,
   );
   const expiresAt = nowMs + ATTACHMENT_UPLOAD_URL_TTL_MS;
+  if (binding !== undefined) {
+    const service = yield* Effect.serviceOption(SqlClient.SqlClient);
+    if (Option.isNone(service))
+      return yield* new AttachmentUploadSigningKeyError({
+        cause: "Upload authority storage unavailable",
+      });
+    const sql = service.value;
+    yield* current(authority, AuthOrchestrationOperateScope);
+    yield* sql`DELETE FROM attachment_upload_authority WHERE expires_at <= ${nowMs}`.pipe(
+      Effect.mapError((cause) => new AttachmentUploadSigningKeyError({ cause })),
+    );
+    if (
+      (yield* captureBinding(authority, AuthOrchestrationOperateScope))?.authorityRevision !==
+      binding.authorityRevision
+    )
+      return yield* threadReadDenied();
+    yield* sql`INSERT INTO attachment_upload_authority (attachment_id, binding_json, expires_at) VALUES (${attachmentId}, ${encodeBinding(binding)}, ${expiresAt})`.pipe(
+      Effect.mapError((cause) => new AttachmentUploadSigningKeyError({ cause })),
+    );
+  }
   const encodedPayload = base64UrlEncode(
     encodeAttachmentUploadClaims({
       version: 1,
@@ -108,9 +153,16 @@ export const issueAttachmentUploadUrl = Effect.fn("AttachmentUpload.issueUrl")(f
       mimeType: input.mimeType,
       sizeBytes: input.sizeBytes,
       expiresAt,
+      ...(binding === undefined ? {} : { binding }),
     }),
   );
 
+  if (
+    binding !== undefined &&
+    (yield* captureBinding(authority, AuthOrchestrationOperateScope))?.authorityRevision !==
+      binding.authorityRevision
+  )
+    return yield* threadReadDenied();
   return {
     attachmentId,
     relativeUrl: `${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/${encodedPayload}.${signPayload(encodedPayload, secret)}`,
@@ -139,6 +191,11 @@ export const validateAttachmentUploadToken = Effect.fn("AttachmentUpload.validat
   const claims = decodeClaims(encodedPayload);
   if (!claims || claims.expiresAt <= (yield* Clock.currentTimeMillis)) {
     return null;
+  }
+  if (claims.binding !== undefined) {
+    const authority = yield* bindingAuthority(claims.binding);
+    const live = yield* current(authority, AuthOrchestrationOperateScope).pipe(Effect.result);
+    if (live._tag === "Failure") return null;
   }
   return claims;
 });
@@ -179,14 +236,20 @@ export const storeAttachmentUpload = Effect.fn("AttachmentUpload.store")(functio
     return { ok: false, status: 500, detail: "Failed to resolve attachment path." };
   }
 
+  const authority =
+    claims.binding === undefined ? trustedReadAuthority : yield* bindingAuthority(claims.binding);
+  const check = authorizeAttachment(authority, claims.attachmentId, AuthOrchestrationOperateScope);
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   let receivedBytes = 0;
   const bodyStream = body instanceof Uint8Array ? Stream.make(body) : body;
   return yield* Effect.gen(function* () {
+    yield* check;
     yield* fileSystem.makeDirectory(path.dirname(finalPath), { recursive: true });
+    yield* check;
     yield* Stream.run(
       bodyStream.pipe(
+        Stream.tap(() => check),
         Stream.takeWhile((chunk) => {
           receivedBytes += chunk.byteLength;
           return receivedBytes <= claims.sizeBytes;
@@ -201,9 +264,18 @@ export const storeAttachmentUpload = Effect.fn("AttachmentUpload.store")(functio
         detail: `Body was ${receivedBytes} bytes, expected ${claims.sizeBytes}.`,
       } satisfies StoreAttachmentUploadResult;
     }
+    yield* check;
     yield* fileSystem.rename(partPath, finalPath);
     return { ok: true } satisfies StoreAttachmentUploadResult;
   }).pipe(
+    Effect.catchTags({
+      EnvironmentAuthorizationError: () =>
+        Effect.succeed({
+          ok: false,
+          status: 404,
+          detail: "Not Found",
+        } satisfies StoreAttachmentUploadResult),
+    }),
     Effect.catch((cause) =>
       Effect.logError("Failed to persist attachment upload.", {
         attachmentId: claims.attachmentId,
@@ -224,7 +296,9 @@ export const storeAttachmentUpload = Effect.fn("AttachmentUpload.store")(functio
 
 export const deletePendingAttachment = Effect.fn("AttachmentUpload.deletePending")(function* (
   attachmentId: string,
+  authority: ThreadReadAuthority = trustedReadAuthority,
 ) {
+  yield* authorizeAttachment(authority, attachmentId, AuthOrchestrationOperateScope);
   if (parseThreadSegmentFromAttachmentId(attachmentId) !== PENDING_ATTACHMENT_THREAD_SEGMENT) {
     return;
   }
@@ -239,5 +313,92 @@ export const deletePendingAttachment = Effect.fn("AttachmentUpload.deletePending
   }
 
   const fileSystem = yield* FileSystem.FileSystem;
+  yield* authorizeAttachment(authority, attachmentId, AuthOrchestrationOperateScope);
   yield* fileSystem.remove(attachmentPath, { force: true }).pipe(Effect.orElseSucceed(() => {}));
+});
+
+export const persistChatAttachments = Effect.fn("ws.assets.persistChatAttachments")(function* (
+  authority: MutationAuthority,
+  input: {
+    readonly threadId: ThreadId;
+    readonly messageId: MessageId;
+    readonly attachments: ReadonlyArray<{
+      readonly type: "image";
+      readonly name: string;
+      readonly mimeType: string;
+      readonly sizeBytes: number;
+      readonly dataUrl: string;
+    }>;
+  },
+) {
+  const config = yield* ServerConfig.ServerConfig;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const sql = yield* SqlClient.SqlClient;
+  const check = Effect.gen(function* () {
+    if (authority === trustedMutationAuthority) return;
+    const value = yield* authority.current;
+    if (!value.scopes.includes(AuthOrchestrationOperateScope)) return yield* threadReadDenied();
+    yield* authorizeOwnerThreadIds(sql, value.resourceGrant, [input.threadId]).pipe(
+      Effect.mapError(() => threadReadDenied()),
+    );
+    if (
+      (yield* current(authority, AuthOrchestrationOperateScope))?.authorityRevision !==
+      value.authorityRevision
+    )
+      return yield* threadReadDenied();
+  });
+  yield* check;
+  return yield* Effect.forEach(
+    input.attachments.map((attachment, index) => ({ attachment, index })),
+    Effect.fn("ws.assets.persistChatAttachment")(function* ({ attachment, index }) {
+      const parsed = parseBase64DataUrl(attachment.dataUrl);
+      if (parsed === null || parsed.mimeType !== attachment.mimeType.toLowerCase()) {
+        return yield* new PersistChatAttachmentsError({
+          message: `Attachment ${attachment.name} has an invalid image payload.`,
+        });
+      }
+      const bytes = yield* Effect.fromResult(Base64.decode(parsed.base64)).pipe(
+        Effect.mapError(
+          (cause) =>
+            new PersistChatAttachmentsError({
+              message: `Attachment ${attachment.name} is not valid base64.`,
+              cause,
+            }),
+        ),
+      );
+      if (bytes.byteLength !== attachment.sizeBytes) {
+        return yield* new PersistChatAttachmentsError({
+          message: `Attachment ${attachment.name} size does not match its payload.`,
+        });
+      }
+      const rawId = createDeterministicAttachmentId(input.threadId, `${input.messageId}:${index}`);
+      if (rawId === null) {
+        return yield* new PersistChatAttachmentsError({
+          message: "Could not allocate an attachment identifier.",
+        });
+      }
+      const persisted = {
+        type: "image" as const,
+        id: ChatAttachmentId.make(rawId),
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        sizeBytes: attachment.sizeBytes,
+      };
+      yield* check;
+      yield* fileSystem
+        .writeFile(path.join(config.attachmentsDir, attachmentRelativePath(persisted)!), bytes)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new PersistChatAttachmentsError({
+                message: `Could not persist attachment ${attachment.name}.`,
+                cause,
+              }),
+          ),
+        );
+      return persisted;
+    }),
+    { concurrency: 2 },
+  );
 });

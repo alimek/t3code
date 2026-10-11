@@ -1,3 +1,23 @@
+import {
+  AssetBinding,
+  authorizeAsset,
+  bindingAuthority,
+  captureBinding,
+  current,
+} from "./AssetAuthority.ts";
+import {
+  trustedReadAuthority,
+  threadReadDenied,
+  type ThreadReadAuthority,
+} from "../auth/ResourceAuthorization.ts";
+import { resourceRestricted } from "../auth/ToolAuthorization.ts";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as WorkspaceAccess from "../auth/workspaceReadAccess.ts";
+import {
+  AuthFilesystemReadScope,
+  AuthOrchestrationReadScope,
+  AssetResource as AssetResourceSchema,
+} from "@t3tools/contracts";
 import type { AssetResource } from "@t3tools/contracts";
 import {
   AssetAttachmentNotFoundError,
@@ -161,11 +181,19 @@ const AssetClaimsSchema = Schema.Union([
 ]);
 type AssetClaims = typeof AssetClaimsSchema.Type;
 
-const AssetClaimsJson = Schema.fromJsonString(AssetClaimsSchema);
+const BoundAssetClaims = Schema.Struct({
+  claims: AssetClaimsSchema,
+  binding: AssetBinding,
+  resource: AssetResourceSchema,
+  workspaceRoot: Schema.optionalKey(Schema.String),
+});
+const AssetClaimsJson = Schema.fromJsonString(Schema.Union([AssetClaimsSchema, BoundAssetClaims]));
 const decodeAssetClaims = Schema.decodeUnknownOption(AssetClaimsJson);
 const encodeAssetClaims = Schema.encodeSync(AssetClaimsJson);
 
-export type ResolvedAsset =
+export type ResolvedAsset = {
+  readonly check?: Effect.Effect<void, import("@t3tools/contracts").EnvironmentAuthorizationError>;
+} & (
   | {
       readonly kind: "file";
       readonly path: string;
@@ -186,9 +214,10 @@ export type ResolvedAsset =
       /** When the signed URL that granted this stops working, which bounds how long a client
           may keep the bytes it fetched with it. */
       readonly expiresAt: number;
-    };
+    }
+);
 
-function decodeClaims(encodedPayload: string): AssetClaims | null {
+function decodeClaims(encodedPayload: string) {
   try {
     return Option.getOrNull(decodeAssetClaims(base64UrlDecodeUtf8(encodedPayload)));
   } catch {
@@ -295,23 +324,43 @@ const resolveCanonicalWorkspaceFileForRequest = (input: {
 const HEADER_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 
 /** From the identity-checked, non-blocking handle the caller already holds. */
-const readImageDimensionsFromOpenFile = (filePath: string, file: OpenMediaFile) =>
-  readMediaFileHeader(filePath, file, IMAGE_DIMENSIONS_HEADER_BYTES).pipe(
-    Effect.map(readImageDimensions),
-    Effect.orElseSucceed((): ImageDimensions | null => null),
-  );
+const readImageDimensionsFromOpenFile = (
+  filePath: string,
+  file: OpenMediaFile,
+  check: Effect.Effect<
+    void,
+    import("@t3tools/contracts").EnvironmentAuthorizationError
+  > = Effect.void,
+) =>
+  check
+    .pipe(Effect.andThen(readMediaFileHeader(filePath, file, IMAGE_DIMENSIONS_HEADER_BYTES)))
+    .pipe(
+      Effect.map(readImageDimensions),
+      Effect.catch((error) =>
+        error._tag === "EnvironmentAuthorizationError" ? Effect.fail(error) : Effect.succeed(null),
+      ),
+    );
 
 /**
  * Opens through `openMediaFile` so a path swapped for a FIFO cannot block the
  * request; a regular open would wait for a writer that never comes.
  */
-const readImageDimensionsFromHeader = (filePath: string) =>
-  openMediaFile(filePath).pipe(
+const readImageDimensionsFromHeader = (
+  filePath: string,
+  check: Effect.Effect<
+    void,
+    import("@t3tools/contracts").EnvironmentAuthorizationError
+  > = Effect.void,
+) =>
+  check.pipe(
+    Effect.andThen(openMediaFile(filePath)),
     Effect.flatMap((file) =>
-      file === null ? Effect.succeed(null) : readImageDimensionsFromOpenFile(filePath, file),
+      file === null ? Effect.succeed(null) : readImageDimensionsFromOpenFile(filePath, file, check),
     ),
     Effect.scoped,
-    Effect.orElseSucceed((): ImageDimensions | null => null),
+    Effect.catch((error) =>
+      error._tag === "EnvironmentAuthorizationError" ? Effect.fail(error) : Effect.succeed(null),
+    ),
   );
 
 const finalizeAbsoluteMediaFileAsset = Effect.fn("AssetAccess.finalizeAbsoluteMediaFileAsset")(
@@ -319,6 +368,10 @@ const finalizeAbsoluteMediaFileAsset = Effect.fn("AssetAccess.finalizeAbsoluteMe
     readonly requestedPath: string;
     readonly resource: AssetResource;
     readonly expiresAt: number;
+    readonly check?: Effect.Effect<
+      void,
+      import("@t3tools/contracts").EnvironmentAuthorizationError
+    >;
   }) {
     const path = yield* Path.Path;
     const canonicalFile = yield* resolveCanonicalFile(input.requestedPath).pipe(
@@ -333,13 +386,14 @@ const finalizeAbsoluteMediaFileAsset = Effect.fn("AssetAccess.finalizeAbsoluteMe
       return yield* new AssetPreviewTypeValidationError({ resource: input.resource });
     }
     const wantsDimensions = HEADER_IMAGE_EXTENSIONS.has(path.extname(canonicalFile).toLowerCase());
+    yield* input.check ?? Effect.void;
     const opened = yield* openMediaFile(canonicalFile).pipe(
       Effect.flatMap((file) =>
         file === null
           ? Effect.succeed(null)
           : Effect.map(
               wantsDimensions
-                ? readImageDimensionsFromOpenFile(canonicalFile, file)
+                ? readImageDimensionsFromOpenFile(canonicalFile, file, input.check)
                 : Effect.succeed(null),
               (dimensions) => ({
                 identity: { device: file.info.dev.toString(), inode: file.info.ino.toString() },
@@ -375,6 +429,10 @@ const finalizeWorkspaceFileAsset = Effect.fn("AssetAccess.finalizeWorkspaceFileA
     readonly requestedPath: string;
     readonly resource: AssetResource;
     readonly expiresAt: number;
+    readonly check?: Effect.Effect<
+      void,
+      import("@t3tools/contracts").EnvironmentAuthorizationError
+    >;
   }) {
     const path = yield* Path.Path;
     const fileSystem = yield* FileSystem.FileSystem;
@@ -427,7 +485,7 @@ const finalizeWorkspaceFileAsset = Effect.fn("AssetAccess.finalizeWorkspaceFileA
     const imageDimensions = HEADER_IMAGE_EXTENSIONS.has(
       path.extname(resolved.relativePath).toLowerCase(),
     )
-      ? yield* readImageDimensionsFromHeader(canonicalFile)
+      ? yield* readImageDimensionsFromHeader(canonicalFile, input.check)
       : null;
     return {
       claims: isWorkspaceImagePreviewPath(resolved.relativePath)
@@ -453,14 +511,55 @@ const finalizeWorkspaceFileAsset = Effect.fn("AssetAccess.finalizeWorkspaceFileA
 
 export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (input: {
   readonly resource: AssetResource;
+  readonly authority?: ThreadReadAuthority;
   readonly workspaceRoot?: string;
   readonly projectFaviconPath?: string;
   /** The project's clone has not landed, so its icon is reported missing without a lookup. */
   readonly projectCheckoutPending?: boolean;
 }) {
+  const authority = input.authority ?? trustedReadAuthority;
+  const scope =
+    input.resource._tag === "workspace-file" ||
+    input.resource._tag === "media-file" ||
+    input.resource._tag === "draft-workspace-file"
+      ? AuthFilesystemReadScope
+      : AuthOrchestrationReadScope;
+  const restricted = resourceRestricted((yield* current(authority, scope))?.resourceGrant);
+  const binding = yield* captureBinding(authority, scope);
+  yield* authorizeAsset(authority, input.resource, input.workspaceRoot);
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
+  const context = yield* Effect.context<Effect.Services<ReturnType<typeof authorizeAsset>>>();
+  const check = authorizeAsset(authority, input.resource, input.workspaceRoot).pipe(
+    Effect.provide(context),
+  );
+  if (
+    binding !== undefined &&
+    restricted &&
+    "path" in input.resource &&
+    input.resource.path !== undefined
+  ) {
+    const root = "cwd" in input.resource ? input.resource.cwd : input.workspaceRoot;
+    if (root === undefined) return yield* threadReadDenied();
+    yield* authorizeAssetFile(
+      authority,
+      input.resource,
+      root,
+      path.resolve(root, input.resource.path),
+    );
+  }
+  if (binding !== undefined && restricted && input.projectFaviconPath !== undefined) {
+    const root =
+      input.resource._tag === "project-favicon" ? input.resource.cwd : input.workspaceRoot;
+    if (root === undefined) return yield* threadReadDenied();
+    yield* authorizeAssetFile(
+      authority,
+      input.resource,
+      root,
+      path.resolve(root, input.projectFaviconPath),
+    );
+  }
   let expiresAt = (yield* Clock.currentTimeMillis) + ASSET_TOKEN_TTL_MS;
   let claims: AssetClaims;
   let fileName: string;
@@ -484,10 +583,14 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
           );
         requestedPath = path.resolve(workspaceRoot, requestedPath);
       }
+      if (restricted && input.workspaceRoot === undefined) return yield* threadReadDenied();
+      if (restricted)
+        yield* authorizeAssetFile(authority, input.resource, input.workspaceRoot!, requestedPath);
       const finalized = yield* finalizeAbsoluteMediaFileAsset({
         requestedPath,
         resource: input.resource,
         expiresAt,
+        check,
       });
       claims = finalized.claims;
       fileName = finalized.fileName;
@@ -514,6 +617,7 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
         requestedPath: input.resource.path,
         resource: input.resource,
         expiresAt,
+        check,
       });
       claims = finalized.claims;
       fileName = finalized.fileName;
@@ -526,10 +630,18 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
       const draftWorkspaceRoot = input.workspaceRoot ?? input.resource.cwd;
       if (path.isAbsolute(input.resource.path)) {
         // An absolute draft path serves exactly like an absolute media path.
+        if (binding !== undefined && restricted)
+          yield* authorizeAssetFile(
+            authority,
+            input.resource,
+            draftWorkspaceRoot,
+            input.resource.path,
+          );
         const finalized = yield* finalizeAbsoluteMediaFileAsset({
           requestedPath: input.resource.path,
           resource: input.resource,
           expiresAt,
+          check,
         });
         claims = finalized.claims;
         fileName = finalized.fileName;
@@ -550,6 +662,7 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
         requestedPath: input.resource.path,
         resource: input.resource,
         expiresAt,
+        check,
       });
       claims = finalized.claims;
       fileName = finalized.fileName;
@@ -558,6 +671,7 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
     }
     case "attachment": {
       const config = yield* ServerConfig.ServerConfig;
+      yield* check;
       const attachmentPath = resolveAttachmentPathById({
         attachmentsDir: config.attachmentsDir,
         attachmentId: input.resource.attachmentId,
@@ -580,7 +694,7 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
           ? inlinePreviewMimeTypeForExtension(extension)
           : undefined;
       if (!isGenericFile) {
-        imageDimensions = yield* readImageDimensionsFromHeader(attachmentPath);
+        imageDimensions = yield* readImageDimensionsFromHeader(attachmentPath, check);
       }
       claims = {
         version: 1,
@@ -682,6 +796,9 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
             };
       if (sourceFaviconPath && canonicalFaviconPath) {
         const crypto = yield* Crypto.Crypto;
+        if (binding !== undefined && restricted)
+          yield* authorizeAssetFile(authority, input.resource, workspaceRoot, canonicalFaviconPath);
+        yield* check;
         const faviconBytes = yield* fileSystem.readFile(canonicalFaviconPath).pipe(
           Effect.mapError(
             (cause) =>
@@ -708,6 +825,7 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
       break;
     }
     case "tool-output-image": {
+      yield* check;
       const image = yield* readToolOutputImage(input.resource).pipe(
         Effect.mapError(
           (cause) => new AssetWorkspaceAssetInspectionError({ resource: input.resource, cause }),
@@ -773,7 +891,23 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
       PROJECT_FAVICON_TOKEN_BUCKET_MS;
     claims = { ...claims, expiresAt };
   }
-  const encodedPayload = base64UrlEncode(encodeAssetClaims(claims));
+  yield* authorizeAsset(authority, input.resource, input.workspaceRoot);
+  if (binding !== undefined) {
+    const latest = yield* captureBinding(authority, scope);
+    if (latest?.authorityRevision !== binding.authorityRevision) return yield* threadReadDenied();
+  }
+  const encodedPayload = base64UrlEncode(
+    encodeAssetClaims(
+      binding === undefined
+        ? claims
+        : {
+            claims,
+            binding,
+            resource: input.resource,
+            ...(input.workspaceRoot === undefined ? {} : { workspaceRoot: input.workspaceRoot }),
+          },
+    ),
+  );
   const token = `${encodedPayload}.${signPayload(encodedPayload, signingSecret)}`;
   return {
     relativeUrl: `${ASSET_ROUTE_PREFIX}/${token}/${encodeURIComponent(fileName)}`,
@@ -787,8 +921,8 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
   token: string,
   relativePath: string,
 ) {
-  const [encodedPayload, signature] = token.split(".");
-  if (!encodedPayload || !signature) return null;
+  const [encodedPayload, signature, extra] = token.split(".");
+  if (!encodedPayload || !signature || extra) return null;
 
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const signingSecret = yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32).pipe(
@@ -798,9 +932,103 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
   if (!signingSecret) return null;
   if (!timingSafeEqualBase64Url(signature, signPayload(encodedPayload, signingSecret))) return null;
 
-  const claims = decodeClaims(encodedPayload);
-  if (!claims || claims.expiresAt <= (yield* Clock.currentTimeMillis)) return null;
+  const decoded = decodeClaims(encodedPayload);
+  if (!decoded) return null;
+  const claims = "claims" in decoded ? decoded.claims : decoded;
+  if (claims.expiresAt <= (yield* Clock.currentTimeMillis)) return null;
+  if (!("binding" in decoded)) return yield* resolveAssetClaims(claims, relativePath);
+  const authority = yield* bindingAuthority(decoded.binding);
+  const scope =
+    decoded.resource._tag === "workspace-file" ||
+    decoded.resource._tag === "media-file" ||
+    decoded.resource._tag === "draft-workspace-file"
+      ? AuthFilesystemReadScope
+      : AuthOrchestrationReadScope;
+  const context = yield* Effect.context<Effect.Services<ReturnType<typeof authorizeAsset>>>();
+  const check = authorizeAsset(authority, decoded.resource, decoded.workspaceRoot).pipe(
+    Effect.andThen(current(authority, scope)),
+    Effect.asVoid,
+    Effect.provide(context),
+  );
+  return yield* Effect.gen(function* () {
+    yield* check;
+    const asset = yield* resolveAssetClaims(claims, relativePath);
+    if (asset === null) return null;
+    if (asset.kind === "file") {
+      if (
+        decoded.resource._tag !== "attachment" &&
+        resourceRestricted((yield* current(authority, scope))?.resourceGrant)
+      ) {
+        const root = "cwd" in decoded.resource ? decoded.resource.cwd : decoded.workspaceRoot;
+        if (root === undefined) return yield* threadReadDenied();
+        yield* authorizeAssetFile(authority, decoded.resource, root, asset.path);
+      }
+      const canonicalPath = yield* (yield* FileSystem.FileSystem).realPath(asset.path);
+      const file = asset.file ?? (yield* openMediaFile(canonicalPath));
+      if (file === null) return null;
+      yield* check;
+      return { ...asset, path: canonicalPath, file, check };
+    }
+    yield* check;
+    return { ...asset, check };
+  }).pipe(Effect.catchTags({ EnvironmentAuthorizationError: () => Effect.succeed(null) }));
+});
 
+const authorizeAssetFile = Effect.fnUntraced(
+  function* (
+    authority: ThreadReadAuthority,
+    resource: AssetResource,
+    root: string,
+    target: string,
+  ) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const service = yield* Effect.serviceOption(SqlClient.SqlClient);
+    if (Option.isNone(service)) return yield* threadReadDenied();
+    const access = yield* WorkspaceAccess.make.pipe(
+      Effect.provideService(SqlClient.SqlClient, service.value),
+    );
+    yield* access.admit(
+      authority,
+      {
+        cwd: path.dirname(target),
+        ...("threadId" in resource ? { threadId: resource.threadId } : {}),
+      },
+      resource._tag === "project-favicon" ? AuthOrchestrationReadScope : AuthFilesystemReadScope,
+    );
+    const [canonicalRoot, canonicalTarget] = yield* Effect.all([
+      fs.realPath(root),
+      fs.realPath(target),
+    ]);
+    const relative = path.relative(canonicalRoot, canonicalTarget);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
+      return yield* threadReadDenied();
+    yield* access.admit(
+      authority,
+      {
+        cwd: path.dirname(canonicalTarget),
+        ...("threadId" in resource ? { threadId: resource.threadId } : {}),
+      },
+      resource._tag === "project-favicon" ? AuthOrchestrationReadScope : AuthFilesystemReadScope,
+    );
+  },
+  Effect.mapError(() => threadReadDenied()),
+);
+
+const resolveAssetClaims = Effect.fnUntraced(function* (
+  claims: AssetClaims,
+  relativePath: string,
+): Effect.fn.Return<
+  ResolvedAsset | null,
+  never,
+  | FileSystem.FileSystem
+  | Path.Path
+  | ServerConfig.ServerConfig
+  | Orchestrator.OrchestratorV2
+  | NativeAppIconResolver.NativeAppIconResolver
+  | WorkspacePaths.WorkspacePaths
+  | import("effect/Scope").Scope
+> {
   if (claims.kind === "attachment") {
     const config = yield* ServerConfig.ServerConfig;
     const attachmentPath = resolveAttachmentPathById({

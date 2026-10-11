@@ -181,14 +181,16 @@ export function resolveAttachmentPathById(input: {
       attachmentsDir: input.attachmentsDir,
       relativePath: `${normalizedId}.${fileExtension.toLowerCase()}`,
     });
-    return filePath && NodeFS.existsSync(filePath) ? filePath : null;
+    return filePath && NodeFS.lstatSync(filePath, { throwIfNoEntry: false })?.isFile()
+      ? filePath
+      : null;
   }
   for (const extension of ATTACHMENT_FILENAME_EXTENSIONS) {
     const maybePath = resolveAttachmentRelativePath({
       attachmentsDir: input.attachmentsDir,
       relativePath: `${normalizedId}${extension}`,
     });
-    if (maybePath && NodeFS.existsSync(maybePath)) {
+    if (maybePath && NodeFS.lstatSync(maybePath, { throwIfNoEntry: false })?.isFile()) {
       return maybePath;
     }
   }

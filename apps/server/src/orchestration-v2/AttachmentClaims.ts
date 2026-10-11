@@ -1,3 +1,6 @@
+import { openMediaFile, streamMediaFile } from "../assets/MediaFile.ts";
+import * as Stream from "effect/Stream";
+import { authorizeUploadClaim } from "../assets/AssetAuthority.ts";
 import {
   authorizeAttachmentClaim,
   mutationDenied,
@@ -12,7 +15,7 @@ import {
   type ChatAttachment,
   type OrchestrationV2ServerCommand,
   type ThreadId,
-  type ProjectId,
+  ProjectId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -96,6 +99,19 @@ export const claimPendingAttachments = Effect.fn("AttachmentClaims.claimPendingA
             attachmentIds: input.attachments.map((attachment) => attachment.id),
           }),
         );
+        {
+          const rows = yield* sql.value<{
+            project_id: string;
+          }>`SELECT project_id FROM orchestration_v2_projection_threads WHERE thread_id = ${input.threadId}`;
+          const projectId =
+            input.creatingThread?.projectId ??
+            (rows[0] === undefined ? undefined : ProjectId.make(rows[0].project_id));
+          if (projectId === undefined) return yield* mutationDenied();
+          for (const attachment of input.attachments) {
+            if (attachmentIsPendingUpload(attachment))
+              yield* authorizeUploadClaim(authority, attachment.id, projectId);
+          }
+        }
         return yield* effect;
       });
     yield* withAdmission(() => Effect.void);
@@ -170,8 +186,26 @@ export const claimPendingAttachments = Effect.fn("AttachmentClaims.claimPendingA
           // cancelled, so the copy and its rollback registration stay in one
           // uninterruptible region: an interrupt landing mid-copy still waits
           // for the write to settle and records the path before cleanup runs.
+          const copy = Effect.gen(function* () {
+            if (authority === trustedMutationAuthority)
+              return yield* fileSystem.copyFile(claim.currentPath, claim.finalPath);
+            const canonical = yield* fileSystem.realPath(claim.currentPath);
+            const file = yield* openMediaFile(canonical);
+            if (file === null || file.info.size !== BigInt(attachment.sizeBytes))
+              return yield* mutationDenied();
+            const stream =
+              file.info.size === 0n ? Stream.empty : streamMediaFile(file, 0n, file.info.size);
+            if (stream === null) return yield* mutationDenied();
+            yield* withAdmission(() =>
+              Stream.run(
+                stream.pipe(Stream.tap(() => withAdmission(() => Effect.void))),
+                fileSystem.sink(claim.finalPath, { flag: "wx" }),
+              ),
+            );
+          }).pipe(Effect.scoped);
           yield* withAdmission(() =>
-            fileSystem.copyFile(claim.currentPath, claim.finalPath).pipe(
+            Effect.sync(() => claimedPaths.push(claim.finalPath)).pipe(
+              Effect.andThen(copy),
               Effect.mapError(
                 (cause) =>
                   new AttachmentClaimError({
@@ -179,7 +213,6 @@ export const claimPendingAttachments = Effect.fn("AttachmentClaims.claimPendingA
                     cause,
                   }),
               ),
-              Effect.andThen(Effect.sync(() => claimedPaths.push(claim.finalPath))),
               Effect.uninterruptible,
             ),
           );
