@@ -1580,8 +1580,10 @@ export const make = Effect.gen(function* () {
   };
 
   const workflowApprovalLimit = 1_000;
-  const workflowApprovalReadError = (cwd: string, cause: unknown) =>
-    readError(cwd, "listWorkflowRunsRequiringApproval", cause);
+  const workflowApprovalReadError = (cwd: string, cause: GitHubPullRequestApiError) =>
+    cause._tag === "EnvironmentAuthorizationError"
+      ? cause
+      : readError(cwd, "listWorkflowRunsRequiringApproval", cause);
 
   /**
    * Every open pull request whose head branch carries this name, up to one past the limit.

@@ -20,6 +20,7 @@ import * as GitHubQuota from "../sourceControl/githubQuota.ts";
 import * as SourceControlRateLimit from "../sourceControl/SourceControlRateLimit.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubPullRequestApi from "./GitHubPullRequestApi.ts";
+import { make as makeGitHubProvider } from "./GitHubPullRequestProvider.ts";
 import { KnownWorkflowRuns } from "./gitHubConditionalChecks.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -4585,6 +4586,92 @@ layer("GitHubPullRequestApi.layer", (it) => {
 
       assert.strictEqual(lookupsOf.get(HOT), 1);
     }),
+  );
+});
+
+layer("workflow REST recoveries", (it) => {
+  const input = { cwd: "/w", repository: "acme/web", host: "github.com", number: 7 };
+  const ordinaryFailure = new GitHubApi.GitHubApiResponseError({
+    host: "github.com",
+    operation: "listWorkflowRunsRequiringApproval",
+    status: 403,
+  });
+  const denial = new EnvironmentAuthorizationError({
+    requiredScope: AuthOrchestrationReadScope,
+    message: "workflow admission denied",
+  });
+  const routeFailure = (error: GitHubApi.GitHubApiError) =>
+    mockedExecute.mockImplementation((call) =>
+      call.kind === "rest"
+        ? Effect.fail(error)
+        : Effect.succeed(
+            output(
+              encodeJson(
+                call.query.includes("headRefName: $head") ? heads([7]) : crossRepositoryDetail(),
+              ),
+            ),
+          ),
+    );
+
+  it.effect.each(["denial", "ordinary"] as const)(
+    "workflow REST %s retains the actual PR API error channel",
+    (failure) =>
+      Effect.gen(function* () {
+        routeFailure(failure === "denial" ? denial : ordinaryFailure);
+        const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+        const error = yield* cli
+          .listWorkflowRunsRequiringApproval({
+            ...input,
+            headSha: "abc123",
+            headBranch: "feat/page",
+            headRepositoryOwner: "octocat",
+            isCrossRepository: true,
+          })
+          .pipe(Effect.flip);
+        if (failure === "denial") {
+          expect(error).toBe(denial);
+        } else {
+          expect(error._tag).toBe("GitHubPullRequestReadError");
+          if (error._tag === "GitHubPullRequestReadError") {
+            expect(error.operation).toBe("listWorkflowRunsRequiringApproval");
+            expect(error.cause).toBe(ordinaryFailure);
+          }
+        }
+        expect(restCallsTo("actions/runs?")).toHaveLength(1);
+      }),
+  );
+
+  it.effect.each([
+    { read: "detail", failure: "denial" },
+    { read: "checks", failure: "denial" },
+    { read: "detail", failure: "ordinary" },
+    { read: "checks", failure: "ordinary" },
+  ] as const)(
+    "workflow REST $read read preserves $failure through the production provider",
+    ({ read, failure }) =>
+      Effect.gen(function* () {
+        routeFailure(failure === "denial" ? denial : ordinaryFailure);
+        const provider = yield* makeGitHubProvider;
+        const operation =
+          read === "detail" ? provider.getChangeRequest : provider.getChangeRequestChecks;
+        if (operation === undefined) return yield* Effect.die("checks read missing");
+        const result = yield* Effect.result(operation(input));
+        if (failure === "denial") {
+          expect(result._tag).toBe("Failure");
+          if (result._tag === "Failure") expect(result.failure).toBe(denial);
+        } else {
+          expect(result._tag).toBe("Success");
+          if (result._tag === "Success") {
+            expect(result.success.checks).toContainEqual({
+              name: "Workflow approval status",
+              status: "action-required",
+              description: "GitHub could not determine whether workflows are awaiting approval.",
+              url: null,
+            });
+          }
+        }
+        expect(restCallsTo("actions/runs?")).toHaveLength(1);
+      }),
   );
 });
 
