@@ -11,7 +11,14 @@ import {
   type ProjectSearchEntriesInput,
   type ProjectSearchContentsInput,
   type ProjectSearchContentsResult,
+  type ProjectReadFileResult,
+  type ProjectWriteFileResult,
+  type ProjectListEntriesResult,
+  type ProjectSearchEntriesResult,
+  type EnvironmentAuthorizationError,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
+import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -35,8 +42,49 @@ const matchContents = new NodeVM.Script(`
   }
 `);
 
+export class FileAccess extends Context.Service<
+  FileAccess,
+  {
+    readonly readFile: (
+      authority: ThreadReadAuthority,
+      input: ProjectReadFileInput,
+    ) => Effect.Effect<
+      ProjectReadFileResult,
+      Effect.Error<ReturnType<Files.WorkspaceFileSystem["Service"]["readFile"]>>
+    >;
+    readonly writeFile: (
+      authority: ThreadReadAuthority,
+      input: ProjectWriteFileInput,
+    ) => Effect.Effect<
+      ProjectWriteFileResult,
+      Effect.Error<ReturnType<Files.WorkspaceFileSystem["Service"]["writeFile"]>>
+    >;
+    readonly list: (
+      authority: ThreadReadAuthority,
+      input: ProjectListEntriesInput,
+    ) => Effect.Effect<
+      ProjectListEntriesResult,
+      Entries.WorkspaceEntriesError | EnvironmentAuthorizationError
+    >;
+    readonly search: (
+      authority: ThreadReadAuthority,
+      input: ProjectSearchEntriesInput,
+    ) => Effect.Effect<
+      ProjectSearchEntriesResult,
+      Entries.WorkspaceEntriesError | EnvironmentAuthorizationError
+    >;
+    readonly searchContents: (
+      authority: ThreadReadAuthority,
+      input: ProjectSearchContentsInput,
+    ) => Effect.Effect<
+      ProjectSearchContentsResult,
+      Entries.WorkspaceEntriesError | EnvironmentAuthorizationError
+    >;
+  }
+>()("t3/workspace/FileAccess") {}
+
 /** Public file operations retain existing scopes and registered-root admission. */
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const access = yield* Access.make;
   const files = yield* Files.WorkspaceFileSystem;
   const entries = yield* Entries.WorkspaceEntries;
@@ -246,5 +294,7 @@ export const make = Effect.gen(function* () {
       }),
       AuthFilesystemReadScope,
     );
-  return { readFile, writeFile, list, search, searchContents };
+  return FileAccess.of({ readFile, writeFile, list, search, searchContents });
 });
+
+export const layer = Layer.effect(FileAccess, make);

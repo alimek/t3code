@@ -1,6 +1,4 @@
-import { authorizeAsset } from "./assets/AssetAuthority.ts";
 import * as FileAccess from "./workspace/FileAccess.ts";
-import { resourceRestricted } from "./auth/ToolAuthorization.ts";
 import * as ProviderCatalog from "./provider/ProviderCatalog.ts";
 import { authorizeExtraTool } from "./auth/ToolAuthorization.ts";
 import {
@@ -27,7 +25,6 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
@@ -106,8 +103,6 @@ import {
   type ServerLifecycleStreamEvent,
   type FilesystemBrowseFailure,
   FilesystemBrowseError,
-  AssetWorkspaceContextNotFoundError,
-  AssetWorkspaceContextResolutionError,
   RpcClientId,
   EnvironmentAuthorizationError,
   type ProjectId,
@@ -208,12 +203,9 @@ import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
-import { issueAssetUrl } from "./assets/AssetAccess.ts";
-import {
-  deletePendingAttachment,
-  issueAttachmentUploadUrl,
-  persistChatAttachments,
-} from "./assets/AttachmentUpload.ts";
+import * as AssetAccess from "./assets/AssetAccess.ts";
+import * as AttachmentUpload from "./assets/AttachmentUpload.ts";
+import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/AttachmentUpload.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
@@ -1450,7 +1442,9 @@ const layerWsRpc = (
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
-      const fileAccess = yield* FileAccess.make;
+      const fileAccess = yield* FileAccess.FileAccess;
+      const assetAccess = yield* AssetAccess.AssetAccess;
+      const attachmentUpload = yield* AttachmentUpload.AttachmentUpload;
       const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
       const backgroundPolicy = yield* BackgroundPolicy.BackgroundPolicy;
       const rpcClientIds = yield* Ref.make(new Set<RpcClientId>());
@@ -2968,103 +2962,11 @@ const layerWsRpc = (
         [WS_METHODS.agentSessionsScan]: () => agentSessionScanner.scan,
         [WS_METHODS.agentSessionsImport]: (input) =>
           agentSessionImporter.importRecentAgentThreads(input),
-        [WS_METHODS.assetsCreateUrl]: (input) =>
-          Effect.gen(function* () {
-            if (
-              input.resource._tag === "project-favicon" ||
-              input.resource._tag === "draft-workspace-file"
-            )
-              yield* authorizeAsset(readAuthority, input.resource);
-            const path = yield* Path.Path;
-            // An absolute media path can be linked from a thread on another environment.
-            if (
-              input.resource._tag === "attachment" ||
-              input.resource._tag === "native-app-icon" ||
-              input.resource._tag === "tool-output-image" ||
-              // GitHub media names the repository it authenticates through itself.
-              input.resource._tag === "github-media" ||
-              (input.resource._tag === "media-file" &&
-                path.isAbsolute(input.resource.path) &&
-                !resourceRestricted((yield* readAuthority.current).resourceGrant))
-            ) {
-              return yield* issueAssetUrl({ resource: input.resource, authority: readAuthority });
-            }
-            if (input.resource._tag === "draft-workspace-file") {
-              // A project draft names its workspace directly; there is no
-              // thread to resolve one from.
-              return yield* issueAssetUrl({
-                resource: input.resource,
-                authority: readAuthority,
-                workspaceRoot: input.resource.cwd,
-              });
-            }
-            if (input.resource._tag === "project-favicon") {
-              const project = yield* projectStore
-                .findActiveByWorkspaceRoot(input.resource.cwd)
-                .pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new AssetWorkspaceContextResolutionError({
-                        resource: input.resource,
-                        cause,
-                      }),
-                  ),
-                );
-              if (Option.isNone(project)) {
-                return yield* new AssetWorkspaceContextNotFoundError({
-                  resource: input.resource,
-                });
-              }
-              // A cloned project exists before its files do. Clients ask again
-              // when the clone lands (see createProjectFaviconUrlAtomFamily).
-              const clone = yield* projectCloneTracker.get(project.value.projectId);
-              return yield* issueAssetUrl({
-                resource: input.resource,
-                authority: readAuthority,
-                ...(project.value.faviconPath
-                  ? { projectFaviconPath: project.value.faviconPath }
-                  : {}),
-                projectCheckoutPending:
-                  clone !== null &&
-                  clone.phase !== "done" &&
-                  clone.destinationPath === project.value.workspaceRoot,
-              });
-            }
-            const thread = yield* threadManagement
-              .getThreadRecords(readAuthority, input.resource.threadId, [])
-              .pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new AssetWorkspaceContextResolutionError({
-                      resource: input.resource,
-                      cause,
-                    }),
-                ),
-              );
-            const project = yield* projectService.getById(thread.thread.projectId).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new AssetWorkspaceContextResolutionError({
-                    resource: input.resource,
-                    cause,
-                  }),
-              ),
-            );
-            if (Option.isNone(project)) {
-              return yield* new AssetWorkspaceContextNotFoundError({
-                resource: input.resource,
-              });
-            }
-            return yield* issueAssetUrl({
-              resource: input.resource,
-              authority: readAuthority,
-              workspaceRoot: thread.thread.worktreePath ?? project.value.workspaceRoot,
-            });
-          }),
+        [WS_METHODS.assetsCreateUrl]: (input) => assetAccess.createUrl(readAuthority, input),
         [WS_METHODS.assetsPersistChatAttachments]: (input) =>
-          persistChatAttachments(mutationAuthority, input).pipe(
-            Effect.map((attachments) => ({ attachments })),
-          ),
+          attachmentUpload
+            .persistChatAttachments(mutationAuthority, input)
+            .pipe(Effect.map((attachments) => ({ attachments }))),
         ...workspaceReadHandlers(
           readAuthority,
           { gitWorkflow, vcsStatusBroadcaster, review, worktreeSetupTracker },
@@ -3389,6 +3291,8 @@ const layerWsRpc = (
       });
       return handlers;
     }),
+  ).pipe(
+    Layer.provide(Layer.mergeAll(FileAccess.layer, AssetAccess.layer, AttachmentUpload.layer)),
   );
 
 // A defect in a handler's effect fails only its own request. RpcServer's default

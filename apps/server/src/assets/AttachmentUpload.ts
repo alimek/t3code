@@ -2,8 +2,9 @@ import * as Base64 from "effect/encoding/Base64";
 import {
   ChatAttachmentId,
   PersistChatAttachmentsError,
-  type ThreadId,
-  type MessageId,
+  type PersistChatAttachmentsInput,
+  type PersistChatAttachmentsResult,
+  type EnvironmentAuthorizationError,
 } from "@t3tools/contracts";
 import { trustedMutationAuthority, type MutationAuthority } from "../auth/CommandAuthorization.ts";
 import { authorizeOwnerThreadIds, threadReadDenied } from "../auth/ResourceAuthorization.ts";
@@ -28,6 +29,8 @@ import {
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Context from "effect/Context";
+import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -79,6 +82,19 @@ export type AttachmentUploadClaims = typeof AttachmentUploadClaims.Type;
 const attachmentUploadClaimsJson = Schema.fromJsonString(AttachmentUploadClaims);
 const decodeAttachmentUploadClaims = Schema.decodeUnknownOption(attachmentUploadClaimsJson);
 const encodeAttachmentUploadClaims = Schema.encodeSync(attachmentUploadClaimsJson);
+
+export class AttachmentUpload extends Context.Service<
+  AttachmentUpload,
+  {
+    readonly persistChatAttachments: (
+      authority: MutationAuthority,
+      input: PersistChatAttachmentsInput,
+    ) => Effect.Effect<
+      PersistChatAttachmentsResult["attachments"],
+      PersistChatAttachmentsError | EnvironmentAuthorizationError
+    >;
+  }
+>()("t3/assets/AttachmentUpload") {}
 
 function decodeClaims(encodedPayload: string): AttachmentUploadClaims | null {
   try {
@@ -317,88 +333,86 @@ export const deletePendingAttachment = Effect.fn("AttachmentUpload.deletePending
   yield* fileSystem.remove(attachmentPath, { force: true }).pipe(Effect.orElseSucceed(() => {}));
 });
 
-export const persistChatAttachments = Effect.fn("ws.assets.persistChatAttachments")(function* (
-  authority: MutationAuthority,
-  input: {
-    readonly threadId: ThreadId;
-    readonly messageId: MessageId;
-    readonly attachments: ReadonlyArray<{
-      readonly type: "image";
-      readonly name: string;
-      readonly mimeType: string;
-      readonly sizeBytes: number;
-      readonly dataUrl: string;
-    }>;
-  },
-) {
+const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const sql = yield* SqlClient.SqlClient;
-  const check = Effect.gen(function* () {
-    if (authority === trustedMutationAuthority) return;
-    const value = yield* authority.current;
-    if (!value.scopes.includes(AuthOrchestrationOperateScope)) return yield* threadReadDenied();
-    yield* authorizeOwnerThreadIds(sql, value.resourceGrant, [input.threadId]).pipe(
-      Effect.mapError(() => threadReadDenied()),
-    );
-    if (
-      (yield* current(authority, AuthOrchestrationOperateScope))?.authorityRevision !==
-      value.authorityRevision
-    )
-      return yield* threadReadDenied();
-  });
-  yield* check;
-  return yield* Effect.forEach(
-    input.attachments.map((attachment, index) => ({ attachment, index })),
-    Effect.fn("ws.assets.persistChatAttachment")(function* ({ attachment, index }) {
-      const parsed = parseBase64DataUrl(attachment.dataUrl);
-      if (parsed === null || parsed.mimeType !== attachment.mimeType.toLowerCase()) {
-        return yield* new PersistChatAttachmentsError({
-          message: `Attachment ${attachment.name} has an invalid image payload.`,
-        });
-      }
-      const bytes = yield* Effect.fromResult(Base64.decode(parsed.base64)).pipe(
-        Effect.mapError(
-          (cause) =>
-            new PersistChatAttachmentsError({
-              message: `Attachment ${attachment.name} is not valid base64.`,
-              cause,
-            }),
-        ),
+  const persistChatAttachments = Effect.fn("AttachmentUpload.persistChatAttachments")(function* (
+    authority: MutationAuthority,
+    input: PersistChatAttachmentsInput,
+  ) {
+    const check = Effect.gen(function* () {
+      if (authority === trustedMutationAuthority) return;
+      const value = yield* authority.current;
+      if (!value.scopes.includes(AuthOrchestrationOperateScope)) return yield* threadReadDenied();
+      yield* authorizeOwnerThreadIds(sql, value.resourceGrant, [input.threadId]).pipe(
+        Effect.mapError(() => threadReadDenied()),
       );
-      if (bytes.byteLength !== attachment.sizeBytes) {
-        return yield* new PersistChatAttachmentsError({
-          message: `Attachment ${attachment.name} size does not match its payload.`,
-        });
-      }
-      const rawId = createDeterministicAttachmentId(input.threadId, `${input.messageId}:${index}`);
-      if (rawId === null) {
-        return yield* new PersistChatAttachmentsError({
-          message: "Could not allocate an attachment identifier.",
-        });
-      }
-      const persisted = {
-        type: "image" as const,
-        id: ChatAttachmentId.make(rawId),
-        name: attachment.name,
-        mimeType: attachment.mimeType,
-        sizeBytes: attachment.sizeBytes,
-      };
-      yield* check;
-      yield* fileSystem
-        .writeFile(path.join(config.attachmentsDir, attachmentRelativePath(persisted)!), bytes)
-        .pipe(
+      if (
+        (yield* current(authority, AuthOrchestrationOperateScope))?.authorityRevision !==
+        value.authorityRevision
+      )
+        return yield* threadReadDenied();
+    });
+    yield* check;
+    return yield* Effect.forEach(
+      input.attachments.map((attachment, index) => ({ attachment, index })),
+      Effect.fn("AttachmentUpload.persistChatAttachment")(function* ({ attachment, index }) {
+        const parsed = parseBase64DataUrl(attachment.dataUrl);
+        if (parsed === null || parsed.mimeType !== attachment.mimeType.toLowerCase()) {
+          return yield* new PersistChatAttachmentsError({
+            message: `Attachment ${attachment.name} has an invalid image payload.`,
+          });
+        }
+        const bytes = yield* Effect.fromResult(Base64.decode(parsed.base64)).pipe(
           Effect.mapError(
             (cause) =>
               new PersistChatAttachmentsError({
-                message: `Could not persist attachment ${attachment.name}.`,
+                message: `Attachment ${attachment.name} is not valid base64.`,
                 cause,
               }),
           ),
         );
-      return persisted;
-    }),
-    { concurrency: 2 },
-  );
+        if (bytes.byteLength !== attachment.sizeBytes) {
+          return yield* new PersistChatAttachmentsError({
+            message: `Attachment ${attachment.name} size does not match its payload.`,
+          });
+        }
+        const rawId = createDeterministicAttachmentId(
+          input.threadId,
+          `${input.messageId}:${index}`,
+        );
+        if (rawId === null) {
+          return yield* new PersistChatAttachmentsError({
+            message: "Could not allocate an attachment identifier.",
+          });
+        }
+        const persisted = {
+          type: "image" as const,
+          id: ChatAttachmentId.make(rawId),
+          name: attachment.name,
+          mimeType: attachment.mimeType,
+          sizeBytes: attachment.sizeBytes,
+        };
+        yield* check;
+        yield* fileSystem
+          .writeFile(path.join(config.attachmentsDir, attachmentRelativePath(persisted)!), bytes)
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new PersistChatAttachmentsError({
+                  message: `Could not persist attachment ${attachment.name}.`,
+                  cause,
+                }),
+            ),
+          );
+        return persisted;
+      }),
+      { concurrency: 2 },
+    );
+  });
+  return AttachmentUpload.of({ persistChatAttachments });
 });
+
+export const layer = Layer.effect(AttachmentUpload, make);

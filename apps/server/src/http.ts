@@ -175,9 +175,9 @@ export const assetFileResponse = Effect.fn("assetFileResponse")(function* (
   ifRangeHeader?: string,
   method: "GET" | "HEAD" = "GET",
 ) {
+  yield* asset.check ?? Effect.void;
   const headers = assetResponseHeaders(asset.path, asset);
   if (asset.check !== undefined) headers["Cache-Control"] = "private, no-store";
-  yield* asset.check ?? Effect.void;
   const mediaFile = asset.file;
   const mediaInfo = mediaFile ? yield* statMediaFile(asset.path, mediaFile) : undefined;
   yield* asset.check ?? Effect.void;

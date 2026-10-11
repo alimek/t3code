@@ -30,6 +30,11 @@ import {
   AssetWorkspaceAssetInspectionError,
   AssetWorkspaceAssetNotFoundError,
   AssetWorkspaceContextNotFoundError,
+  AssetWorkspaceContextResolutionError,
+  type AssetCreateUrlInput,
+  type AssetCreateUrlResult,
+  type AssetAccessError,
+  type EnvironmentAuthorizationError,
   AssetWorkspacePathValidationError,
   AssetWorkspaceResolutionError,
   AssetWorkspaceRootNormalizationError,
@@ -56,6 +61,8 @@ import { MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH, toolOutputImages } from "@t3tools/
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
+import * as Context from "effect/Context";
+import * as Layer from "effect/Layer";
 import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -73,6 +80,10 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { parseAttachmentFileExtension, resolveAttachmentPathById } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import { expandHomePathWith } from "../pathExpansion.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
@@ -216,6 +227,16 @@ export type ResolvedAsset = {
       readonly expiresAt: number;
     }
 );
+
+export class AssetAccess extends Context.Service<
+  AssetAccess,
+  {
+    readonly createUrl: (
+      authority: ThreadReadAuthority,
+      input: AssetCreateUrlInput,
+    ) => Effect.Effect<AssetCreateUrlResult, AssetAccessError | EnvironmentAuthorizationError>;
+  }
+>()("t3/assets/AssetAccess") {}
 
 function decodeClaims(encodedPayload: string) {
   try {
@@ -944,7 +965,9 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
     decoded.resource._tag === "draft-workspace-file"
       ? AuthFilesystemReadScope
       : AuthOrchestrationReadScope;
-  const context = yield* Effect.context<Effect.Services<ReturnType<typeof authorizeAsset>>>();
+  const context = yield* Effect.context<
+    Effect.Services<ReturnType<typeof authorizeAsset>> | Path.Path
+  >();
   const check = authorizeAsset(authority, decoded.resource, decoded.workspaceRoot).pipe(
     Effect.andThen(current(authority, scope)),
     Effect.asVoid,
@@ -955,6 +978,7 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
     const asset = yield* resolveAssetClaims(claims, relativePath);
     if (asset === null) return null;
     if (asset.kind === "file") {
+      const path = yield* Path.Path;
       if (
         decoded.resource._tag !== "attachment" &&
         resourceRestricted((yield* current(authority, scope))?.resourceGrant)
@@ -966,8 +990,32 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
       const canonicalPath = yield* (yield* FileSystem.FileSystem).realPath(asset.path);
       const file = asset.file ?? (yield* openMediaFile(canonicalPath));
       if (file === null) return null;
-      yield* check;
-      return { ...asset, path: canonicalPath, file, check };
+      const fileCheck = Effect.gen(function* () {
+        yield* check;
+        if (
+          decoded.resource._tag === "attachment" ||
+          !resourceRestricted((yield* current(authority, scope))?.resourceGrant)
+        )
+          return;
+        const root = "cwd" in decoded.resource ? decoded.resource.cwd : decoded.workspaceRoot;
+        if (root === undefined) return yield* threadReadDenied();
+        // Browser documents can request sibling files; admit that actual path, not just the minted page.
+        const requestedPath =
+          claims.kind === "workspace-file"
+            ? path.resolve(root, claims.baseRelativePath, decodeRelativePath(relativePath)!)
+            : claims.kind === "workspace-file-exact"
+              ? path.resolve(root, claims.relativePath)
+              : claims.kind === "project-favicon" && claims.relativePath !== null
+                ? path.resolve(root, claims.relativePath)
+                : "path" in decoded.resource && decoded.resource.path !== undefined
+                  ? path.resolve(root, expandHomePathWith(decoded.resource.path, path))
+                  : asset.path;
+        yield* authorizeAssetFile(authority, decoded.resource, root, requestedPath);
+        yield* authorizeAssetFile(authority, decoded.resource, root, canonicalPath);
+      }).pipe(Effect.provide(context));
+      // Retain both owner checks through open/stat awaits, HEAD and each streamed chunk.
+      yield* fileCheck;
+      return { ...asset, path: canonicalPath, file, check: fileCheck };
     }
     yield* check;
     return { ...asset, check };
@@ -1165,3 +1213,104 @@ const resolveAssetClaims = Effect.fnUntraced(function* (
   });
   return workspaceFile ? ({ kind: "file", path: workspaceFile } satisfies ResolvedAsset) : null;
 });
+
+const make = Effect.gen(function* () {
+  const projectStore = yield* ProjectStore.ProjectStoreV2;
+  const projectService = yield* ProjectService.ProjectService;
+  const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+  const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+  const path = yield* Path.Path;
+  const context = yield* Effect.context<Effect.Services<ReturnType<typeof issueAssetUrl>>>();
+  const issue = (input: Parameters<typeof issueAssetUrl>[0]) =>
+    issueAssetUrl(input).pipe(Effect.provide(context));
+  const createUrl = Effect.fn("AssetAccess.createUrl")(function* (
+    authority: ThreadReadAuthority,
+    input: AssetCreateUrlInput,
+  ) {
+    if (input.resource._tag === "project-favicon" || input.resource._tag === "draft-workspace-file")
+      yield* authorizeAsset(authority, input.resource).pipe(Effect.provide(context));
+    // An absolute media path can be linked from a thread on another environment.
+    if (
+      input.resource._tag === "attachment" ||
+      input.resource._tag === "native-app-icon" ||
+      input.resource._tag === "tool-output-image" ||
+      // GitHub media names the repository it authenticates through itself.
+      input.resource._tag === "github-media" ||
+      (input.resource._tag === "media-file" &&
+        path.isAbsolute(input.resource.path) &&
+        !resourceRestricted((yield* current(authority, AuthFilesystemReadScope))?.resourceGrant))
+    ) {
+      return yield* issue({ resource: input.resource, authority });
+    }
+    if (input.resource._tag === "draft-workspace-file") {
+      // A project draft names its workspace directly; there is no
+      // thread to resolve one from.
+      return yield* issue({
+        resource: input.resource,
+        authority,
+        workspaceRoot: input.resource.cwd,
+      });
+    }
+    if (input.resource._tag === "project-favicon") {
+      const project = yield* projectStore.findActiveByWorkspaceRoot(input.resource.cwd).pipe(
+        Effect.mapError(
+          (cause) =>
+            new AssetWorkspaceContextResolutionError({
+              resource: input.resource,
+              cause,
+            }),
+        ),
+      );
+      if (Option.isNone(project)) {
+        return yield* new AssetWorkspaceContextNotFoundError({
+          resource: input.resource,
+        });
+      }
+      // A cloned project exists before its files do. Clients ask again
+      // when the clone lands (see createProjectFaviconUrlAtomFamily).
+      const clone = yield* projectCloneTracker.get(project.value.projectId);
+      return yield* issue({
+        resource: input.resource,
+        authority,
+        ...(project.value.faviconPath ? { projectFaviconPath: project.value.faviconPath } : {}),
+        projectCheckoutPending:
+          clone !== null &&
+          clone.phase !== "done" &&
+          clone.destinationPath === project.value.workspaceRoot,
+      });
+    }
+    const thread = yield* threadManagement
+      .getThreadRecords(authority, input.resource.threadId, [])
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new AssetWorkspaceContextResolutionError({
+              resource: input.resource,
+              cause,
+            }),
+        ),
+      );
+    const project = yield* projectService.getById(thread.thread.projectId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new AssetWorkspaceContextResolutionError({
+            resource: input.resource,
+            cause,
+          }),
+      ),
+    );
+    if (Option.isNone(project)) {
+      return yield* new AssetWorkspaceContextNotFoundError({
+        resource: input.resource,
+      });
+    }
+    return yield* issue({
+      resource: input.resource,
+      authority,
+      workspaceRoot: thread.thread.worktreePath ?? project.value.workspaceRoot,
+    });
+  });
+  return AssetAccess.of({ createUrl });
+});
+
+export const layer = Layer.effect(AssetAccess, make);

@@ -58,9 +58,13 @@ import {
   validateAttachmentUploadToken,
   storeAttachmentUpload,
   deletePendingAttachment,
-  persistChatAttachments,
   ATTACHMENT_UPLOAD_ROUTE_PREFIX,
 } from "./AttachmentUpload.ts";
+import * as AttachmentUpload from "./AttachmentUpload.ts";
+import * as AssetAccess from "./AssetAccess.ts";
+import * as ProjectService from "../project/ProjectService.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
+import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import { assetFileResponse, layerAssetRoute, layerAttachmentUploadRoute } from "../http.ts";
 
 const config = Config.layerTest(process.cwd(), { prefix: "t3-files-assets-proof-" });
@@ -204,7 +208,8 @@ it.effect(
         Effect.provideService(Paths.WorkspacePaths, paths),
         Effect.provideService(Entries.WorkspaceEntries, entries),
       );
-      const access = yield* FileAccess.make.pipe(
+      const access = yield* FileAccess.FileAccess.pipe(
+        Effect.provide(FileAccess.layer),
         Effect.provideService(Files.WorkspaceFileSystem, files),
         Effect.provideService(Entries.WorkspaceEntries, entries),
       );
@@ -279,7 +284,8 @@ it.effect(
               ),
             ),
       });
-      const gatedAccess = yield* FileAccess.make.pipe(
+      const gatedAccess = yield* FileAccess.FileAccess.pipe(
+        Effect.provide(FileAccess.layer),
         Effect.provideService(FileSystem.FileSystem, gatedFs),
         Effect.provideService(Files.WorkspaceFileSystem, files),
         Effect.provideService(Entries.WorkspaceEntries, entries),
@@ -520,6 +526,7 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const f = yield* fixture;
+      const uploads = yield* AttachmentUpload.AttachmentUpload;
       yield* f.sql`UPDATE auth_sessions SET scopes = ${JSON.stringify([AuthOrchestrationOperateScope])} WHERE session_id = 'friend'`;
       const attachments = [
         {
@@ -531,16 +538,143 @@ it.effect(
         },
       ];
       const input = { threadId: activeA, messageId: MessageId.make("chat-image"), attachments };
-      yield* denied(persistChatAttachments(f.friend, { ...input, threadId: activeB }));
-      const persisted = yield* persistChatAttachments(f.friend, input);
+      yield* denied(uploads.persistChatAttachments(f.friend, { ...input, threadId: activeB }));
+      const persisted = yield* uploads.persistChatAttachments(f.friend, input);
       expect(persisted).toHaveLength(1);
       expect(yield* f.fs.readFileString(`${f.config.attachmentsDir}/${persisted[0]!.id}.png`)).toBe(
         "pixels",
       );
       yield* f.cut();
       yield* denied(
-        persistChatAttachments(f.friend, { ...input, messageId: MessageId.make("cut-image") }),
+        uploads.persistChatAttachments(f.friend, {
+          ...input,
+          messageId: MessageId.make("cut-image"),
+        }),
       );
       expect(yield* f.fs.readDirectory(f.config.attachmentsDir)).toHaveLength(1);
+    }).pipe(Effect.provide(AttachmentUpload.layer.pipe(Layer.provideMerge(layer)))),
+);
+
+it.effect(
+  "retained HEAD, range and body deny a newly hidden file owner without a session cut",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const child = `${f.a}/child`;
+      yield* f.fs.makeDirectory(child);
+      yield* f.fs.writeFileString(`${child}/clip.mp4`, "0123456789");
+      const issued = yield* issueAssetUrl({
+        resource: { _tag: "media-file", threadId: activeA, path: `${child}/clip.mp4` },
+        workspaceRoot: f.a,
+        authority: f.friend,
+      });
+      const positive = yield* f.resolve(issued.relativeUrl);
+      if (positive?.kind !== "file") return yield* Effect.die("Expected admitted file");
+      expect((yield* assetFileResponse(positive, undefined, undefined, "HEAD")).status).toBe(200);
+      const range = HttpServerResponse.toWeb(yield* assetFileResponse(positive, "bytes=2-4"));
+      expect(range.status).toBe(206);
+      expect(yield* Effect.promise(() => range.text())).toBe("234");
+      // Fresh descriptor: the positive range consumed its stream.
+      const retained = yield* f.resolve(issued.relativeUrl);
+      if (retained?.kind !== "file") return yield* Effect.die("Expected retained file");
+      const prepared = yield* assetFileResponse(retained, "bytes=2-4");
+      yield* f.sql`UPDATE projection_projects SET workspace_root = ${child} WHERE project_id = ${projectB}`;
+      yield* denied(assetFileResponse(retained, undefined, undefined, "HEAD"));
+      yield* denied(assetFileResponse(retained, "bytes=2-4"));
+      const request = yield* requests;
+      for (const method of ["GET", "HEAD"])
+        expect(
+          (yield* request(issued.relativeUrl, { method, headers: { range: "bytes=2-4" } })).status,
+        ).toBe(404);
+      if (prepared.body._tag !== "Stream") return yield* Effect.die("Expected response stream");
+      const body = prepared.body.stream.pipe(
+        Stream.mapError((error) => {
+          if (!isDenied(error))
+            throw new Error("Unexpected response stream failure", { cause: error });
+          return error;
+        }),
+      );
+      yield* denied(Stream.runCollect(body));
+      const owner = yield* issueAssetUrl({
+        resource: { _tag: "media-file", threadId: activeA, path: `${child}/clip.mp4` },
+        authority: f.owner,
+      });
+      const ownerFile = yield* f.resolve(owner.relativeUrl);
+      if (ownerFile?.kind !== "file") return yield* Effect.die("Expected owner file");
+      expect((yield* assetFileResponse(ownerFile, undefined, undefined, "HEAD")).status).toBe(200);
     }).pipe(Effect.provide(layer)),
+);
+
+it.effect("asset resolution rechecks file ownership after canonicalization awaits", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const child = `${f.a}/child`;
+    yield* f.fs.makeDirectory(child);
+    yield* f.fs.writeFileString(`${child}/clip.mp4`, "0123456789");
+    const issued = yield* issueAssetUrl({
+      resource: { _tag: "media-file", threadId: activeA, path: `${child}/clip.mp4` },
+      workspaceRoot: f.a,
+      authority: f.friend,
+    });
+    const reached = yield* Deferred.make<void>(),
+      resume = yield* Deferred.make<void>();
+    let targetResolutions = 0;
+    const gated = FileSystem.FileSystem.of({
+      ...f.fs,
+      realPath: (target) =>
+        f.fs.realPath(target).pipe(
+          Effect.tap(() =>
+            // Resolve/open and the initial file-owner admission have finished before the third canonical-path await.
+            target.endsWith("/child/clip.mp4") && ++targetResolutions === 3
+              ? Deferred.succeed(reached, undefined).pipe(Effect.andThen(Deferred.await(resume)))
+              : Effect.void,
+          ),
+        ),
+    });
+    const resolving = yield* f
+      .resolve(issued.relativeUrl)
+      .pipe(Effect.provideService(FileSystem.FileSystem, gated), Effect.forkChild);
+    yield* Deferred.await(reached);
+    yield* f.sql`UPDATE projection_projects SET workspace_root = ${child} WHERE project_id = ${projectB}`;
+    yield* Deferred.succeed(resume, undefined);
+    expect(yield* Fiber.join(resolving)).toBeNull();
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("asset service preserves owner absolute media and filesystem-only draft admission", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const assets = yield* AssetAccess.AssetAccess;
+    const owner = yield* assets.createUrl(f.owner, {
+      resource: {
+        _tag: "media-file",
+        threadId: ThreadId.make("foreign-thread"),
+        path: `${f.outside}/output.mp4`,
+      },
+    });
+    expect((yield* f.resolve(owner.relativeUrl))?.kind).toBe("file");
+    yield* f.sql`UPDATE auth_sessions SET scopes = ${JSON.stringify([AuthFilesystemReadScope])} WHERE session_id = 'friend'`;
+    const draft = yield* assets.createUrl(f.friend, {
+      resource: { _tag: "draft-workspace-file", cwd: f.a, path: "page.html" },
+    });
+    expect((yield* f.resolve(draft.relativeUrl))?.kind).toBe("file");
+    yield* denied(
+      assets.createUrl(f.friend, {
+        resource: { _tag: "draft-workspace-file", cwd: f.b, path: "secret.html" },
+      }),
+    );
+  }).pipe(
+    Effect.provide(
+      AssetAccess.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.mock(ProjectService.ProjectService)({}),
+            Layer.mock(ThreadManagement.ThreadManagementService)({}),
+            Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({}),
+          ),
+        ),
+        Layer.provideMerge(layer),
+      ),
+    ),
+  ),
 );
