@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -164,7 +165,7 @@ const seedParentWithTerminalTask = (input: {
       workspaceRoot: `/workspace/${input.projectId}`,
     });
 
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.create",
       createdBy: "user",
       creationSource: "web",
@@ -352,7 +353,7 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
           })),
         ],
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "notification.delivery.accept",
         commandId: CommandId.make("accept-first"),
         threadId,
@@ -372,7 +373,7 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
           observedByRunId: null,
         });
       }
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "notification.delivery.accept",
         commandId: CommandId.make("repeat-old-acceptance"),
         threadId,
@@ -459,7 +460,7 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
           },
         ],
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "notification.delivery.accept",
         commandId: CommandId.make("accept-mixed"),
         threadId,
@@ -499,7 +500,7 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
         now,
       });
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         commandId: CommandId.make("command:delegated-delivery-live-cohort"),
         threadId,
@@ -546,7 +547,7 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
         now,
       });
 
-      const upgrade = yield* orchestrator.dispatch({
+      const upgrade = yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "delegated_task.wake-policy",
         commandId: CommandId.make("command:delegated-delivery-a1:wake-policy"),
         parentThreadId: threadId,
@@ -613,14 +614,14 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
 
         // Distinct command IDs mirror task_status vs t3_thread_read racing after
         // their shared read preflight saw delivered ownership.
-        const firstAck = yield* orchestrator.dispatch({
+        const firstAck = yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "delegated_task.completion-delivery.acknowledge",
           commandId: CommandId.make("command:delegated-delivery-a2:ack-task-status"),
           parentThreadId: threadId,
           taskId,
           observedByRunId: runId,
         });
-        const secondAck = yield* orchestrator.dispatch({
+        const secondAck = yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "delegated_task.completion-delivery.acknowledge",
           commandId: CommandId.make("command:delegated-delivery-a2:ack-thread-read"),
           parentThreadId: threadId,
@@ -666,13 +667,13 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
           },
         );
 
-        const firstDispose = yield* orchestrator.dispatch({
+        const firstDispose = yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "delegated_task.completion-delivery.dispose",
           commandId: CommandId.make("command:delegated-delivery-a2:dispose-task-status"),
           parentThreadId: threadId,
           taskId,
         });
-        const secondDispose = yield* orchestrator.dispatch({
+        const secondDispose = yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "delegated_task.completion-delivery.dispose",
           commandId: CommandId.make("command:delegated-delivery-a2:dispose-thread-read"),
           parentThreadId: threadId,
@@ -712,7 +713,7 @@ it.layer(layerTest)("delegated completion delivery repairs", (it) => {
           },
         );
 
-        const acknowledgeAfterDispose = yield* orchestrator.dispatch({
+        const acknowledgeAfterDispose = yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "delegated_task.completion-delivery.acknowledge",
           commandId: CommandId.make("command:delegated-delivery-a2:ack-after-dispose"),
           parentThreadId: threadId,

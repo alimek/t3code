@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
@@ -51,7 +52,7 @@ const make = Effect.gen(function* () {
     readonly title?: string;
   }) =>
     threads
-      .dispatch({
+      .dispatch(trustedMutationAuthority, {
         type: "thread.title.regeneration.complete",
         commandId: CommandId.make(`${input.requestId}:title-complete`),
         threadId: input.threadId,

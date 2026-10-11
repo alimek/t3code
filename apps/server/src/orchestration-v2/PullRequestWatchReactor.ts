@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import {
   CommandId,
   MessageId,
@@ -310,7 +311,7 @@ export const make = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       const uuid = yield* crypto.randomUUIDv4;
-      yield* engine.dispatch({
+      yield* engine.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request-watch.sync",
         commandId: CommandId.make(`server:pr-watch:${target.thread.id}:${uuid}`),
         threadId: target.thread.id,

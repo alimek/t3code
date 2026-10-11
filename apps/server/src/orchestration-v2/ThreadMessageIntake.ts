@@ -1,3 +1,4 @@
+import { type MutationAuthority } from "../auth/CommandAuthorization.ts";
 import { remapComposerContextAttachments } from "@t3tools/shared/composerContextReferences";
 import { appendUserInputAttachmentPaths } from "../provider/userInputAttachments.ts";
 import type { ChatAttachment, OrchestrationV2Command } from "@t3tools/contracts";
@@ -51,6 +52,7 @@ const releaseUnusedClaims = Effect.fn("ThreadMessageIntake.releaseUnusedClaims")
 });
 
 export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(function* (
+  authority: MutationAuthority,
   command: OrchestrationV2Command,
 ) {
   const threads = yield* ThreadManagement.ThreadManagementService;
@@ -86,7 +88,7 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
       return { answers, attachmentsByQuestionId };
     }).pipe(Effect.onError(() => AttachmentClaims.releaseClaimedAttachments(claimedPaths)));
     return yield* threads
-      .dispatch({
+      .dispatch(authority, {
         ...command,
         answers: prepared.answers,
         attachmentsByQuestionId: prepared.attachmentsByQuestionId,
@@ -128,13 +130,13 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
     command.type !== "message.dispatch" &&
     (command.type !== "queued-run.edit" || command.attachments === undefined)
   )
-    return yield* threads.dispatch(command);
+    return yield* threads.dispatch(authority, command);
   const claimed = yield* AttachmentClaims.claimPendingAttachments({
     threadId: command.threadId,
     attachments: command.attachments ?? [],
   });
   return yield* threads
-    .dispatch({
+    .dispatch(authority, {
       ...command,
       attachments: claimed.attachments,
       ...(command.context
@@ -165,27 +167,31 @@ export const dispatchCommand = Effect.fn("ThreadMessageIntake.dispatchCommand")(
 });
 
 export const sendToThread = Effect.fn("ThreadMessageIntake.sendToThread")(function* (
+  authority: MutationAuthority,
   input: ThreadManagement.ThreadManagementSendInput,
 ) {
   const threads = yield* ThreadManagement.ThreadManagementService;
   const claimed = yield* AttachmentClaims.claimPendingAttachments(input);
-  return yield* threads.sendToThread({ ...input, attachments: claimed.attachments }).pipe(
-    Effect.tap((result) => releaseUnusedClaims(claimed.claimedPaths, result.message.attachments)),
-    Effect.tapError((error) =>
-      dispatchWasNotAccepted(error)
-        ? AttachmentClaims.releaseClaimedAttachments(claimed.claimedPaths)
-        : Effect.void,
-    ),
-  );
+  return yield* threads
+    .sendToThread(authority, { ...input, attachments: claimed.attachments })
+    .pipe(
+      Effect.tap((result) => releaseUnusedClaims(claimed.claimedPaths, result.message.attachments)),
+      Effect.tapError((error) =>
+        dispatchWasNotAccepted(error)
+          ? AttachmentClaims.releaseClaimedAttachments(claimed.claimedPaths)
+          : Effect.void,
+      ),
+    );
 });
 
 export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(function* (
+  authority: MutationAuthority,
   input: ThreadLaunch.ThreadLaunchInput,
 ) {
   const launches = yield* ThreadLaunch.ThreadLaunchService;
   yield* AttachmentClaims.validateAttachmentLimits(input.initialMessage?.attachments ?? []);
   if (!input.initialMessage?.attachments.some(AttachmentClaims.attachmentIsPendingUpload)) {
-    return yield* launches.launch(input);
+    return yield* launches.launch(authority, input);
   }
   if (input.threadId === undefined) {
     return yield* new AttachmentClaims.AttachmentClaimError({
@@ -197,7 +203,7 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
     attachments: input.initialMessage.attachments,
   });
   return yield* launches
-    .launch({
+    .launch(authority, {
       ...input,
       initialMessage: {
         ...input.initialMessage,

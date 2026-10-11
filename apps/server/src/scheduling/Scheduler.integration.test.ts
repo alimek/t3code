@@ -95,7 +95,7 @@ it.effect.each(["on time", "after restart"])(
             ),
         }),
         Layer.mock(ThreadManagementService.ThreadManagementService)({
-          dispatch: (command) =>
+          dispatch: (_authority, command) =>
             Ref.update(commands, (all) => [...all, command]).pipe(
               Effect.andThen(
                 Ref.update(current, (shell) => ({ ...shell, status: "running" as const })),

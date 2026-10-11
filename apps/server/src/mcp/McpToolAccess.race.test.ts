@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -108,7 +109,7 @@ const renameRacingTheUser = (threadId: ThreadId, userRaises: boolean) =>
             if (userRaises) {
               // The user's own command carries no limit, so it lands.
               yield* orchestrator
-                .dispatch({
+                .dispatch(trustedMutationAuthority, {
                   type: "thread.runtime-mode.set",
                   commandId: CommandId.make("user-raise"),
                   threadId: input.threadId,
@@ -118,7 +119,7 @@ const renameRacingTheUser = (threadId: ThreadId, userRaises: boolean) =>
               yield* Ref.set(raised, true);
             }
             yield* threads
-              .dispatch({
+              .dispatch(trustedMutationAuthority, {
                 type: "thread.metadata.update",
                 commandId: CommandId.make(`agent-rename:${userRaises}`),
                 threadId: input.threadId,
@@ -157,7 +158,7 @@ const renameRacingTheUser = (threadId: ThreadId, userRaises: boolean) =>
 const createSupervisedThread = (threadId: ThreadId) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.create",
       commandId: CommandId.make(`create:${threadId}`),
       threadId,

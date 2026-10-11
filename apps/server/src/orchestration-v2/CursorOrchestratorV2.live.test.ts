@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -152,7 +153,7 @@ describe.runIf(process.env.T3_CURSOR_LIVE_ORCHESTRATOR === "1")(
           const targetThreadId = ThreadId.make("thread:cursor-live-portable-fork:target");
           const marker = "CURSOR_LIVE_PORTABLE_FORK_7H3Q";
 
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             createdBy: "user",
             creationSource: "web",
@@ -166,7 +167,7 @@ describe.runIf(process.env.T3_CURSOR_LIVE_ORCHESTRATOR === "1")(
             branch: null,
             worktreePath: process.cwd(),
           });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",
@@ -181,7 +182,7 @@ describe.runIf(process.env.T3_CURSOR_LIVE_ORCHESTRATOR === "1")(
           const sourceProjection = yield* waitForIdle(sourceThreadId);
           yield* Console.log("Cursor live source turn completed; dispatching portable fork.");
 
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.fork",
             createdBy: "user",
             creationSource: "web",
@@ -191,7 +192,7 @@ describe.runIf(process.env.T3_CURSOR_LIVE_ORCHESTRATOR === "1")(
             sourcePoint: { type: "latest_stable" },
             title: "Cursor live portable fork target",
           });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",
@@ -251,7 +252,7 @@ describe.runIf(process.env.T3_CURSOR_LIVE_ORCHESTRATOR === "1")(
             readonly runtimeMode: "full-access" | "approval-required";
           }) {
             const threadId = ThreadId.make(`thread:cursor-live-sandbox:${input.name}`);
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.create",
               createdBy: "user",
               creationSource: "web",
@@ -265,7 +266,7 @@ describe.runIf(process.env.T3_CURSOR_LIVE_ORCHESTRATOR === "1")(
               branch: null,
               worktreePath: process.cwd(),
             });
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",
@@ -309,7 +310,7 @@ describe.runIf(process.env.T3_CURSOR_LIVE_ORCHESTRATOR === "1")(
           const projectId = ProjectId.make("project:cursor-live-subagent-lineage");
           const sourceThreadId = ThreadId.make("thread:cursor-live-subagent-lineage");
 
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             createdBy: "user",
             creationSource: "web",
@@ -323,7 +324,7 @@ describe.runIf(process.env.T3_CURSOR_LIVE_ORCHESTRATOR === "1")(
             branch: null,
             worktreePath: process.cwd(),
           });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",

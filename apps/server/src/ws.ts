@@ -1,3 +1,4 @@
+import { type MutationAuthority } from "./auth/CommandAuthorization.ts";
 import { type OrchestrationV2DomainEvent } from "@t3tools/contracts";
 import {
   authorizeThreadRead,
@@ -1520,6 +1521,11 @@ const layerWsRpc = (
           Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationReadScope)),
         ),
       };
+      const mutationAuthority: MutationAuthority = {
+        current: collectionAuthority.pipe(
+          Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationOperateScope)),
+        ),
+      };
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const hostResources = yield* HostResources.HostResources;
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
@@ -1679,7 +1685,7 @@ const layerWsRpc = (
             const commandId = CommandId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie));
             const launched = yield* Effect.result(
               startup.enqueueCommand(
-                threadLaunch.launch({
+                threadLaunch.launch(mutationAuthority, {
                   commandId,
                   threadId,
                   projectId: input.projectId,
@@ -1974,8 +1980,9 @@ const layerWsRpc = (
                 .enqueueCommand(
                   // A retry also restarts the preparation work the launch owns.
                   (command.type === "prepared-run.retry"
-                    ? threadLaunch.retryPreparation(command)
+                    ? threadLaunch.retryPreparation(mutationAuthority, command)
                     : ThreadMessageIntake.dispatchCommand(
+                        mutationAuthority,
                         ThreadManagementService.withCreationProvenance(command, {
                           createdBy: "user",
                           creationSource:
@@ -2104,7 +2111,7 @@ const layerWsRpc = (
             Effect.andThen(
               startup
                 .enqueueCommand(
-                  ThreadMessageIntake.launchThread({
+                  ThreadMessageIntake.launchThread(mutationAuthority, {
                     commandId: input.commandId,
                     ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
                     ...(input.reuseExistingThread === undefined

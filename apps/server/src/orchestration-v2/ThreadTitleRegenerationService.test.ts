@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { assert, describe, it, vi } from "@effect/vitest";
 import {
@@ -109,7 +110,7 @@ function createThread(input: { readonly command: string; readonly thread: string
   return Effect.gen(function* () {
     const threads = yield* ThreadManagement.ThreadManagementService;
     const threadId = ThreadId.make(input.thread);
-    yield* threads.dispatch({
+    yield* threads.dispatch(trustedMutationAuthority, {
       type: "thread.create",
       commandId: CommandId.make(input.command),
       threadId,
@@ -134,7 +135,7 @@ function dispatchUserMessage(input: {
 }) {
   return Effect.gen(function* () {
     const threads = yield* ThreadManagement.ThreadManagementService;
-    yield* threads.dispatch({
+    yield* threads.dispatch(trustedMutationAuthority, {
       type: "message.dispatch",
       commandId: CommandId.make(input.command),
       threadId: input.threadId,
@@ -153,7 +154,7 @@ function armRegeneration(input: { readonly command: string; readonly threadId: T
   return Effect.gen(function* () {
     const threads = yield* ThreadManagement.ThreadManagementService;
     const requestId = CommandId.make(input.command);
-    yield* threads.dispatch({
+    yield* threads.dispatch(trustedMutationAuthority, {
       type: "thread.metadata.update",
       commandId: requestId,
       threadId: input.threadId,
@@ -247,7 +248,7 @@ describe("ThreadTitleRegenerationService", () => {
           [{ type: "thread-title.generate", kind: { type: "regenerate" } }],
         );
 
-        yield* threads.dispatch({
+        yield* threads.dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make("command:title:arm:abandon"),
           threadId,
@@ -257,7 +258,7 @@ describe("ThreadTitleRegenerationService", () => {
         assert.isNotOk(abandoned.thread.titleRegeneration);
 
         yield* armRegeneration({ command: "command:title:arm:2", threadId });
-        yield* threads.dispatch({
+        yield* threads.dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make("command:title:arm:rename"),
           threadId,
@@ -487,7 +488,7 @@ it.effect.each(["success", "exhausted", "stale", "interrupted"] as const)(
           yield* Fiber.interrupt(fiber);
         } else {
           if (outcome === "stale")
-            yield* threads.dispatch({
+            yield* threads.dispatch(trustedMutationAuthority, {
               type: "thread.metadata.update",
               commandId: CommandId.make("manual-title"),
               threadId,

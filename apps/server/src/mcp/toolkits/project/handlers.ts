@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../../../auth/CommandAuthorization.ts";
 import { MessageId, ThreadId, OrchestratorMcpFailure, ProjectId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -114,7 +115,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             message:
               "Pass modelSelection: the project has no default model. orchestrator_capabilities lists providers and models.",
           });
-        const result = yield* ThreadMessageIntake.launchThread({
+        const result = yield* ThreadMessageIntake.launchThread(trustedMutationAuthority, {
           commandId,
           threadId,
           projectId,

@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import {
   CheckpointScopeId,
   CommandId,
@@ -134,7 +135,7 @@ export const layer: Layer.Layer<
       // (ProjectionStore preserves the field when absent from the payload).
       const { delegatedCompletion: _delegatedCompletion, ...runWithoutDelegatedCompletion } = run;
       const commandId = CommandId.make(`command:effect:checkpoint.capture:${run.id}`);
-      yield* eventSink.commitCommand({
+      yield* eventSink.commitCommand(trustedMutationAuthority, {
         commandId,
         threadId: input.threadId,
         commandType: "checkpoint.capture",

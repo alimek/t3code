@@ -115,7 +115,7 @@ describe("OrchestratorMcpService", () => {
                     }
                   : childProjection,
             ),
-          dispatch: (command) =>
+          dispatch: (_authority, command) =>
             Ref.update(acknowledgementCommandIds, (commandIds) => [
               ...commandIds,
               String(command.commandId),
@@ -297,7 +297,7 @@ describe("OrchestratorMcpService", () => {
             Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection),
           // The child still runs within the parent's modes.
           getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
-          dispatch: (command) =>
+          dispatch: (_authority, command) =>
             Ref.update(dispatched, (commands) => [...commands, command]).pipe(
               Effect.as({} as never),
             ),
@@ -373,7 +373,7 @@ describe("OrchestratorMcpService", () => {
             Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection),
           // The child still runs within the parent's modes.
           getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
-          dispatch: (command) =>
+          dispatch: (_authority, command) =>
             Ref.update(dispatched, (commands) => [...commands, command]).pipe(
               Effect.andThen(Effect.fail(new Error("simulated stop failure") as never)),
             ),
@@ -452,7 +452,7 @@ describe("OrchestratorMcpService", () => {
             Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection),
           // The child still runs within the parent's modes.
           getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
-          dispatch: (command) =>
+          dispatch: (_authority, command) =>
             Ref.update(dispatched, (commands) => [...commands, command]).pipe(
               Effect.andThen(
                 command.type === "delegated_task.completion-delivery.dispose"
@@ -538,7 +538,7 @@ describe("OrchestratorMcpService", () => {
             Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection),
           // Its user has since raised the child to full access.
           getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
-          dispatch: (command) =>
+          dispatch: (_authority, command) =>
             Ref.update(dispatched, (commands) => [...commands, command]).pipe(
               Effect.andThen(
                 command.type === "delegated_task.completion-delivery.dispose"
@@ -660,7 +660,7 @@ describe("OrchestratorMcpService", () => {
                   ? null
                   : liveThreadShell(threadId, { runtimeMode: "approval-required" }),
             ),
-          dispatch: (command) =>
+          dispatch: (_authority, command) =>
             Ref.update(dispatched, (commands) => [...commands, command]).pipe(
               Effect.as({} as never),
             ),
@@ -1040,7 +1040,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                   ? parentProjection(delegated ? [task] : [])
                   : childProjection,
               ),
-            dispatch: (command) =>
+            dispatch: (_authority, command) =>
               Ref.update(dispatched, (commands) => [...commands, command]).pipe(
                 Effect.andThen(
                   Effect.sync(() => {
@@ -1137,7 +1137,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                 ? parentProjection(delegated ? [task] : [])
                 : childProjection,
             ),
-          dispatch: (command) =>
+          dispatch: (_authority, command) =>
             Ref.update(dispatched, (commands) => [...commands, command]).pipe(
               Effect.andThen(
                 Effect.sync(() => {
@@ -1450,7 +1450,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                     ? parentProjection(delegated ? [task] : [], parentModelSelection)
                     : childProjection,
                 ),
-              dispatch: (command) =>
+              dispatch: (_authority, command) =>
                 Ref.update(dispatched, (commands) => [...commands, command]).pipe(
                   Effect.andThen(
                     Effect.sync(() => {

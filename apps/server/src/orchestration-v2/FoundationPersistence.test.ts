@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { assert, it } from "@effect/vitest";
 import {
@@ -1211,7 +1212,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         );
 
         const exit = yield* Effect.exit(
-          eventSink.commitCommand({
+          eventSink.commitCommand(trustedMutationAuthority, {
             commandId,
             threadId,
             commandType: "checkpoint.atomicity-test",
@@ -1384,7 +1385,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
 
       pageLimits.length = 0;
       const retried = yield* eventSink
-        .commitCommand({
+        .commitCommand(trustedMutationAuthority, {
           commandId,
           threadId: ThreadId.make(threadId),
           commandType: "thread.create",
@@ -1432,7 +1433,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         },
       };
 
-      const first = yield* eventSink.commitCommand({
+      const first = yield* eventSink.commitCommand(trustedMutationAuthority, {
         commandId,
         threadId,
         commandType: "foundation.effect-recovery",
@@ -1440,7 +1441,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         events: [event],
         effects: [effect],
       });
-      const retry = yield* eventSink.commitCommand({
+      const retry = yield* eventSink.commitCommand(trustedMutationAuthority, {
         commandId,
         threadId,
         commandType: "foundation.effect-recovery",
@@ -1511,9 +1512,9 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         ],
       };
 
-      assert.isTrue((yield* eventSink.commitCommand(input)).committed);
+      assert.isTrue((yield* eventSink.commitCommand(trustedMutationAuthority, input)).committed);
       yield* outbox.awaitAvailable;
-      assert.isFalse((yield* eventSink.commitCommand(input)).committed);
+      assert.isFalse((yield* eventSink.commitCommand(trustedMutationAuthority, input)).committed);
 
       const unexpectedWake = yield* outbox.awaitAvailable.pipe(Effect.forkChild);
       yield* Effect.yieldNow;
@@ -2932,7 +2933,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       const runId = RunId.make("run:foundation-process-loss");
       const commandId = CommandId.make("command:foundation-process-loss");
       const thread = makeThread(threadId, now);
-      yield* eventSink.commitCommand({
+      yield* eventSink.commitCommand(trustedMutationAuthority, {
         commandId,
         threadId,
         commandType: "foundation.process-loss",
@@ -3054,7 +3055,7 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
       // then the server died. Recovery already cancels the parent's subagent
       // item, entity, and node; the child's runless root turn lives on another
       // thread and must be settled too.
-      yield* eventSink.commitCommand({
+      yield* eventSink.commitCommand(trustedMutationAuthority, {
         commandId: CommandId.make("command:foundation-native-subagent"),
         threadId: parentId,
         commandType: "foundation.native-subagent",

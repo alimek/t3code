@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "./auth/CommandAuthorization.ts";
 import {
   CommandId,
   DEFAULT_MODEL,
@@ -285,7 +286,7 @@ const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
     if (existingThread === undefined) {
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const settings = yield* serverSettings.getSettings;
-      const launched = yield* threadLaunch.launch({
+      const launched = yield* threadLaunch.launch(trustedMutationAuthority, {
         commandId: CommandId.make(yield* randomUUID),
         projectId: project.id,
         title: "New thread",

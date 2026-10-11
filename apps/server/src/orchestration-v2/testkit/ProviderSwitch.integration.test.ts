@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../../auth/CommandAuthorization.ts";
 import { vi } from "vite-plus/test";
 import { historyResponseItems } from "../ContextHandoffBudget.ts";
 import { assert, describe, it } from "@effect/vitest";
@@ -538,7 +539,7 @@ describe("orchestration v2 provider switching", () => {
           );
           const targetOrdinal = returning ? 4 : 2;
           const dispatch = (ordinal: number, text: string, selection: ModelSelection) =>
-            orchestrator.dispatch({
+            orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               commandId: CommandId.make(`regression:${ordinal}`),
               threadId,
@@ -573,7 +574,7 @@ describe("orchestration v2 provider switching", () => {
               Stream.runHead,
               Effect.andThen(worker.drain()),
             );
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             commandId: CommandId.make("regression:create"),
             threadId,
@@ -695,7 +696,7 @@ describe("orchestration v2 provider switching", () => {
             const target = (yield* orchestrator.getThreadProjection(threadId)).providerThreads.find(
               (thread) => thread.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
             )!;
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "provider-session.detach",
               commandId: CommandId.make("detach-for-native-replacement"),
               threadId,
@@ -722,7 +723,7 @@ describe("orchestration v2 provider switching", () => {
               const target = failed.providerThreads.find(
                 (thread) => thread.providerInstanceId === CLAUDE_MODEL_SELECTION.instanceId,
               )!;
-              yield* orchestrator.dispatch({
+              yield* orchestrator.dispatch(trustedMutationAuthority, {
                 type: "provider-session.detach",
                 commandId: CommandId.make("detach-before-reasoning-retry"),
                 threadId,
@@ -951,7 +952,7 @@ describe("orchestration v2 provider switching", () => {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
             const dispatch = (ordinal: number, text: string, selection: ModelSelection) =>
-              orchestrator.dispatch({
+              orchestrator.dispatch(trustedMutationAuthority, {
                 type: "message.dispatch",
                 commandId: CommandId.make(`retry:${ordinal}`),
                 threadId,
@@ -982,7 +983,7 @@ describe("orchestration v2 provider switching", () => {
                   }),
                 ),
               );
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.create",
               commandId: CommandId.make("retry:create"),
               threadId,
@@ -1101,7 +1102,7 @@ describe("orchestration v2 provider switching", () => {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
             const runToCompletion = Effect.fn("runToCompletion")(function* (ordinal: number) {
-              yield* orchestrator.dispatch({
+              yield* orchestrator.dispatch(trustedMutationAuthority, {
                 type: "message.dispatch",
                 commandId: CommandId.make(`resume-fallback:${ordinal}`),
                 threadId,
@@ -1128,7 +1129,7 @@ describe("orchestration v2 provider switching", () => {
                 "completed",
               );
             });
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.create",
               commandId: CommandId.make("resume-fallback:create"),
               threadId,
@@ -1150,7 +1151,7 @@ describe("orchestration v2 provider switching", () => {
             if (providerThread === undefined || providerThread.providerSessionId === null) {
               return yield* Effect.die("Expected a provider session after the first turn.");
             }
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "provider-session.detach",
               commandId: CommandId.make("resume-fallback:detach"),
               threadId,
@@ -1228,7 +1229,7 @@ describe("orchestration v2 provider switching", () => {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
           const run = Effect.fn("run")(function* (ordinal: number) {
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               commandId: CommandId.make(`refused-start:${ordinal}`),
               threadId,
@@ -1252,7 +1253,7 @@ describe("orchestration v2 provider switching", () => {
             yield* worker.drain();
             return (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)?.status;
           });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             commandId: CommandId.make("refused-start:create"),
             threadId,
@@ -1382,7 +1383,7 @@ describe("orchestration v2 provider switching", () => {
             modelSelection: ModelSelection,
             queue = false,
           ) =>
-            orchestrator.dispatch({
+            orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               commandId: CommandId.make(`command:handoff:${key}`),
               threadId,
@@ -1394,7 +1395,7 @@ describe("orchestration v2 provider switching", () => {
               modelSelection,
               dispatchMode: { type: queue ? "queue_after_active" : "start_immediately" },
             });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             commandId: CommandId.make("command:handoff:create"),
             threadId,
@@ -1533,7 +1534,7 @@ describe("orchestration v2 provider switching", () => {
           yield* Effect.gen(function* () {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.create",
               createdBy: "user",
               creationSource: "web",
@@ -1547,7 +1548,7 @@ describe("orchestration v2 provider switching", () => {
               branch: null,
               worktreePath: cwd,
             });
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",
@@ -1561,7 +1562,7 @@ describe("orchestration v2 provider switching", () => {
             });
             yield* Deferred.await(started);
             yield* worker.drain();
-            const queue = orchestrator.dispatch({
+            const queue = orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",
@@ -1657,7 +1658,7 @@ describe("orchestration v2 provider switching", () => {
               { readonly type: "message.dispatch" }
             >["dispatchMode"],
           ) =>
-            orchestrator.dispatch({
+            orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",
@@ -1669,7 +1670,7 @@ describe("orchestration v2 provider switching", () => {
               modelSelection,
               dispatchMode,
             });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             createdBy: "user",
             creationSource: "web",
@@ -1891,7 +1892,7 @@ describe("orchestration v2 provider switching", () => {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const eventSink = yield* EventSink.EventSinkV2;
           const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             createdBy: "user",
             creationSource: "web",
@@ -1905,7 +1906,7 @@ describe("orchestration v2 provider switching", () => {
             branch: null,
             worktreePath: cwd,
           });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",
@@ -1918,7 +1919,7 @@ describe("orchestration v2 provider switching", () => {
             dispatchMode: { type: "start_immediately" },
           });
           yield* Deferred.await(started);
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",
@@ -2044,7 +2045,7 @@ describe("orchestration v2 provider switching", () => {
           const eventSink = yield* EventSink.EventSinkV2;
           const effectOutbox = yield* EffectOutbox.EffectOutboxV2;
           const dispatch = (ordinal: number, modelSelection: ModelSelection) =>
-            orchestrator.dispatch({
+            orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",
@@ -2058,7 +2059,7 @@ describe("orchestration v2 provider switching", () => {
                 type: ordinal === 1 ? "start_immediately" : "queue_after_active",
               },
             });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             createdBy: "user",
             creationSource: "web",
@@ -2285,7 +2286,7 @@ describe("orchestration v2 provider switching", () => {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const eventSink = yield* EventSink.EventSinkV2;
           const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             createdBy: "user",
             creationSource: "web",
@@ -2299,7 +2300,7 @@ describe("orchestration v2 provider switching", () => {
             branch: null,
             worktreePath: cwd,
           });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",
@@ -2350,7 +2351,7 @@ describe("orchestration v2 provider switching", () => {
               },
             ],
           });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",
@@ -2362,7 +2363,7 @@ describe("orchestration v2 provider switching", () => {
             modelSelection: CLAUDE_MODEL_SELECTION,
             dispatchMode: { type: "queue_after_active" },
           });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",
@@ -2633,7 +2634,7 @@ describe("orchestration v2 provider switching", () => {
           yield* maintenance.rebuild;
           yield* importer.ensureTranscript(importedThreadId);
 
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",
@@ -2650,7 +2651,7 @@ describe("orchestration v2 provider switching", () => {
           } else {
             yield* waitForIdle(importedThreadId);
           }
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",
@@ -2836,10 +2837,10 @@ describe("orchestration v2 provider switching", () => {
 
         const projection = yield* Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
-          yield* orchestrator.dispatch(commands[0]!);
-          yield* orchestrator.dispatch(commands[1]!);
+          yield* orchestrator.dispatch(trustedMutationAuthority, commands[0]!);
+          yield* orchestrator.dispatch(trustedMutationAuthority, commands[1]!);
           yield* waitForIdle(threadId);
-          yield* orchestrator.dispatch(commands[2]!);
+          yield* orchestrator.dispatch(trustedMutationAuthority, commands[2]!);
           assert.deepEqual(
             (yield* orchestrator.getThreadProjection(threadId)).thread.modelSelection,
             CLAUDE_MODEL_SELECTION,
@@ -2852,14 +2853,14 @@ describe("orchestration v2 provider switching", () => {
           )).providerSessions.find(
             (session) => session.providerInstanceId === CODEX_MODEL_SELECTION.instanceId,
           )!;
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "provider-session.detach",
             commandId: CommandId.make("command:provider-switch:stop-codex"),
             threadId,
             providerSessionId: codexSession.id,
           });
           yield* (yield* EffectWorker.OrchestrationEffectWorkerV2).drain();
-          yield* orchestrator.dispatch(commands[3]!);
+          yield* orchestrator.dispatch(trustedMutationAuthority, commands[3]!);
           assert.deepEqual(
             (yield* orchestrator.getThreadProjection(threadId)).thread.modelSelection,
             CODEX_MODEL_SELECTION,
@@ -3041,11 +3042,11 @@ describe("orchestration v2 provider switching", () => {
 
         const targetProjection = yield* Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
-          yield* orchestrator.dispatch(commands[0]!);
-          yield* orchestrator.dispatch(commands[1]!);
+          yield* orchestrator.dispatch(trustedMutationAuthority, commands[0]!);
+          yield* orchestrator.dispatch(trustedMutationAuthority, commands[1]!);
           yield* waitForIdle(sourceThreadId);
-          yield* orchestrator.dispatch(commands[2]!);
-          yield* orchestrator.dispatch(commands[3]!);
+          yield* orchestrator.dispatch(trustedMutationAuthority, commands[2]!);
+          yield* orchestrator.dispatch(trustedMutationAuthority, commands[3]!);
           return yield* waitForIdle(targetThreadId);
         }).pipe(
           Effect.provide(
@@ -3177,11 +3178,11 @@ describe("orchestration v2 provider switching", () => {
 
         const targetProjection = yield* Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
-          yield* orchestrator.dispatch(commands[0]!);
-          yield* orchestrator.dispatch(commands[1]!);
+          yield* orchestrator.dispatch(trustedMutationAuthority, commands[0]!);
+          yield* orchestrator.dispatch(trustedMutationAuthority, commands[1]!);
           yield* waitForIdle(sourceThreadId);
-          yield* orchestrator.dispatch(commands[2]!);
-          yield* orchestrator.dispatch(commands[3]!);
+          yield* orchestrator.dispatch(trustedMutationAuthority, commands[2]!);
+          yield* orchestrator.dispatch(trustedMutationAuthority, commands[3]!);
           return yield* waitForIdle(targetThreadId);
         }).pipe(
           Effect.provide(
@@ -3359,15 +3360,15 @@ describe("orchestration v2 provider switching", () => {
 
           const projection = yield* Effect.gen(function* () {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
-            yield* orchestrator.dispatch(commands[0]!);
-            yield* orchestrator.dispatch(commands[1]!);
+            yield* orchestrator.dispatch(trustedMutationAuthority, commands[0]!);
+            yield* orchestrator.dispatch(trustedMutationAuthority, commands[1]!);
             yield* waitForIdle(sourceThreadId);
-            yield* orchestrator.dispatch(commands[2]!);
+            yield* orchestrator.dispatch(trustedMutationAuthority, commands[2]!);
             yield* waitForIdle(sourceThreadId);
-            yield* orchestrator.dispatch(commands[3]!);
-            yield* orchestrator.dispatch(commands[4]!);
+            yield* orchestrator.dispatch(trustedMutationAuthority, commands[3]!);
+            yield* orchestrator.dispatch(trustedMutationAuthority, commands[4]!);
             yield* waitForIdle(forkThreadId);
-            yield* orchestrator.dispatch(commands[5]!);
+            yield* orchestrator.dispatch(trustedMutationAuthority, commands[5]!);
             if (failResume) {
               // A persisted native ref that is not loaded in this process must
               // exercise resume rather than the session manager's warm cache.
@@ -3393,7 +3394,7 @@ describe("orchestration v2 provider switching", () => {
                 ],
               });
             }
-            yield* orchestrator.dispatch(commands[6]!);
+            yield* orchestrator.dispatch(trustedMutationAuthority, commands[6]!);
             return yield* waitForIdle(sourceThreadId);
           }).pipe(
             Effect.provide(
@@ -3493,7 +3494,7 @@ describe("orchestration v2 provider switching", () => {
             [personalThreadId, personalSelection, "personal"],
             [workThreadId, workSelection, "work"],
           ] as const) {
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.create",
               createdBy: "user",
               creationSource: "web",
@@ -3507,7 +3508,7 @@ describe("orchestration v2 provider switching", () => {
               branch: null,
               worktreePath: null,
             });
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",

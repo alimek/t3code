@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -176,7 +177,7 @@ describe.runIf(runAntigravityFixture || process.env.T3_ACP_REGISTRY_LIVE_ORCHEST
           const threadId = ThreadId.make("thread:acp-registry-live");
           const marker = "ACP_REGISTRY_LIVE_7H3Q";
 
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             createdBy: "user",
             creationSource: "web",
@@ -193,7 +194,7 @@ describe.runIf(runAntigravityFixture || process.env.T3_ACP_REGISTRY_LIVE_ORCHEST
           yield* Console.log(
             `ACP Registry thread created for '${liveAgentId}'; dispatching first prompt.`,
           );
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",
@@ -217,7 +218,7 @@ describe.runIf(runAntigravityFixture || process.env.T3_ACP_REGISTRY_LIVE_ORCHEST
           assert.include(firstAssistant ?? "", marker);
 
           yield* Console.log("First ACP turn completed; dispatching continuation prompt.");
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",

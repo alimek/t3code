@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
@@ -319,6 +320,7 @@ it.effect.each(
       const existing =
         target === "existing"
           ? yield* launches.launch(
+              trustedMutationAuthority,
               launchInput({ command: "command:existing", thread: "thread:existing" }),
             )
           : null;
@@ -369,6 +371,7 @@ it.effect("retains automation and sender attribution while a message waits in th
     const launches = yield* ThreadLaunch.ThreadLaunchService;
     const threads = yield* ThreadManagement.ThreadManagementService;
     const launched = yield* launches.launch(
+      trustedMutationAuthority,
       launchInput({
         command: "command:automation:queue",
         thread: "thread:automation:queue",
@@ -377,7 +380,7 @@ it.effect("retains automation and sender attribution while a message waits in th
     );
     const scheduledTaskId = ScheduledTaskId.make("scheduled-task:queued");
     const senderThreadId = ThreadId.make("thread:agent-sender");
-    const queued = yield* threads.sendToThread({
+    const queued = yield* threads.sendToThread(trustedMutationAuthority, {
       projectId,
       commandId: CommandId.make("command:automation:queued"),
       threadId: launched.threadId,
@@ -429,7 +432,7 @@ it.effect("returns a visible preparing message while provisioning is still block
         message: "Build the feature",
         workspace: { type: "worktree", baseRef: "main" },
       });
-      const launched = yield* launches.launch(input);
+      const launched = yield* launches.launch(trustedMutationAuthority, input);
       assert.equal(launched.projection.messages[0]?.text, "Build the feature");
       assert.equal(launched.projection.runs[0]?.status, "preparing");
       assert.equal(
@@ -486,6 +489,7 @@ it.effect("provisions independent launches concurrently instead of behind a glob
       const results = yield* Effect.all(
         [
           launches.launch(
+            trustedMutationAuthority,
             launchInput({
               command: "command:launch:concurrent-a",
               thread: "thread:launch:concurrent-a",
@@ -493,6 +497,7 @@ it.effect("provisions independent launches concurrently instead of behind a glob
             }),
           ),
           launches.launch(
+            trustedMutationAuthority,
             launchInput({
               command: "command:launch:concurrent-b",
               thread: "thread:launch:concurrent-b",
@@ -542,7 +547,7 @@ it.effect("enqueues provider work only after setup has been initiated", () =>
         message: "Start after setup",
         workspace: { type: "worktree", baseRef: "main" },
       });
-      const launched = yield* launches.launch(input);
+      const launched = yield* launches.launch(trustedMutationAuthority, input);
       yield* Deferred.await(setupEntered);
       assert.isEmpty(
         yield* outbox.listByCommandId(CommandId.make("command:launch:release:release")),
@@ -584,6 +589,7 @@ it.effect(
         const launches = yield* ThreadLaunch.ThreadLaunchService;
         const threads = yield* ThreadManagement.ThreadManagementService;
         const launched = yield* launches.launch(
+          trustedMutationAuthority,
           launchInput({
             command: "command:launch:queued-during-preparation",
             thread: "thread:launch:queued-during-preparation",
@@ -593,7 +599,7 @@ it.effect(
         );
         yield* Deferred.await(setupEntered);
 
-        const followUp = yield* threads.sendToThread({
+        const followUp = yield* threads.sendToThread(trustedMutationAuthority, {
           projectId,
           commandId: CommandId.make("command:launch:queued-follow-up"),
           threadId: launched.threadId,
@@ -652,7 +658,7 @@ it.effect.each([" /COMPACT ", "/logout"])(
         const launches = yield* ThreadLaunch.ThreadLaunchService;
         const threads = yield* ThreadManagement.ThreadManagementService;
         const outbox = yield* EffectOutbox.EffectOutboxV2;
-        const launched = yield* launches.launch({
+        const launched = yield* launches.launch(trustedMutationAuthority, {
           ...launchInput({
             command: "compact-title",
             thread: "compact-title-thread",
@@ -671,7 +677,7 @@ it.effect.each([" /COMPACT ", "/logout"])(
         );
         const commandId = CommandId.make("compact-title-conversation");
         const messageId = MessageId.make("compact-title-conversation-message");
-        yield* threads.dispatch({
+        yield* threads.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           commandId,
           threadId: launched.threadId,
@@ -743,6 +749,7 @@ it.effect("keeps native maintenance commands out of steering and restart message
         },
       ] as const) {
         const launched = yield* launches.launch(
+          trustedMutationAuthority,
           launchInput({
             command: `${scenario.name}:launch`,
             thread: scenario.name,
@@ -754,7 +761,7 @@ it.effect("keeps native maintenance commands out of steering and restart message
         if (targetRun === undefined) return yield* Effect.die("Launch must create a run");
         const commandId = CommandId.make(`${scenario.name}:message`);
         const failure = yield* threads
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             commandId,
             threadId: launched.threadId,
@@ -801,7 +808,7 @@ it.effect("arms durable title generation after accepting the first message", () 
         title: "Generate my title",
         generateTitle: true,
       };
-      const launched = yield* launches.launch(input);
+      const launched = yield* launches.launch(trustedMutationAuthority, input);
       const generationCommandId = CommandId.make("command:launch:title-generation:initial-message");
 
       const projection = yield* threads.getThreadProjection(
@@ -832,7 +839,7 @@ it.effect("arms durable title generation after accepting the first message", () 
       );
 
       const manualRequestId = CommandId.make("command:title-generation:manual");
-      yield* threads.dispatch({
+      yield* threads.dispatch(trustedMutationAuthority, {
         type: "thread.metadata.update",
         commandId: manualRequestId,
         threadId: launched.threadId,
@@ -857,7 +864,7 @@ it.effect("arms durable title generation after accepting the first message", () 
         "Generated title",
       );
 
-      yield* threads.dispatch({
+      yield* threads.dispatch(trustedMutationAuthority, {
         type: "thread.metadata.update",
         commandId: CommandId.make("command:title-generation:user-rename"),
         threadId: launched.threadId,
@@ -865,7 +872,7 @@ it.effect("arms durable title generation after accepting the first message", () 
       });
       const renamed = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
       yield* TestClock.adjust(Duration.seconds(1));
-      yield* threads.dispatch({
+      yield* threads.dispatch(trustedMutationAuthority, {
         type: "thread.title.regeneration.complete",
         commandId: CommandId.make("command:title-generation:stale-completion"),
         threadId: launched.threadId,
@@ -893,7 +900,7 @@ it.effect("does not update a reused thread title when the initial message is rej
       const threads = yield* ThreadManagement.ThreadManagementService;
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       const threadId = ThreadId.make("thread:launch:reused-title-failure");
-      yield* threads.dispatch({
+      yield* threads.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         commandId: CommandId.make("command:launch:reused-title-failure:create"),
         threadId,
@@ -910,7 +917,7 @@ it.effect("does not update a reused thread title when the initial message is rej
 
       const commandId = CommandId.make("command:launch:reused-title-failure");
       const failed = yield* launches
-        .launch({
+        .launch(trustedMutationAuthority, {
           ...launchInput({
             command: commandId,
             thread: threadId,
@@ -965,7 +972,7 @@ it.effect("generates an initial title for an attachment-only message", () =>
         },
       };
 
-      const launched = yield* launches.launch(input);
+      const launched = yield* launches.launch(trustedMutationAuthority, input);
       yield* titleRegeneration.execute({
         threadId: launched.threadId,
         requestId: CommandId.make("command:launch:image-only:initial-message"),
@@ -1019,6 +1026,7 @@ it.effect("uses the available source control writer for generated worktree branc
     yield* Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
       yield* launches.launch(
+        trustedMutationAuthority,
         launchInput({
           command: "command:launch:source-control-writer",
           thread: "thread:launch:source-control-writer",
@@ -1057,6 +1065,7 @@ it.effect("falls back when the source control writer is unavailable", () =>
     yield* Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
       yield* launches.launch(
+        trustedMutationAuthority,
         launchInput({
           command: "command:launch:source-control-writer-fallback",
           thread: "thread:launch:source-control-writer-fallback",
@@ -1096,7 +1105,7 @@ it.effect("runs a Scratch thread launched at the root in its own folder", () =>
         thread: "thread:launch:scratch",
         message: "Convert these PNGs",
       });
-      const launched = yield* launches.launch(input);
+      const launched = yield* launches.launch(trustedMutationAuthority, input);
       assert.deepEqual(claimed, [{ threadId: launched.threadId, text: "Convert these PNGs" }]);
       assert.equal(launched.projection.thread.worktreePath, "/scratch/folder-1");
       yield* waitUntil(() => Effect.sync(() => harness.runSetup.mock.calls.length === 1));
@@ -1104,7 +1113,7 @@ it.effect("runs a Scratch thread launched at the root in its own folder", () =>
       assert.equal(harness.createWorktree.mock.calls.length, 0);
 
       // A retry replays the first attempt and claims no second folder.
-      const retried = yield* launches.launch(input);
+      const retried = yield* launches.launch(trustedMutationAuthority, input);
       assert.isTrue(retried.resumed);
       assert.lengthOf(claimed, 1);
       assert.equal(
@@ -1113,7 +1122,7 @@ it.effect("runs a Scratch thread launched at the root in its own folder", () =>
         "/scratch/folder-1",
       );
 
-      const other = yield* launches.launch({
+      const other = yield* launches.launch(trustedMutationAuthority, {
         ...launchInput({
           command: "command:launch:scratch-other",
           thread: "thread:launch:scratch-other",
@@ -1134,6 +1143,7 @@ it.effect("names the worktree itself when the client provides no branch", () =>
       const launches = yield* ThreadLaunch.ThreadLaunchService;
       const threads = yield* ThreadManagement.ThreadManagementService;
       const launched = yield* launches.launch(
+        trustedMutationAuthority,
         launchInput({
           command: "command:launch:server-named-branch",
           thread: "thread:launch:server-named-branch",
@@ -1174,6 +1184,7 @@ it.effect("renames a temporary t3/<hash> branch off the provisioning critical pa
       const launches = yield* ThreadLaunch.ThreadLaunchService;
       const threads = yield* ThreadManagement.ThreadManagementService;
       const launched = yield* launches.launch(
+        trustedMutationAuthority,
         launchInput({
           command: "command:launch:temp-branch",
           thread: "thread:launch:temp-branch",
@@ -1220,6 +1231,7 @@ it.effect("provisions under t3-<hash> when a plain t3 branch blocks t3/*", () =>
       const launches = yield* ThreadLaunch.ThreadLaunchService;
       const threads = yield* ThreadManagement.ThreadManagementService;
       const launched = yield* launches.launch(
+        trustedMutationAuthority,
         launchInput({
           command: "command:launch:blocked-namespace",
           thread: "thread:launch:blocked-namespace",
@@ -1244,6 +1256,7 @@ it.effect("keeps an explicit branch name instead of generating one", () =>
     yield* Effect.gen(function* () {
       const launches = yield* ThreadLaunch.ThreadLaunchService;
       yield* launches.launch(
+        trustedMutationAuthority,
         launchInput({
           command: "command:launch:explicit-branch",
           thread: "thread:launch:explicit-branch",
@@ -1271,6 +1284,7 @@ it.effect("keeps the temporary branch when branch generation fails", () =>
       const launches = yield* ThreadLaunch.ThreadLaunchService;
       const threads = yield* ThreadManagement.ThreadManagementService;
       const launched = yield* launches.launch(
+        trustedMutationAuthority,
         launchInput({
           command: "command:launch:branch-fallback",
           thread: "thread:launch:branch-fallback",
@@ -1301,6 +1315,7 @@ it.effect("renames a temporary branch on an existing worktree to a generated nam
       const launches = yield* ThreadLaunch.ThreadLaunchService;
       const threads = yield* ThreadManagement.ThreadManagementService;
       const launched = yield* launches.launch(
+        trustedMutationAuthority,
         launchInput({
           command: "command:launch:existing-worktree-rename",
           thread: "thread:launch:existing-worktree-rename",
@@ -1345,6 +1360,7 @@ it.effect("shows the fetch diagnosis when preparing a worktree from origin fails
     const launches = yield* ThreadLaunch.ThreadLaunchService;
     const threads = yield* ThreadManagement.ThreadManagementService;
     const launched = yield* launches.launch(
+      trustedMutationAuthority,
       launchInput({
         command: "command:launch:fetch-failure",
         thread: "thread:launch:fetch-failure",
@@ -1396,6 +1412,7 @@ it.effect("retries a failed workspace preparation on the same run", () => {
     const outbox = yield* EffectOutbox.EffectOutboxV2;
     const threads = yield* ThreadManagement.ThreadManagementService;
     const launched = yield* launches.launch(
+      trustedMutationAuthority,
       launchInput({
         command: "command:launch:retry",
         thread: "thread:launch:retry",
@@ -1420,7 +1437,7 @@ it.effect("retries a failed workspace preparation on the same run", () => {
       threadId: launched.threadId,
       runId,
     };
-    yield* launches.retryPreparation(retry);
+    yield* launches.retryPreparation(trustedMutationAuthority, retry);
     yield* waitUntil(() =>
       outbox
         .listByCommandId(CommandId.make("command:launch:retry:1:release"))
@@ -1439,7 +1456,10 @@ it.effect("retries a failed workspace preparation on the same run", () => {
 
     // The run left preparation, so a second retry has nothing to do.
     const rejected = yield* launches
-      .retryPreparation({ ...retry, commandId: CommandId.make("command:launch:retry:2") })
+      .retryPreparation(trustedMutationAuthority, {
+        ...retry,
+        commandId: CommandId.make("command:launch:retry:2"),
+      })
       .pipe(Effect.flip);
     assert.equal(rejected._tag, "OrchestratorDispatchError");
   }).pipe(Effect.provide(harness.layer));
@@ -1459,6 +1479,7 @@ it.effect("a retry reuses a recorded worktree without undoing its branch rename"
     const threads = yield* ThreadManagement.ThreadManagementService;
     const tracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
     const launched = yield* launches.launch(
+      trustedMutationAuthority,
       launchInput({
         command: "command:launch:reuse",
         thread: "thread:launch:reuse",
@@ -1480,7 +1501,7 @@ it.effect("a retry reuses a recorded worktree without undoing its branch rename"
     const failed = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
     assert.equal(failed.thread.worktreePath, "/repo-worktrees/feature");
 
-    yield* launches.retryPreparation({
+    yield* launches.retryPreparation(trustedMutationAuthority, {
       commandId: CommandId.make("command:launch:reuse:retry"),
       threadId: launched.threadId,
       runId: failed.runs[0]!.id,
@@ -1519,6 +1540,7 @@ it.effect("removes a worktree that failed before the thread recorded it", () => 
     const launches = yield* ThreadLaunch.ThreadLaunchService;
     const threads = yield* ThreadManagement.ThreadManagementService;
     const launched = yield* launches.launch(
+      trustedMutationAuthority,
       launchInput({
         command: "command:launch:partial-worktree",
         thread: "thread:launch:partial-worktree",
@@ -1560,7 +1582,7 @@ it.effect.each(["worktree", "setup"] as const)(
           message: `Fail during ${failurePoint}`,
           workspace: { type: "worktree", baseRef: "main" },
         });
-        const launched = yield* launches.launch(input);
+        const launched = yield* launches.launch(trustedMutationAuthority, input);
         yield* waitUntil(() =>
           threads
             .getThreadProjection(trustedReadAuthority, launched.threadId)
@@ -1603,9 +1625,9 @@ it.effect("replays a server-allocated launch", () =>
         thread: "unused",
         message: "Only once",
       });
-      const first = yield* launches.launch(rest);
+      const first = yield* launches.launch(trustedMutationAuthority, rest);
       yield* Deferred.await(setupEntered);
-      const retry = yield* launches.launch(rest);
+      const retry = yield* launches.launch(trustedMutationAuthority, rest);
       assert.equal(first.threadId, retry.threadId);
       assert.isFalse(first.resumed);
       assert.isTrue(retry.resumed);
@@ -1623,7 +1645,7 @@ it.effect("replays a server-allocated launch", () =>
         ),
         Stream.runHead,
       );
-      const settled = yield* launches.launch(rest);
+      const settled = yield* launches.launch(trustedMutationAuthority, rest);
       assert.equal(settled.threadId, first.threadId);
       assert.isTrue(settled.resumed);
       assert.equal(settled.projection.messages[0]?.id, first.projection.messages[0]?.id);
@@ -1642,9 +1664,9 @@ it.effect("rejects a server-allocated launch replay with a mismatching thread id
       thread: "unused",
       message: "Mismatch",
     });
-    const first = yield* launches.launch(rest);
+    const first = yield* launches.launch(trustedMutationAuthority, rest);
     const failed = yield* launches
-      .launch({
+      .launch(trustedMutationAuthority, {
         ...rest,
         threadId: ThreadId.make("thread:launch:allocated-mismatch"),
       })
@@ -1665,9 +1687,9 @@ it.effect("rejects a server-allocated launch receipt from another project", () =
       thread: "unused",
       message: "Wrong project",
     });
-    const first = yield* launches.launch(rest);
+    const first = yield* launches.launch(trustedMutationAuthority, rest);
     const failed = yield* launches
-      .launch({
+      .launch(trustedMutationAuthority, {
         ...rest,
         projectId: otherProjectId,
       })
@@ -1689,13 +1711,13 @@ it.effect("rejects a server-allocated launch retry after the thread is deleted",
       thread: "unused",
       message: "Deleted before retry",
     });
-    const first = yield* launches.launch(rest);
-    yield* threads.dispatch({
+    const first = yield* launches.launch(trustedMutationAuthority, rest);
+    yield* threads.dispatch(trustedMutationAuthority, {
       type: "thread.delete",
       commandId: CommandId.make("command:launch:allocated-deleted:delete"),
       threadId: first.threadId,
     });
-    const failed = yield* launches.launch(rest).pipe(Effect.flip);
+    const failed = yield* launches.launch(trustedMutationAuthority, rest).pipe(Effect.flip);
     assert.equal(failed._tag, "ThreadLaunchError");
     assert.equal(failed.operation, "create-thread");
     assert.equal(failed.threadId, first.threadId);
@@ -1711,7 +1733,7 @@ it.effect("does not treat an unrelated accepted command receipt as a launch", ()
     const launches = yield* ThreadLaunch.ThreadLaunchService;
     const threads = yield* ThreadManagement.ThreadManagementService;
     const threadId = ThreadId.make("thread:launch:unrelated-receipt");
-    yield* threads.dispatch({
+    yield* threads.dispatch(trustedMutationAuthority, {
       type: "thread.create",
       commandId: CommandId.make("command:launch:unrelated-receipt:create"),
       threadId,
@@ -1725,7 +1747,7 @@ it.effect("does not treat an unrelated accepted command receipt as a launch", ()
       createdBy: "user",
       creationSource: "web",
     });
-    yield* threads.dispatch({
+    yield* threads.dispatch(trustedMutationAuthority, {
       type: "thread.metadata.update",
       commandId: CommandId.make("command:launch:unrelated-receipt"),
       threadId,
@@ -1736,7 +1758,7 @@ it.effect("does not treat an unrelated accepted command receipt as a launch", ()
       thread: "unused",
       message: "Should not become a launch",
     });
-    const failed = yield* launches.launch(rest).pipe(Effect.flip);
+    const failed = yield* launches.launch(trustedMutationAuthority, rest).pipe(Effect.flip);
     assert.equal(failed._tag, "ThreadLaunchError");
     assert.equal(failed.operation, "create-thread");
     assert.include(String(failed.cause), "cannot be replayed");
@@ -1770,7 +1792,10 @@ it.effect("bounds concurrent first launches to one thread per command", () =>
       // transient replay conflict that the next attempt resolves — the race
       // can never persist a second thread.
       const results = yield* Effect.all(
-        [launches.launch(rest).pipe(Effect.exit), launches.launch(rest).pipe(Effect.exit)],
+        [
+          launches.launch(trustedMutationAuthority, rest).pipe(Effect.exit),
+          launches.launch(trustedMutationAuthority, rest).pipe(Effect.exit),
+        ],
         { concurrency: "unbounded" },
       );
       const winner = results.find(Exit.isSuccess);
@@ -1785,7 +1810,7 @@ it.effect("bounds concurrent first launches to one thread per command", () =>
         assert.equal(error._tag, "ThreadLaunchError");
         assert.equal(error.operation, "create-thread");
         assert.include(String(error.cause), "cannot be replayed");
-        const retried = yield* launches.launch(rest);
+        const retried = yield* launches.launch(trustedMutationAuthority, rest);
         assert.equal(retried.threadId, threadId);
       }
       const projectThreads = yield* threads.listProjectThreads({
@@ -1821,9 +1846,15 @@ it.effect("deduplicates retried launch side effects in-process", () =>
         thread: "thread:launch:retry",
         message: "Only once",
       });
-      const [first, retry] = yield* Effect.all([launches.launch(input), launches.launch(input)], {
-        concurrency: "unbounded",
-      });
+      const [first, retry] = yield* Effect.all(
+        [
+          launches.launch(trustedMutationAuthority, input),
+          launches.launch(trustedMutationAuthority, input),
+        ],
+        {
+          concurrency: "unbounded",
+        },
+      );
       yield* Deferred.await(setupEntered);
       assert.equal(first.threadId, retry.threadId);
       assert.isFalse(first.resumed);
@@ -1851,7 +1882,7 @@ it.effect("does not let a failing same-command caller strand a concurrent durabl
       const [failed, launched] = yield* Effect.all(
         [
           launches
-            .launch({
+            .launch(trustedMutationAuthority, {
               ...launchInput({
                 command,
                 thread: "thread:launch:failed-owner-race",
@@ -1861,6 +1892,7 @@ it.effect("does not let a failing same-command caller strand a concurrent durabl
             })
             .pipe(Effect.exit),
           launches.launch(
+            trustedMutationAuthority,
             launchInput({
               command,
               thread: "thread:launch:successful-peer",
@@ -1903,7 +1935,7 @@ it.effect("schedules an accepted preparing message exactly once across concurren
       });
       const messageId = MessageId.make("message:launch:accepted-before-fork");
 
-      yield* threads.dispatch({
+      yield* threads.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         commandId: input.commandId,
         threadId: input.threadId,
@@ -1917,7 +1949,7 @@ it.effect("schedules an accepted preparing message exactly once across concurren
         createdBy: input.createdBy,
         creationSource: input.creationSource,
       });
-      yield* threads.dispatch({
+      yield* threads.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         commandId: CommandId.make(`${input.commandId}:initial-message`),
         threadId: input.threadId,
@@ -1932,9 +1964,15 @@ it.effect("schedules an accepted preparing message exactly once across concurren
       const preparing = yield* threads.getThreadProjection(trustedReadAuthority, input.threadId);
       assert.equal(preparing.runs[0]?.status, "preparing");
 
-      const [first, second] = yield* Effect.all([launches.launch(input), launches.launch(input)], {
-        concurrency: "unbounded",
-      });
+      const [first, second] = yield* Effect.all(
+        [
+          launches.launch(trustedMutationAuthority, input),
+          launches.launch(trustedMutationAuthority, input),
+        ],
+        {
+          concurrency: "unbounded",
+        },
+      );
       yield* Deferred.await(setupEntered);
       assert.isTrue(first.resumed);
       assert.isTrue(second.resumed);
@@ -1966,7 +2004,7 @@ it.effect("creates a strong provider-thread mapping for an imported native sessi
       },
     };
 
-    const launched = yield* launches.launch(input);
+    const launched = yield* launches.launch(trustedMutationAuthority, input);
 
     assert.deepInclude(launched.projection.providerThreads[0], {
       id: IdAllocator.deriveProviderThread({
@@ -2037,10 +2075,10 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
         attachments: [attachment],
       },
     };
-    const failed = yield* ThreadMessageIntake.launchThread(input).pipe(
+    const failed = yield* ThreadMessageIntake.launchThread(trustedMutationAuthority, input).pipe(
       Effect.provideService(ThreadLaunch.ThreadLaunchService, {
-        launch: (request) =>
-          launches.launch(request).pipe(
+        launch: (_authority, request) =>
+          launches.launch(trustedMutationAuthority, request).pipe(
             Effect.andThen(
               new ThreadLaunch.ThreadLaunchError({
                 operation: "create-thread",
@@ -2079,7 +2117,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     assert.deepEqual(yield* fs.readFile(storedPath), new Uint8Array([1, 2, 3, 4]));
     assert.deepEqual(yield* fs.readFile(pendingPath), new Uint8Array([1, 2, 3, 4]));
 
-    const replayed = yield* ThreadMessageIntake.launchThread(input);
+    const replayed = yield* ThreadMessageIntake.launchThread(trustedMutationAuthority, input);
     assert.equal(replayed.projection.messages[0]?.id, stored.id);
     assert.deepEqual(replayed.projection.messages[0]?.attachments, stored.attachments);
     const claimedFiles = Effect.map(fs.readDirectory(config.attachmentsDir), (files) =>
@@ -2087,14 +2125,14 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     );
     assert.equal((yield* claimedFiles).length, 1);
 
-    const missingProject = yield* ThreadMessageIntake.launchThread({
+    const missingProject = yield* ThreadMessageIntake.launchThread(trustedMutationAuthority, {
       ...input,
       commandId: CommandId.make("intake-no-project"),
       projectId: ProjectId.make("missing-project"),
     }).pipe(Effect.flip);
     assert.equal(missingProject._tag, "ThreadLaunchError");
     assert.equal((yield* claimedFiles).length, 1);
-    const missingThread = yield* ThreadMessageIntake.dispatchCommand({
+    const missingThread = yield* ThreadMessageIntake.dispatchCommand(trustedMutationAuthority, {
       type: "message.dispatch",
       commandId: CommandId.make("intake-no-thread"),
       threadId: ThreadId.make("missing-thread"),
@@ -2109,7 +2147,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     assert.equal((yield* claimedFiles).length, 1);
 
     // Both ordinary command intake (RPC) and send intake (MCP) use the same store.
-    const dispatch = ThreadMessageIntake.dispatchCommand({
+    const dispatch = ThreadMessageIntake.dispatchCommand(trustedMutationAuthority, {
       type: "message.dispatch",
       commandId: CommandId.make("intake-dispatch"),
       threadId: input.threadId,
@@ -2148,7 +2186,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     });
     assert.isNotNull(filePath);
     yield* fs.writeFile(filePath, new Uint8Array([5, 6, 7, 8]));
-    const edit = ThreadMessageIntake.dispatchCommand({
+    const edit = ThreadMessageIntake.dispatchCommand(trustedMutationAuthority, {
       type: "queued-run.edit",
       commandId: CommandId.make("intake-edit"),
       threadId: input.threadId,
@@ -2177,7 +2215,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     assert.deepEqual(yield* fs.readFile(durableFilePath), new Uint8Array([5, 6, 7, 8]));
     assert.deepEqual(yield* fs.readFile(filePath), new Uint8Array([5, 6, 7, 8]));
     const beforeRejectedEdit = (yield* claimedFiles).length;
-    const rejectedEdit = yield* ThreadMessageIntake.dispatchCommand({
+    const rejectedEdit = yield* ThreadMessageIntake.dispatchCommand(trustedMutationAuthority, {
       type: "queued-run.edit",
       commandId: CommandId.make("intake-edit-rejected"),
       threadId: input.threadId,
@@ -2188,7 +2226,7 @@ it.effect("shared intake preserves durable attachment bytes after a lost launch 
     assert.equal(rejectedEdit._tag, "OrchestratorCommandRejectedError");
     assert.equal((yield* claimedFiles).length, beforeRejectedEdit);
     assert.deepEqual(yield* fs.readFile(filePath), new Uint8Array([5, 6, 7, 8]));
-    const send = ThreadMessageIntake.sendToThread({
+    const send = ThreadMessageIntake.sendToThread(trustedMutationAuthority, {
       commandId: CommandId.make("intake-send"),
       projectId,
       threadId: input.threadId,
@@ -2232,7 +2270,7 @@ it.effect("cancels tracked setup before provider work is released", () =>
         message: "Start",
         workspace: { type: "worktree", baseRef: "main" },
       });
-      const launched = yield* launches.launch(input);
+      const launched = yield* launches.launch(trustedMutationAuthority, input);
       yield* Deferred.await(entered);
       assert.equal((yield* tracker.get(launched.threadId))?.phase, "running");
       assert.isTrue(yield* tracker.cancel(launched.threadId));
@@ -2269,6 +2307,7 @@ it.effect.each([0, 1])("releases an async setup before its completion with exit 
       const threads = yield* ThreadManagement.ThreadManagementService;
       const tracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
       const launched = yield* launches.launch(
+        trustedMutationAuthority,
         launchInput({
           command: `command:launch:async-${exitCode}`,
           thread: `thread:launch:async-${exitCode}`,

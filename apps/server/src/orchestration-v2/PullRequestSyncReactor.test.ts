@@ -202,7 +202,7 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
       return yield* options.stack?.(input) ?? Effect.succeed(null);
     });
 
-  const dispatch: Orchestrator.OrchestratorV2Shape["dispatch"] = (command) => {
+  const dispatch: Orchestrator.OrchestratorV2Shape["dispatch"] = (_authority, command) => {
     if (command.type === "thread.pull-request-link.sync") {
       return Ref.update(syncCommands, (recorded) => [...recorded, command]).pipe(
         Effect.as({ sequence: 1, storedEvents: [] }),

@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -69,7 +70,7 @@ it.effect.each(forkCases)(
       const providerTurnId = ProviderTurnId.make("interrupted-source-turn");
       const rootNodeId = NodeId.make("interrupted-source-root");
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         commandId: CommandId.make("create-source"),
         threadId: sourceThreadId,
@@ -218,7 +219,7 @@ it.effect.each(forkCases)(
           ],
         });
       }
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.fork",
         commandId: CommandId.make("fork-source"),
         sourceThreadId,
@@ -227,7 +228,7 @@ it.effect.each(forkCases)(
         createdBy: "user",
         creationSource: "web",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         commandId: CommandId.make("continue-fork"),
         threadId: targetThreadId,

@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
@@ -340,7 +341,7 @@ export const make = Effect.gen(function* () {
         });
         if (settledAt === null) return thread;
         const uuid = yield* crypto.randomUUIDv4;
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.auto-settle",
           commandId: CommandId.make(`server:auto-settle:${thread.id}:${uuid}`),
           threadId: thread.id,

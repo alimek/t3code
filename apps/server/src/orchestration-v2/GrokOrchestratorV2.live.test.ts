@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -146,7 +147,7 @@ describe.runIf(process.env.T3_GROK_LIVE_ORCHESTRATOR === "1")("Grok V2 live orch
         const targetThreadId = ThreadId.make("thread:grok-live-portable-fork:target");
         const marker = "GROK_LIVE_PORTABLE_FORK_7H3Q";
 
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -161,7 +162,7 @@ describe.runIf(process.env.T3_GROK_LIVE_ORCHESTRATOR === "1")("Grok V2 live orch
           worktreePath: null,
         });
         yield* Console.log("Grok live source thread created; dispatching source prompt.");
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",
@@ -177,7 +178,7 @@ describe.runIf(process.env.T3_GROK_LIVE_ORCHESTRATOR === "1")("Grok V2 live orch
         const sourceProjection = yield* waitForIdle(sourceThreadId);
         yield* Console.log("Grok live source turn completed; dispatching portable fork.");
 
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.fork",
           createdBy: "user",
           creationSource: "web",
@@ -187,7 +188,7 @@ describe.runIf(process.env.T3_GROK_LIVE_ORCHESTRATOR === "1")("Grok V2 live orch
           sourcePoint: { type: "latest_stable" },
           title: "Grok live portable fork target",
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",

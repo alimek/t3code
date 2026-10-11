@@ -1,3 +1,9 @@
+import {
+  authorizeCommandAdmission,
+  authorizeCommandReceipt,
+  authorizeThreadMutation,
+  type MutationAuthority,
+} from "../auth/CommandAuthorization.ts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -49,6 +55,8 @@ import { decodeThreadHistoryCursor } from "./threadHistoryPaging.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
+
+const isOrchestratorError = Schema.is(Orchestrator.OrchestratorV2Error);
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
@@ -300,6 +308,7 @@ export interface ThreadManagementServiceShape {
     threadId: ThreadId,
   ) => Effect.Effect<void, LegacyV1ThreadImporter.LegacyV1ThreadImportError>;
   readonly dispatch: (
+    authority: MutationAuthority,
     command: OrchestrationV2ServerCommand,
   ) => Effect.Effect<Orchestrator.OrchestratorV2DispatchResult, Orchestrator.OrchestratorV2Error>;
   readonly getThreadHistoryPage: AuthorizedRead<
@@ -374,6 +383,7 @@ export interface ThreadManagementServiceShape {
     readonly includeSubagents: boolean;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2ThreadShell>, ThreadManagementError>;
   readonly sendToThread: (
+    authority: MutationAuthority,
     input: ThreadManagementSendInput,
   ) => Effect.Effect<ThreadManagementSendResult, ThreadManagementFailure>;
   readonly waitForThread: (
@@ -386,24 +396,31 @@ export interface ThreadManagementServiceShape {
    * way leaves the thread active, as does anything `thread.settle` refuses
    * then, such as a queued message.
    */
-  readonly settleAfterRun: (input: {
-    readonly projectId: ProjectId;
-    readonly threadId: ThreadId;
-    readonly runId: RunId;
-  }) => Effect.Effect<void, ThreadManagementFailure>;
+  readonly settleAfterRun: (
+    authority: MutationAuthority,
+    input: {
+      readonly projectId: ProjectId;
+      readonly threadId: ThreadId;
+      readonly runId: RunId;
+    },
+  ) => Effect.Effect<void, ThreadManagementFailure>;
   /**
    * Settles a thread. When the thread's own agent asks, it is mid-turn, so
    * the thread settles through `settleAfterRun` once that turn ends.
    */
-  readonly settleThread: (input: {
-    readonly threadId: ThreadId;
-    readonly commandId: CommandId;
-    readonly byOwnAgent: boolean;
-  }) => Effect.Effect<
+  readonly settleThread: (
+    authority: MutationAuthority,
+    input: {
+      readonly threadId: ThreadId;
+      readonly commandId: CommandId;
+      readonly byOwnAgent: boolean;
+    },
+  ) => Effect.Effect<
     { readonly sequence: number } | { readonly settlesWhenTurnEnds: true },
     Orchestrator.OrchestratorV2Error
   >;
   readonly interruptThread: (
+    authority: MutationAuthority,
     input: ThreadManagementInterruptInput,
   ) => Effect.Effect<ThreadManagementInterruptResult, ThreadManagementFailure>;
   /**
@@ -411,11 +428,14 @@ export interface ThreadManagementServiceShape {
    * derive from `commandId`, so a retry repeats nothing that already stopped. A task that
    * cannot be stopped does not keep the others running: all are tried, then it fails.
    */
-  readonly stopDelegatedTasks: (input: {
-    readonly threadId: ThreadId;
-    readonly commandId: CommandId;
-    readonly reason?: string | undefined;
-  }) => Effect.Effect<void, Orchestrator.OrchestratorV2Error>;
+  readonly stopDelegatedTasks: (
+    authority: MutationAuthority,
+    input: {
+      readonly threadId: ThreadId;
+      readonly commandId: CommandId;
+      readonly reason?: string | undefined;
+    },
+  ) => Effect.Effect<void, Orchestrator.OrchestratorV2Error>;
   readonly getThreadEventSequence: Orchestrator.OrchestratorV2["Service"]["getThreadEventSequence"];
   readonly recoverDelegatedTask: Orchestrator.OrchestratorV2["Service"]["recoverDelegatedTask"];
   readonly delegatedTaskResultPending: Orchestrator.OrchestratorV2["Service"]["delegatedTaskResultPending"];
@@ -613,8 +633,20 @@ const make = Effect.gen(function* () {
       options.anchorThreadId,
     );
 
-  const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
-    ensureCommandTranscripts(command).pipe(Effect.andThen(orchestrator.dispatch(command)));
+  const dispatch: ThreadManagementServiceShape["dispatch"] = (authority, command) =>
+    authorizeCommandAdmission(sql, { authority, command }, command.commandId).pipe(
+      Effect.andThen(ensureCommandTranscripts(command)),
+      Effect.andThen(orchestrator.dispatch(authority, command)),
+      Effect.mapError((cause) =>
+        isOrchestratorError(cause)
+          ? cause
+          : new Orchestrator.OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause,
+            }),
+      ),
+    );
 
   const getProjectThread: ThreadManagementServiceShape["getProjectThread"] = (input) =>
     getThreadProjection(trustedReadAuthority, input.threadId).pipe(
@@ -690,8 +722,28 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const sendToThread: ThreadManagementServiceShape["sendToThread"] = (input) =>
+  const sendToThread: ThreadManagementServiceShape["sendToThread"] = (authority, input) =>
     Effect.gen(function* () {
+      const command = {
+        type: "message.dispatch",
+        commandId: input.commandId,
+        threadId: input.threadId,
+        messageId: input.messageId,
+        ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
+        ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
+        text: input.text,
+        attachments: input.attachments,
+        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+        dispatchMode: { type: "start_immediately" },
+        createdBy: input.createdBy,
+        creationSource: input.creationSource,
+      } satisfies OrchestrationV2Command;
+      yield* authorizeCommandAdmission(sql, { authority, command }, input.commandId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new Orchestrator.OrchestratorProjectionError({ threadId: input.threadId, cause }),
+        ),
+      );
       const target = yield* getProjectThreadRecords(input, ["runs", "providerTurns"]);
       if (target.thread.archivedAt !== null) {
         return yield* new ThreadManagementThreadArchivedError({
@@ -723,20 +775,13 @@ const make = Effect.gen(function* () {
         };
       }
 
-      const dispatch = yield* orchestrator.dispatch({
-        type: "message.dispatch",
-        commandId: input.commandId,
-        threadId: input.threadId,
-        messageId: input.messageId,
-        ...(input.scheduledTaskId === undefined ? {} : { scheduledTaskId: input.scheduledTaskId }),
-        ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
-        text: input.text,
-        attachments: input.attachments,
-        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-        dispatchMode,
-        createdBy: input.createdBy,
-        creationSource: input.creationSource,
-      });
+      const dispatch = yield* orchestrator.dispatch(authority, { ...command, dispatchMode });
+      yield* authorizeCommandReceipt(sql, authority, input.commandId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new Orchestrator.OrchestratorProjectionError({ threadId: input.threadId, cause }),
+        ),
+      );
       const projection = yield* getProjectThreadRecords(input, ["runs", "messages", "turnItems"], {
         messageIds: [input.messageId],
         turnItemTypes: ["user_message"],
@@ -868,11 +913,17 @@ const make = Effect.gen(function* () {
 
   const settleAfterRun: ThreadManagementServiceShape["settleAfterRun"] = Effect.fn(
     "orchestrationV2.threadManagement.settleAfterRun",
-  )(function* (input) {
+  )(function* (authority, input) {
+    yield* authorizeThreadMutation(sql, authority, input.threadId, input.runId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new Orchestrator.OrchestratorProjectionError({ threadId: input.threadId, cause }),
+      ),
+    );
     // A turn that outlives this wait leaves its thread active.
     const { run } = yield* waitForThread({ ...input, timeoutMs: SETTLE_AFTER_RUN_WAIT_MS });
     if (run?.status !== "completed") return;
-    yield* dispatch({
+    yield* dispatch(authority, {
       type: "thread.settle",
       commandId: CommandId.make(`server:settle-after-run:${input.runId}`),
       threadId: input.threadId,
@@ -881,17 +932,23 @@ const make = Effect.gen(function* () {
 
   const settleThread: ThreadManagementServiceShape["settleThread"] = Effect.fn(
     "orchestrationV2.threadManagement.settleThread",
-  )(function* (input) {
+  )(function* (authority, input) {
+    yield* authorizeThreadMutation(sql, authority, input.threadId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new Orchestrator.OrchestratorProjectionError({ threadId: input.threadId, cause }),
+      ),
+    );
     const shell = input.byOwnAgent ? yield* orchestrator.getThreadShell(input.threadId) : null;
     if (shell != null && shell.activeRunId !== null) {
-      yield* settleAfterRun({
+      yield* settleAfterRun(authority, {
         projectId: shell.projectId,
         threadId: shell.id,
         runId: shell.activeRunId,
       }).pipe(Effect.ignoreCause({ log: true }), Effect.forkIn(layerScope));
       return { settlesWhenTurnEnds: true } as const;
     }
-    const result = yield* dispatch({
+    const result = yield* dispatch(authority, {
       type: "thread.settle",
       commandId: input.commandId,
       threadId: input.threadId,
@@ -899,8 +956,20 @@ const make = Effect.gen(function* () {
     return { sequence: result.sequence };
   });
 
-  const interruptThread: ThreadManagementServiceShape["interruptThread"] = (input) =>
+  const interruptThread: ThreadManagementServiceShape["interruptThread"] = (authority, input) =>
     Effect.gen(function* () {
+      yield* authorizeThreadMutation(sql, authority, input.threadId, input.runId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new Orchestrator.OrchestratorProjectionError({ threadId: input.threadId, cause }),
+        ),
+      );
+      yield* authorizeCommandReceipt(sql, authority, input.commandId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new Orchestrator.OrchestratorProjectionError({ threadId: input.threadId, cause }),
+        ),
+      );
       const target = yield* getProjectThreadRecords(input, ["runs", "providerTurns"]);
       const explicitRun =
         input.runId === undefined
@@ -936,7 +1005,7 @@ const make = Effect.gen(function* () {
           runId: input.runId,
         });
       }
-      const dispatch = yield* orchestrator.dispatch({
+      const dispatch = yield* orchestrator.dispatch(authority, {
         type: "run.interrupt",
         commandId: input.commandId,
         threadId: input.threadId,
@@ -946,20 +1015,29 @@ const make = Effect.gen(function* () {
       return { type: "interrupt_requested", run: interruptibleRun, dispatch } as const;
     });
 
-  const stopDelegatedTasks: ThreadManagementServiceShape["stopDelegatedTasks"] = (input) =>
+  const stopDelegatedTasks: ThreadManagementServiceShape["stopDelegatedTasks"] = (
+    authority,
+    input,
+  ) =>
     Effect.gen(function* () {
+      yield* authorizeThreadMutation(sql, authority, input.threadId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new Orchestrator.OrchestratorProjectionError({ threadId: input.threadId, cause }),
+        ),
+      );
       const { subagents } = yield* orchestrator.getThreadRecords(input.threadId, ["subagents"]);
       const failures: Array<Orchestrator.OrchestratorV2Error> = [];
       for (const task of subagents) {
         if (task.origin !== "app_owned" || task.childThreadId === null) continue;
         const threadId = task.childThreadId;
-        yield* dispatch({
+        yield* dispatch(authority, {
           type: "thread.stop",
           commandId: CommandId.make(`${input.commandId}:stop:${threadId}`),
           threadId,
           ...(input.reason === undefined ? {} : { reason: input.reason }),
         }).pipe(
-          Effect.andThen(stopDelegatedTasks({ ...input, threadId })),
+          Effect.andThen(stopDelegatedTasks(authority, { ...input, threadId })),
           Effect.catch((error) =>
             Effect.logWarning("Unable to stop a delegated task", {
               parentThreadId: input.threadId,

@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import {
   CommandId,
   type OrchestrationProjectShell,
@@ -433,7 +434,7 @@ export const make = Effect.gen(function* () {
       now,
       idAllocator,
     });
-    const committed = yield* eventSink.commitCommand({
+    const committed = yield* eventSink.commitCommand(trustedMutationAuthority, {
       commandId: command.commandId,
       commandType: command.type,
       threadId,

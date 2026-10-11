@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -33,7 +34,7 @@ const layerIntakeTest = ServerConfig.layerTest(process.cwd(), {
 
 const layerFailingDispatch = (captured: OrchestrationV2ServerCommand[]) =>
   Layer.mock(ThreadManagementService.ThreadManagementService)({
-    dispatch: (command) => {
+    dispatch: (_authority, command) => {
       captured.push(command);
       return Effect.fail(
         new OrchestratorDispatchError({
@@ -134,7 +135,7 @@ it.effect("claims question uploads and passes readable paths through the V2 requ
       new Uint8Array([1, 2, 3]),
     );
     const captured: OrchestrationV2ServerCommand[] = [];
-    yield* dispatchCommand({
+    yield* dispatchCommand(trustedMutationAuthority, {
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-1"),
       threadId: ThreadId.make("thread-answer"),
@@ -178,7 +179,7 @@ it.effect("rolls back earlier question claims when a later pending upload is mis
       new Uint8Array([9, 9, 9, 9]),
     );
     const captured: OrchestrationV2ServerCommand[] = [];
-    const result = yield* dispatchCommand({
+    const result = yield* dispatchCommand(trustedMutationAuthority, {
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-missing-pending"),
       threadId,
@@ -239,7 +240,7 @@ it.effect("rolls back earlier question claims when attachment path preparation f
       new Uint8Array([1, 2, 3]),
     );
     const captured: OrchestrationV2ServerCommand[] = [];
-    const result = yield* dispatchCommand({
+    const result = yield* dispatchCommand(trustedMutationAuthority, {
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-missing-claimed"),
       threadId: ThreadId.make("thread-path-fail"),
@@ -291,7 +292,7 @@ it.effect("retains claimed copies when dispatch failure may have been accepted",
       new Uint8Array([1, 2, 3]),
     );
     const captured: OrchestrationV2ServerCommand[] = [];
-    const result = yield* dispatchCommand({
+    const result = yield* dispatchCommand(trustedMutationAuthority, {
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-ambiguous"),
       threadId: ThreadId.make("thread-ambiguous"),
@@ -331,7 +332,7 @@ it.effect("releases claimed copies when the command was already rejected", () =>
     );
     // A retry of a previously rejected command claims fresh copies, then the
     // orchestrator replays the rejection without touching them.
-    const result = yield* dispatchCommand({
+    const result = yield* dispatchCommand(trustedMutationAuthority, {
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-rejected"),
       threadId: ThreadId.make("thread-rejected"),
@@ -351,7 +352,7 @@ it.effect("releases claimed copies when the command was already rejected", () =>
     }).pipe(
       Effect.provide(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
-          dispatch: (command) =>
+          dispatch: (_authority, command) =>
             Effect.fail(
               new OrchestratorCommandPreviouslyRejectedError({
                 commandId: command.commandId,
@@ -401,7 +402,7 @@ it.effect("releases claimed copies when dispatch replays an earlier accepted res
       requestId: "request-replay",
       attachmentsByQuestionId: { q: [earlierAttachment] },
     });
-    const result = yield* dispatchCommand({
+    const result = yield* dispatchCommand(trustedMutationAuthority, {
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-replay"),
       threadId,
@@ -457,7 +458,7 @@ it.effect("releases claimed copies when the recorded answer has no attachments",
       requestId: "request-empty-answer",
       attachmentsByQuestionId: {},
     });
-    const result = yield* dispatchCommand({
+    const result = yield* dispatchCommand(trustedMutationAuthority, {
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-empty"),
       threadId,
@@ -508,7 +509,7 @@ it.effect("releases claimed copies when the recorded answer was text-only", () =
       threadId,
       requestId: "request-text-only",
     });
-    const result = yield* dispatchCommand({
+    const result = yield* dispatchCommand(trustedMutationAuthority, {
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-text-only"),
       threadId,
@@ -557,7 +558,7 @@ it.effect("retains claimed copies referenced by a fresh recorded answer", () =>
       NodePath.join(config.attachmentsDir, `${secondId}.png`),
       new Uint8Array([7, 7]),
     );
-    const result = yield* dispatchCommand({
+    const result = yield* dispatchCommand(trustedMutationAuthority, {
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-fresh"),
       threadId,
@@ -587,7 +588,7 @@ it.effect("retains claimed copies referenced by a fresh recorded answer", () =>
       Effect.provide(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           // A fresh commit records exactly the attachments this attempt claimed.
-          dispatch: (command) =>
+          dispatch: (_authority, command) =>
             Effect.succeed({
               sequence: 1,
               storedEvents: answeredRespondEvents({
@@ -626,7 +627,7 @@ it.effect("releases claimed copies when preparation dies with a defect", () =>
       },
     };
     const captured: OrchestrationV2ServerCommand[] = [];
-    const result = yield* dispatchCommand({
+    const result = yield* dispatchCommand(trustedMutationAuthority, {
       type: "runtime-request.respond",
       commandId: CommandId.make("answer-defect"),
       threadId: ThreadId.make("thread-defect"),
@@ -694,7 +695,7 @@ it.effect("a retried response re-claims the preserved pending uploads", () =>
       },
     };
     const captured: OrchestrationV2ServerCommand[] = [];
-    const first = yield* dispatchCommand(command).pipe(
+    const first = yield* dispatchCommand(trustedMutationAuthority, command).pipe(
       Effect.provide(layerFailingDispatch(captured)),
       Effect.result,
     );
@@ -705,10 +706,10 @@ it.effect("a retried response re-claims the preserved pending uploads", () =>
       NodePath.join(config.attachmentsDir, `${lateId}.png`),
       new Uint8Array([7, 7]),
     );
-    const retry = yield* dispatchCommand(command).pipe(
+    const retry = yield* dispatchCommand(trustedMutationAuthority, command).pipe(
       Effect.provide(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
-          dispatch: (dispatched) => {
+          dispatch: (_authority, dispatched) => {
             captured.push(dispatched);
             return Effect.succeed({ sequence: 1, storedEvents: [] });
           },
@@ -750,7 +751,7 @@ it.effect("applies the image budget across all questions before dispatch", () =>
     }));
     const captured: OrchestrationV2ServerCommand[] = [];
     const result = yield* Effect.exit(
-      dispatchCommand({
+      dispatchCommand(trustedMutationAuthority, {
         type: "runtime-request.respond",
         commandId: CommandId.make("command-image-budget"),
         threadId: ThreadId.make("thread-image-budget"),

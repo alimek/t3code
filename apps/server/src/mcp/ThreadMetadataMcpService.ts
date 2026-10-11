@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import {
   CommandId,
   OrchestratorMcpFailure,
@@ -181,6 +182,7 @@ const make = Effect.gen(function* () {
     });
     const dispatched = yield* threadManagement
       .dispatch(
+        trustedMutationAuthority,
         metadataCommand({
           commandId: updateCommandId,
           threadId,

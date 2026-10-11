@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
@@ -687,7 +688,7 @@ export const make = Effect.gen(function* () {
         retiredEffects = retiredEffectIds.length;
       } else {
         const result = yield* eventSink
-          .commitCommand({
+          .commitCommand(trustedMutationAuthority, {
             commandId,
             threadId: projection.thread.id,
             commandType: "provider-runtime.reconcile",

@@ -94,7 +94,8 @@ function layerTest(input: {
 }) {
   const layerThreads = Layer.mock(ThreadManagementService.ThreadManagementService)({
     getThreadRecords: input.getThreadRecords,
-    dispatch: (command) => Queue.offer(input.dispatched, command).pipe(Effect.as({} as never)),
+    dispatch: (_authority, command) =>
+      Queue.offer(input.dispatched, command).pipe(Effect.as({} as never)),
   });
   const layerWorker = ProviderContinuationService.layer.pipe(
     Layer.provide(
@@ -280,7 +281,7 @@ describe("ProviderContinuationService", () => {
       const dispatched = yield* Queue.unbounded<unknown>();
       const layerThreads = Layer.mock(ThreadManagementService.ThreadManagementService)({
         getThreadRecords: () => Effect.succeed(delegatedProjection()),
-        dispatch: (command) =>
+        dispatch: (_authority, command) =>
           Ref.getAndUpdate(attempts, (count) => count + 1).pipe(
             Effect.flatMap((attempt) =>
               attempt === 0

@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -65,7 +66,7 @@ const pullRequest = (number: number) => ({
 const createWatchingThread = (threadId: ThreadId, number: number) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.create",
       commandId: CommandId.make(`create:${threadId}`),
       threadId,
@@ -85,7 +86,7 @@ const createWatchingThread = (threadId: ThreadId, number: number) =>
 const watch = (threadId: ThreadId, number: number) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.pull-request.watch",
       commandId: CommandId.make(`watch:${threadId}:${number}`),
       threadId,
@@ -98,7 +99,7 @@ const watch = (threadId: ThreadId, number: number) =>
 const send = (threadId: ThreadId, text: string, type: "start_immediately" | "queue_after_active") =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "message.dispatch",
       commandId: CommandId.make(`send:${threadId}:${text}`),
       threadId,
@@ -116,7 +117,7 @@ const delegate = (parentThreadId: ThreadId, task: string) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const parentRun = (yield* orchestrator.getThreadProjection(parentThreadId)).runs.at(-1)!;
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "delegated_task.request",
       commandId: CommandId.make(`delegate:${task}`),
       parentThreadId,
@@ -177,7 +178,7 @@ it.effect("Stop ends watches, holds queues, and stops the delegated tasks under 
     const secondRun = (yield* orchestrator.getThreadProjection(parentThreadId)).runs.at(-1)!;
 
     const stopCommandId = CommandId.make("stop-parent");
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "run.interrupt",
       commandId: stopCommandId,
       threadId: parentThreadId,
@@ -200,7 +201,10 @@ it.effect("Stop ends watches, holds queues, and stops the delegated tasks under 
     );
 
     // What the delegated-tasks.stop effect runs once the Stop commits.
-    yield* threads.stopDelegatedTasks({ threadId: parentThreadId, commandId: stopCommandId });
+    yield* threads.stopDelegatedTasks(trustedMutationAuthority, {
+      threadId: parentThreadId,
+      commandId: stopCommandId,
+    });
     assert.deepEqual(yield* threadState(childThreadId), {
       runs: ["interrupted", "queued:held"],
       watched: [],
@@ -208,7 +212,10 @@ it.effect("Stop ends watches, holds queues, and stops the delegated tasks under 
     assert.deepEqual((yield* threadState(grandchildThreadId)).runs, ["interrupted"]);
 
     // A retried effect stops nothing twice.
-    yield* threads.stopDelegatedTasks({ threadId: parentThreadId, commandId: stopCommandId });
+    yield* threads.stopDelegatedTasks(trustedMutationAuthority, {
+      threadId: parentThreadId,
+      commandId: stopCommandId,
+    });
     assert.deepEqual((yield* threadState(childThreadId)).runs, ["interrupted", "queued:held"]);
   }).pipe(Effect.provide(layerTest)),
 );
@@ -221,14 +228,14 @@ it.effect(
       const threadId = ThreadId.make("thread:stop-idle");
       yield* createWatchingThread(threadId, 3);
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.stop",
         commandId: CommandId.make("stop-idle"),
         threadId,
       });
       assert.deepEqual(yield* threadState(threadId), { runs: [], watched: [] });
 
-      const again = yield* orchestrator.dispatch({
+      const again = yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.stop",
         commandId: CommandId.make("stop-idle-again"),
         threadId,
@@ -257,7 +264,7 @@ it.effect("a run Stop reached cannot delegate or start a watch, even after it en
     // A queued message the user cancelled does not count as the latest run.
     yield* send(threadId, "queued", "queue_after_active");
     const queued = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "queued-run.cancel",
       commandId: CommandId.make("cancel-queued"),
       threadId,
@@ -310,7 +317,7 @@ it.effect("a run Stop reached cannot delegate or start a watch, even after it en
 
     // The user can still stop and restart a watch by hand.
     for (const watching of [false, true]) {
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.watch",
         commandId: CommandId.make(`manual-watch:${watching}`),
         threadId,
@@ -354,12 +361,12 @@ it.effect("thread.stop keeps a restart continuation of the stopped run from star
       )
     `;
 
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.stop",
       commandId: CommandId.make("stop-restart"),
       threadId,
     });
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "message.dispatch",
       commandId: CommandId.make("restart-continuation"),
       threadId,
@@ -426,7 +433,7 @@ it.effect.each(["thread.stop", "run.interrupt"] as const)(
           'pending', 0, ${at}, ${at}, ${at}
         )
       `;
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "queue.resume",
         commandId: CommandId.make("resume-older-queue"),
         threadId,
@@ -438,6 +445,7 @@ it.effect.each(["thread.stop", "run.interrupt"] as const)(
         "starting",
       );
       yield* orchestrator.dispatch(
+        trustedMutationAuthority,
         stopType === "thread.stop"
           ? { type: "thread.stop", commandId: CommandId.make("stop-resumed-queue"), threadId }
           : {
@@ -452,7 +460,7 @@ it.effect.each(["thread.stop", "run.interrupt"] as const)(
       const interrupted = stopped.runs.find((run) => run.id === queued!.id)!;
       assert.equal(interrupted.status, "interrupted");
       assert.equal(DateTime.toEpochMillis(interrupted.completedAt!), DateTime.toEpochMillis(now));
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         commandId: CommandId.make("restart-after-stop"),
         threadId,
@@ -499,7 +507,7 @@ it.effect("a delegated task that cannot be stopped fails the walk after its sibl
     });
 
     const walked = yield* Effect.exit(
-      threads.stopDelegatedTasks({
+      threads.stopDelegatedTasks(trustedMutationAuthority, {
         threadId: parentThreadId,
         commandId: CommandId.make("stop-partial"),
       }),
@@ -527,7 +535,7 @@ it.effect("thread.stop on a finished thread refuses a late agent watch", () =>
       payload: { ...run, status: "completed", startedAt: now, completedAt: now },
     });
 
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.stop",
       commandId: CommandId.make("stop-finished"),
       threadId,
@@ -573,7 +581,7 @@ it.effect("thread.stop marks a turn it cannot interrupt so a late agent watch is
       },
     });
 
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.stop",
       commandId: CommandId.make("stop-lost-session"),
       threadId,

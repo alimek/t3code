@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import {
   canonicalRepositoryKey,
   sourceControlRepositorySelector,
@@ -306,7 +307,7 @@ export const make = Effect.gen(function* () {
                   return failBackfill([thread]);
                 }
                 const uuid = yield* crypto.randomUUIDv4;
-                yield* orchestrator.dispatch({
+                yield* orchestrator.dispatch(trustedMutationAuthority, {
                   type: "thread.pull-request.sync",
                   commandId: CommandId.make(`server:thread-pull-request:${thread.id}:${uuid}`),
                   threadId: thread.id,

@@ -208,7 +208,7 @@ it.effect("settles a stopped run when its adapter has already lost the native tu
           cause: "Provider turn is not active.",
         }),
       threads: {
-        dispatch: (command) =>
+        dispatch: (_authority, command) =>
           Ref.update(events, (current) => [...current, command.type]).pipe(
             Effect.as({ sequence: 1, storedEvents: [] }),
           ),

@@ -143,7 +143,7 @@ const makeHarness = Effect.fn("makePullRequestsToolkitHarness")(function* (
   const commands = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
   const thread = options.thread === undefined ? makeThread([]) : options.thread;
   const project = options.project === undefined ? makeProject() : options.project;
-  const dispatch: Orchestrator.OrchestratorV2Shape["dispatch"] = (command) =>
+  const dispatch: Orchestrator.OrchestratorV2Shape["dispatch"] = (_authority, command) =>
     Effect.gen(function* () {
       const rejection = options.reject?.(command) ?? null;
       if (rejection !== null)

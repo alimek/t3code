@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -156,7 +157,7 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
     );
     const noteText =
       note.work.length === 0 ? undefined : restartCancelledBackgroundWorkNote(note.work);
-    yield* threads.dispatch({
+    yield* threads.dispatch(trustedMutationAuthority, {
       type: "message.dispatch",
       commandId: CommandId.make(`command:restart-continuation:${input.sourceRunId}`),
       threadId: input.threadId,

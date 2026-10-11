@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -58,7 +59,7 @@ it.effect(
       const sql = yield* SqlClient.SqlClient;
       const threadId = ThreadId.make("thread:control-dispatch");
       const now = yield* DateTime.now;
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         commandId: CommandId.make("create-control"),
         threadId,
@@ -73,7 +74,7 @@ it.effect(
         creationSource: "web",
       });
       for (const enabled of [false, true]) {
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.auto-settle.set",
           commandId: CommandId.make(`auto-settle-${enabled}`),
           threadId,
@@ -89,24 +90,24 @@ it.effect(
       (message_id, thread_id, run_id, node_id, role, streaming, created_at, updated_at, payload_json)
       VALUES ('obsolete', ${threadId}, NULL, NULL, 'assistant', 0, ${DateTime.formatIso(now)}, ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
       assert.equal((yield* Effect.exit(projections.getThreadProjection(threadId)))._tag, "Failure");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "queue.resume",
         commandId: CommandId.make("resume-empty-queue"),
         threadId,
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.metadata.update",
         commandId: CommandId.make("rename-control"),
         threadId,
         title: "After",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("mode-control"),
         threadId,
         runtimeMode: "approval-required",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.model-selection.set",
         commandId: CommandId.make("model-control"),
         threadId,
@@ -203,6 +204,7 @@ it.effect(
           },
         });
         yield* orchestrator.dispatch(
+          trustedMutationAuthority,
           mode === "live"
             ? {
                 type: "runtime-request.respond",
@@ -226,7 +228,7 @@ it.effect(
         assert.equal(response.node?.status, mode === "live" ? "completed" : "cancelled");
         assert.equal(response.item?.status, mode === "live" ? "completed" : "cancelled");
       }
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.metadata.update",
         commandId: CommandId.make("workspace-control"),
         threadId,
@@ -251,7 +253,7 @@ it.effect(
       yield* sql`INSERT INTO orchestration_v2_projection_context_handoffs
         (context_handoff_id, thread_id, target_run_id, to_provider_thread_id, strategy, status, updated_at, payload_json)
         VALUES ('obsolete-handoff', ${threadId}, 'old-run', 'old-provider-thread', 'full_thread_summary', 'ready', ${DateTime.formatIso(now)}, '{"obsolete":true}')`;
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         commandId: CommandId.make("dispatch-with-old-history"),
         threadId,
@@ -266,12 +268,12 @@ it.effect(
         turnItemTypes: ["user_message"],
       });
       assert.isAbove(fresh.turnItems.at(-1)!.ordinal, 900);
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.archive",
         commandId: CommandId.make("archive-with-old-history"),
         threadId,
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.delete",
         commandId: CommandId.make("delete-with-old-history"),
         threadId,
@@ -287,7 +289,7 @@ it.effect("implements a proposed plan that the command projection leaves out", (
     const threadId = ThreadId.make("thread:implement-plan");
     const planId = PlanId.make("plan:implement-plan");
     const now = yield* DateTime.now;
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.create",
       commandId: CommandId.make("create-implement-plan"),
       threadId,
@@ -317,7 +319,7 @@ it.effect("implements a proposed plan that the command projection leaves out", (
       },
     });
 
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "message.dispatch",
       commandId: CommandId.make("implement-plan"),
       threadId,
@@ -344,7 +346,7 @@ it.effect("settles only the stopped run's background work, once", () =>
     const threadId = ThreadId.make("thread:settle-binding");
     const providerThreadId = ProviderThreadId.make("provider-thread:settle-binding");
     const now = yield* DateTime.now;
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.create",
       commandId: CommandId.make("create-settle-binding"),
       threadId,
@@ -486,7 +488,7 @@ it.effect("settles only the stopped run's background work, once", () =>
       providerThreadId,
       providerTurnId: ProviderTurnId.make("provider-turn:settle-binding:1"),
     } as const;
-    yield* orchestrator.dispatch(settle);
+    yield* orchestrator.dispatch(trustedMutationAuthority, settle);
     assert.deepEqual(yield* itemStatuses, [
       `${commandItem(1)}:interrupted`,
       `${commandItem(2)}:running`,
@@ -498,7 +500,7 @@ it.effect("settles only the stopped run's background work, once", () =>
       ...settle,
       commandId: CommandId.make("stop-run-1-again:background-work-settled"),
     };
-    const first = yield* orchestrator.dispatch(emptySettle);
+    const first = yield* orchestrator.dispatch(trustedMutationAuthority, emptySettle);
     assert.lengthOf(first.storedEvents, 0);
     yield* projections.apply({
       id: EventId.make("settle-binding:item:late"),
@@ -525,7 +527,7 @@ it.effect("settles only the stopped run's background work, once", () =>
         input: "sleep 3",
       },
     });
-    const replayed = yield* orchestrator.dispatch(emptySettle);
+    const replayed = yield* orchestrator.dispatch(trustedMutationAuthority, emptySettle);
     assert.lengthOf(replayed.storedEvents, 0);
     assert.deepEqual(yield* itemStatuses, [
       `${commandItem(1)}:interrupted`,
@@ -547,7 +549,7 @@ it.effect("keeps delegated child pull-request links independent of the parent", 
       number: 123,
       url: "https://github.com/pingdotgg/t3code/pull/123",
     };
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.create",
       commandId: CommandId.make("create-parent-pr"),
       threadId: parentThreadId,
@@ -561,13 +563,13 @@ it.effect("keeps delegated child pull-request links independent of the parent", 
       createdBy: "user",
       creationSource: "web",
     });
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.metadata.update",
       commandId: CommandId.make("link-parent-pr"),
       threadId: parentThreadId,
       linkedPullRequest: parentPullRequest,
     });
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "message.dispatch",
       commandId: CommandId.make("start-parent-pr"),
       threadId: parentThreadId,
@@ -580,7 +582,7 @@ it.effect("keeps delegated child pull-request links independent of the parent", 
     });
     const parent = yield* projections.getThreadProjection(parentThreadId);
     const parentRun = parent.runs[0]!;
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "delegated_task.request",
       commandId: CommandId.make("delegate-parent-pr"),
       parentThreadId,
@@ -607,7 +609,7 @@ it.effect("keeps delegated child pull-request links independent of the parent", 
       number: 456,
       url: "https://github.com/pingdotgg/t3code/pull/456",
     };
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.metadata.update",
       commandId: CommandId.make("link-child-pr"),
       threadId: childThreadId,

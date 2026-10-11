@@ -38,19 +38,20 @@ export const threadReadDenied = () =>
     message: "This connection cannot read the requested thread resource.",
   });
 
-const authorizeOwnerThreadIds = Effect.fnUntraced(function* (
+export const authorizeOwnerThreadIds = Effect.fnUntraced(function* (
   sql: SqlClient.SqlClient,
   grant: AuthResourceGrant,
   threadIds: ReadonlyArray<ThreadId>,
+  includeDeleted = false,
 ) {
   const ids = [...new Set(threadIds)];
   if (ids.length === 0) return;
-  // Collection selectors admit tombstones; direct owners must still exist in a live project.
+  // Owners, including receipt tombstones, must remain registered in an admitted live project.
   const rows = yield* sql<{ readonly thread_id: string; readonly project_id: string }>`
     SELECT t.thread_id, t.project_id FROM json_each(${encodeIdList(ids)}) refs
     JOIN orchestration_v2_projection_threads t ON t.thread_id = refs.value
     JOIN projection_projects p ON p.project_id = t.project_id
-    WHERE t.deleted_at IS NULL AND p.deleted_at IS NULL
+    WHERE (${includeDeleted} OR t.deleted_at IS NULL) AND p.deleted_at IS NULL
   `;
   if (
     rows.length !== ids.length ||
@@ -60,10 +61,11 @@ const authorizeOwnerThreadIds = Effect.fnUntraced(function* (
 });
 
 /** Resolve registered owners without reading provider/node bodies. Every declared owner must exist. */
-const authorizeProviderIds = Effect.fnUntraced(function* (
+export const authorizeProviderIds = Effect.fnUntraced(function* (
   sql: SqlClient.SqlClient,
   grant: AuthResourceGrant,
   ids: ReadonlyArray<string>,
+  includeDeleted = false,
 ) {
   if (ids.length === 0) return;
   const rows = yield* sql<{
@@ -90,13 +92,14 @@ const authorizeProviderIds = Effect.fnUntraced(function* (
   const owners = rows.flatMap((row) =>
     [row.owner, row.node_owner].flatMap((id) => (id === null ? [] : [ThreadId.make(id)])),
   );
-  yield* authorizeOwnerThreadIds(sql, grant, owners);
+  yield* authorizeOwnerThreadIds(sql, grant, owners, includeDeleted);
 });
 
-const authorizeNodeIds = Effect.fnUntraced(function* (
+export const authorizeNodeIds = Effect.fnUntraced(function* (
   sql: SqlClient.SqlClient,
   grant: AuthResourceGrant,
   ids: ReadonlyArray<string>,
+  includeDeleted = false,
 ) {
   if (ids.length === 0) return;
   const rows = yield* sql<{ readonly owner: string | null }>`
@@ -105,13 +108,14 @@ const authorizeNodeIds = Effect.fnUntraced(function* (
   `;
   if (rows.some((row) => row.owner === null)) return yield* threadReadDenied();
   const owners = rows.flatMap((row) => (row.owner === null ? [] : [ThreadId.make(row.owner)]));
-  yield* authorizeOwnerThreadIds(sql, grant, owners);
+  yield* authorizeOwnerThreadIds(sql, grant, owners, includeDeleted);
 });
 
-const authorizeProviderTurnIds = Effect.fnUntraced(function* (
+export const authorizeProviderTurnIds = Effect.fnUntraced(function* (
   sql: SqlClient.SqlClient,
   grant: AuthResourceGrant,
   ids: ReadonlyArray<string>,
+  includeDeleted = false,
 ) {
   if (ids.length === 0) return;
   const rows = yield* sql<{
@@ -128,16 +132,19 @@ const authorizeProviderTurnIds = Effect.fnUntraced(function* (
     sql,
     grant,
     rows.flatMap((row) => (row.owner === null ? [] : [ThreadId.make(row.owner)])),
+    includeDeleted,
   );
   yield* authorizeProviderIds(
     sql,
     grant,
     rows.flatMap((row) => (row.provider === null ? [] : [row.provider])),
+    includeDeleted,
   );
   yield* authorizeNodeIds(
     sql,
     grant,
     rows.flatMap((row) => (row.node === null ? [] : [row.node])),
+    includeDeleted,
   );
 });
 
@@ -154,12 +161,31 @@ export const authorizeThreadRead = Effect.fn("resourceAuthorization.threadRead")
   const current = yield* authority.current;
   if (!current.resourceGrant || !current.scopes.includes(AuthOrchestrationReadScope))
     return yield* threadReadDenied();
+  yield* authorizeThreadResources(
+    sql,
+    current.resourceGrant,
+    threadId,
+    anchorThreadId,
+    includeStoredSources && current.resourceGrant.projects.mode === "explicit",
+  );
+  return current;
+});
+
+/** Raw membership/source admission shared by reads and mutations; no action scope is implied. */
+export const authorizeThreadResources = Effect.fnUntraced(function* (
+  sql: SqlClient.SqlClient,
+  grant: AuthResourceGrant,
+  threadId: ThreadId,
+  anchorThreadId?: ThreadId,
+  includeStoredSources = true,
+  includeDeleted = false,
+) {
   const seen = new Set<ThreadId>();
   let id: ThreadId | undefined = threadId;
   while (id !== undefined && !seen.has(id)) {
     seen.add(id);
     // Membership columns precede JSON extraction: a hidden malformed payload cannot be decoded.
-    yield* authorizeOwnerThreadIds(sql, current.resourceGrant, [id]);
+    yield* authorizeOwnerThreadIds(sql, grant, [id], includeDeleted);
     const forks: ReadonlyArray<{ readonly source: string | null }> = yield* sql<{
       readonly source: string | null;
     }>`
@@ -169,7 +195,7 @@ export const authorizeThreadRead = Effect.fn("resourceAuthorization.threadRead")
     `;
     id = forks[0]?.source == null ? undefined : ThreadId.make(forks[0].source);
   }
-  if (includeStoredSources && current.resourceGrant?.projects.mode === "explicit") {
+  if (includeStoredSources) {
     // Typed source references can carry copied history/result text. Deny that materialization
     // as a whole rather than returning an apparently complete, silently censored transcript.
     for (const sourceId of seen) {
@@ -191,8 +217,9 @@ export const authorizeThreadRead = Effect.fn("resourceAuthorization.threadRead")
       `;
       yield* authorizeProviderIds(
         sql,
-        current.resourceGrant,
+        grant,
         providers.map((row) => row.id),
+        includeDeleted,
       );
       const providerIds = encodeIdList(providers.map((row) => row.id));
       const providerSources = yield* sql<{ readonly id: string | null }>`
@@ -206,8 +233,9 @@ export const authorizeThreadRead = Effect.fn("resourceAuthorization.threadRead")
       `;
       yield* authorizeProviderIds(
         sql,
-        current.resourceGrant,
+        grant,
         providerSources.flatMap((row) => (row.id === null ? [] : [row.id])),
+        includeDeleted,
       );
       const turnSources = yield* sql<{ readonly id: string | null }>`
         SELECT provider_turn_id AS id FROM orchestration_v2_projection_provider_turns WHERE thread_id = ${sourceId}
@@ -218,8 +246,9 @@ export const authorizeThreadRead = Effect.fn("resourceAuthorization.threadRead")
       `;
       yield* authorizeProviderTurnIds(
         sql,
-        current.resourceGrant,
+        grant,
         turnSources.flatMap((row) => (row.id === null ? [] : [row.id])),
+        includeDeleted,
       );
       const nodeSources = yield* sql<{ readonly id: string | null }>`
         SELECT json_extract(payload_json, '$.source.nodeId') AS id FROM orchestration_v2_projection_turn_items
@@ -240,8 +269,9 @@ export const authorizeThreadRead = Effect.fn("resourceAuthorization.threadRead")
       `;
       yield* authorizeNodeIds(
         sql,
-        current.resourceGrant,
+        grant,
         nodeSources.flatMap((row) => (row.id === null ? [] : [row.id])),
+        includeDeleted,
       );
       const refs = yield* sql<{ readonly id: string | null }>`
         SELECT source_thread_id AS id FROM orchestration_v2_projection_context_transfers
@@ -273,11 +303,11 @@ export const authorizeThreadRead = Effect.fn("resourceAuthorization.threadRead")
         UNION SELECT json_extract(payload_json, '$.source.childThreadId') FROM orchestration_v2_projection_turn_items WHERE thread_id = ${sourceId}
       `;
       const ids = refs.flatMap((row) => (row.id === null ? [] : [ThreadId.make(row.id)]));
-      yield* authorizeOwnerThreadIds(sql, current.resourceGrant, ids);
+      yield* authorizeOwnerThreadIds(sql, grant, ids, includeDeleted);
     }
   }
   if (anchorThreadId !== undefined && !seen.has(anchorThreadId)) return yield* threadReadDenied();
-  return current;
+  return [...seen];
 });
 
 /** Navigation metadata does not require a hidden source's transcript. Withhold those refs. */

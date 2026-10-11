@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import {
   type CommandId,
@@ -74,7 +75,7 @@ export const linkCreatedPullRequest = <E>(input: {
     if (key === null) return;
     const commandId = yield* input.commandId;
     yield* engine
-      .dispatch({
+      .dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.link",
         commandId,
         threadId: input.threadId,

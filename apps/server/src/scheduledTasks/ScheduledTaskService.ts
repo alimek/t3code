@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import {
   CommandId,
   MessageId,
@@ -795,7 +796,7 @@ export const layer = Layer.effect(
         const result =
           active.threadId === null
             ? yield* Effect.exit(
-                threadLaunch.launch({
+                threadLaunch.launch(trustedMutationAuthority, {
                   commandId,
                   projectId: active.projectId,
                   title: active.title,
@@ -814,7 +815,7 @@ export const layer = Layer.effect(
                 }),
               )
             : yield* Effect.exit(
-                threadManagement.sendToThread({
+                threadManagement.sendToThread(trustedMutationAuthority, {
                   projectId: active.projectId,
                   commandId,
                   threadId: ThreadId.make(active.threadId),

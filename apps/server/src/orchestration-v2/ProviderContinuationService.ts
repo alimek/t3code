@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { CommandId, type OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -128,7 +129,7 @@ export const layer = Layer.effectDiscard(
             fixtureName: "delegated-completion",
             commandName: "dispatch",
           });
-          yield* threads.dispatch({
+          yield* threads.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             commandId,
             threadId: request.threadId,
@@ -154,7 +155,7 @@ export const layer = Layer.effectDiscard(
           ordinal: projection.messages.length + 1,
         });
         const commandId = CommandId.make(`provider-continuation:${messageId}`);
-        const dispatch = threads.dispatch({
+        const dispatch = threads.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           commandId,
           threadId: request.threadId,

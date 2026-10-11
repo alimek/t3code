@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -155,7 +156,7 @@ const stopEarlierBackgroundWork = ({
             Stream.runDrain,
             Effect.forkScoped,
           );
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           commandId: CommandId.make("create"),
           threadId,
@@ -172,7 +173,7 @@ const stopEarlierBackgroundWork = ({
         const running = yield* watch(
           (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
         );
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           commandId: CommandId.make("start-dev-server"),
           threadId,
@@ -344,6 +345,7 @@ const stopEarlierBackgroundWork = ({
             });
           }
           yield* orchestrator.dispatch(
+            trustedMutationAuthority,
             stalledRun === "superseded-attempt"
               ? {
                   type: "thread.background-work.settle",
@@ -648,7 +650,7 @@ const stopEarlierBackgroundWork = ({
               },
             ],
           });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             commandId: CommandId.make("queue-follow-up"),
             threadId,
@@ -703,6 +705,7 @@ const stopEarlierBackgroundWork = ({
         }
 
         yield* orchestrator.dispatch(
+          trustedMutationAuthority,
           stopWithQueue === "thread.stop"
             ? {
                 type: "thread.stop",

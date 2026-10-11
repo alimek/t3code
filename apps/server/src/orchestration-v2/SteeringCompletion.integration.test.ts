@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -179,7 +180,7 @@ it.effect.each(
             Stream.runDrain,
             Effect.forkScoped,
           );
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           commandId: CommandId.make("create"),
           threadId,
@@ -193,7 +194,7 @@ it.effect.each(
           createdBy: "user",
           creationSource: "web",
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           commandId: CommandId.make("first"),
           threadId,
@@ -268,7 +269,7 @@ it.effect.each(
             ],
           });
         }
-        const dispatchSteer = orchestrator.dispatch({
+        const dispatchSteer = orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           commandId: CommandId.make("steer"),
           threadId,
@@ -347,7 +348,7 @@ it.effect.each(
               delivered.turnItems.filter((item) => item.type === "notification").length,
               1,
             );
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "notification.delivery.accept",
               commandId: CommandId.make("duplicate-acceptance"),
               threadId,
@@ -355,7 +356,7 @@ it.effect.each(
             });
             yield* worker.drain();
             assert.equal(steerCalls, 1);
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "delegated_task.completion-delivery.acknowledge",
               commandId: CommandId.make("read-result"),
               parentThreadId: threadId,
@@ -524,7 +525,7 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
     const threadId = ThreadId.make(`thread:${name}`);
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.create",
       commandId: CommandId.make("create"),
       threadId,
@@ -546,7 +547,7 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
       Stream.runDrain,
       Effect.forkScoped,
     );
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "message.dispatch",
       commandId: CommandId.make("first"),
       threadId,
@@ -577,7 +578,7 @@ it.effect("steers a changed turn-scoped selection into a provider that cannot re
         const threadId = yield* startFirstTurn;
         const steer = (id: string, selection: ModelSelection) =>
           orchestrator
-            .dispatch({
+            .dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               commandId: CommandId.make(id),
               threadId,
@@ -651,7 +652,7 @@ it.effect("starts a steer that missed the turn on the saved next-turn selection"
         const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
         const threadId = yield* startFirstTurn;
         const first = started[0]!;
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           commandId: CommandId.make("steer"),
           threadId,

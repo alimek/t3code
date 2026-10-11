@@ -87,7 +87,7 @@ const layerDependenciesFor = (
 
 const recordingDispatch = Effect.fn("recordingDispatch")(function* () {
   const commands = yield* Ref.make<ReadonlyArray<OrchestrationCommand>>([]);
-  const dispatch: Orchestrator.OrchestratorV2Shape["dispatch"] = (command) =>
+  const dispatch: Orchestrator.OrchestratorV2Shape["dispatch"] = (_authority, command) =>
     Ref.update(commands, (recorded) => [...recorded, command]).pipe(
       Effect.as({ sequence: 1, storedEvents: [] }),
     );
@@ -197,7 +197,7 @@ describe("linkCreatedPullRequest", () => {
 
   it.effect("swallows an already-linked rejection and other dispatch failures", () =>
     Effect.gen(function* () {
-      const rejecting: Orchestrator.OrchestratorV2Shape["dispatch"] = (command) =>
+      const rejecting: Orchestrator.OrchestratorV2Shape["dispatch"] = (_authority, command) =>
         Effect.fail(
           new Orchestrator.OrchestratorDispatchError({
             commandId: command.commandId,

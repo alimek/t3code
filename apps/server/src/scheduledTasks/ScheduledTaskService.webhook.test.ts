@@ -80,7 +80,7 @@ const withService = <A, E>(
       NodePlatformCrypto.layer,
       Scheduler.layer,
       Layer.mock(ThreadLaunchService.ThreadLaunchService)({
-        launch: (input) =>
+        launch: (_authority, input) =>
           Queue.offer(launches, input).pipe(
             Effect.andThen(options.gate ? Deferred.await(options.gate) : Effect.void),
             Effect.as({ threadId: "thread-1", resumed: false } as never),

@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import {
   CommandId,
@@ -319,7 +320,7 @@ const make = Effect.gen(function* () {
             );
           }
           yield* threadManagement
-            .dispatch({
+            .dispatch(trustedMutationAuthority, {
               type: "thread.metadata.update",
               commandId: ids.commandId,
               threadId: scope.thread.threadId,
@@ -368,7 +369,7 @@ const make = Effect.gen(function* () {
             input.continuationPrompt === undefined
               ? Effect.succeed<WorktreeMcpContinuationStatus>({ status: "skipped" })
               : threadManagement
-                  .sendToThread({
+                  .sendToThread(trustedMutationAuthority, {
                     projectId: projection.thread.projectId,
                     commandId: ids.continuationCommandId,
                     threadId: scope.thread.threadId,

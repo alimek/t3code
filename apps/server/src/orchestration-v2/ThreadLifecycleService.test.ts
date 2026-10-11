@@ -18,7 +18,7 @@ it.effect("maps application lifecycle operations to V2-native commands", () => {
   const layer = ThreadLifecycle.layer.pipe(
     Layer.provide(
       Layer.mock(ThreadManagement.ThreadManagementService)({
-        dispatch: (command) => {
+        dispatch: (_authority, command) => {
           commands.push(command.type);
           return Effect.succeed({ sequence: commands.length, storedEvents: [] });
         },

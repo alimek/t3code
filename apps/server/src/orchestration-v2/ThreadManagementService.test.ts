@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { expect, it } from "@effect/vitest";
@@ -503,7 +504,7 @@ it.effect.each([
               thread: { id: threadId, projectId, deletedAt: null },
               runs: [{ id: runId, status }],
             } as unknown as OrchestrationV2ThreadProjection),
-          dispatch: (command) =>
+          dispatch: (_authority, command) =>
             Effect.sync(() => {
               dispatched.push(command.type);
               return { sequence: 1, storedEvents: [] } as never;
@@ -515,7 +516,7 @@ it.effect.each([
       Effect.provide(layerTest),
     );
 
-    yield* service.settleAfterRun({ projectId, threadId, runId });
+    yield* service.settleAfterRun(trustedMutationAuthority, { projectId, threadId, runId });
 
     expect(dispatched).toEqual(settles ? ["thread.settle"] : []);
   }),

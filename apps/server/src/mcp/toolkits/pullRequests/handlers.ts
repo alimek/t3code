@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../../../auth/CommandAuthorization.ts";
 import {
   threadPullRequestsOf,
   threadPullRequestKeysEqual,
@@ -242,7 +243,7 @@ const make = Effect.gen(function* () {
       return yield* new PullRequestNotOpenError({ state: "merged" });
     }
     yield* engine
-      .dispatch({
+      .dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.watch",
         commandId: yield* commandId("mcp-pr-watch", thread.id),
         threadId: thread.id,
@@ -281,7 +282,7 @@ const make = Effect.gen(function* () {
         if (existing && existing.source !== "stack-dismissed")
           return { ...target, alreadyLinked: true };
         const alreadyLinked = yield* engine
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "thread.pull-request.link",
             commandId: yield* commandId("mcp-pr-link", thread.id),
             threadId: thread.id,
@@ -314,7 +315,7 @@ const make = Effect.gen(function* () {
             wasLinked: false,
           };
         const wasLinked = yield* engine
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "thread.pull-request.unlink",
             commandId: yield* commandId("mcp-pr-unlink", thread.id),
             threadId: thread.id,

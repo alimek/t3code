@@ -1,3 +1,4 @@
+import { trustedMutationAuthority, type MutationAuthority } from "../auth/CommandAuthorization.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
@@ -152,10 +153,12 @@ export class ThreadLaunchService extends Context.Service<
   ThreadLaunchService,
   {
     readonly launch: (
+      authority: MutationAuthority,
       input: ThreadLaunchInput,
     ) => Effect.Effect<ThreadLaunchResult, ThreadLaunchError>;
     /** Dispatches prepared-run.retry and prepares the run's workspace again. */
     readonly retryPreparation: (
+      authority: MutationAuthority,
       input: ThreadLaunchRetryInput,
     ) => Effect.Effect<Orchestrator.OrchestratorV2DispatchResult, Orchestrator.OrchestratorV2Error>;
   }
@@ -322,7 +325,7 @@ const make = Effect.gen(function* () {
       if (input.workspaceStrategy.type === "worktree") {
         if (runId !== null) {
           yield* threads
-            .dispatch({
+            .dispatch(trustedMutationAuthority, {
               type: "prepared-run.progress",
               commandId: CommandId.make(`${input.commandId}:progress:worktree`),
               threadId,
@@ -414,7 +417,7 @@ const make = Effect.gen(function* () {
       // the first attempt's branch rename.
       if (reused === undefined) {
         yield* threads
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "thread.metadata.update",
             commandId: CommandId.make(`${input.commandId}:workspace`),
             threadId,
@@ -448,7 +451,7 @@ const make = Effect.gen(function* () {
             }),
           ),
           Effect.flatMap((renamed) =>
-            threads.dispatch({
+            threads.dispatch(trustedMutationAuthority, {
               type: "thread.metadata.update",
               commandId: CommandId.make(`${input.commandId}:branch-rename`),
               threadId,
@@ -471,7 +474,7 @@ const make = Effect.gen(function* () {
       const cwd = worktreePath ?? project.workspaceRoot;
       if (runId !== null) {
         yield* threads
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "prepared-run.progress",
             commandId: CommandId.make(`${input.commandId}:progress:setup`),
             threadId,
@@ -550,7 +553,7 @@ const make = Effect.gen(function* () {
       yield* setupTracker.stageStatus(threadId, "agent", "running");
       if (runId !== null) {
         yield* threads
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "prepared-run.release",
             commandId: CommandId.make(`${input.commandId}:release`),
             threadId,
@@ -587,7 +590,7 @@ const make = Effect.gen(function* () {
               .pipe(
                 Effect.andThen(
                   threads
-                    .dispatch({
+                    .dispatch(trustedMutationAuthority, {
                       type: "thread.metadata.update",
                       commandId: CommandId.make(`${input.commandId}:cancel-workspace`),
                       threadId,
@@ -624,7 +627,7 @@ const make = Effect.gen(function* () {
           cause,
         })
       : threads
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "prepared-run.fail",
             commandId: CommandId.make(`${input.commandId}:fail`),
             threadId,
@@ -683,7 +686,7 @@ const make = Effect.gen(function* () {
   });
 
   const launch: ThreadLaunchService["Service"]["launch"] = Effect.fn("ThreadLaunchService.launch")(
-    function* (input) {
+    function* (authority, input) {
       yield* ProjectCloneTracker.rejectCommandsDuringClone(cloneTracker, {
         type: "thread.create",
         projectId: input.projectId,
@@ -767,13 +770,13 @@ const make = Effect.gen(function* () {
           workspaceStrategy.type === "existing_worktree" ? workspaceStrategy.worktreePath : null;
         const claimDispatch =
           input.reuseExistingThread === true
-            ? threads.dispatch({
+            ? threads.dispatch(authority, {
                 type: "thread.metadata.update",
                 commandId: input.commandId,
                 threadId: candidateThreadId,
                 expectedEmpty: true,
               })
-            : threads.dispatch({
+            : threads.dispatch(authority, {
                 type: "thread.create",
                 commandId: input.commandId,
                 threadId: candidateThreadId,
@@ -818,7 +821,7 @@ const make = Effect.gen(function* () {
               .message({ threadId, ordinal: 1 })
               .pipe(Effect.mapError(mapError(input, "dispatch-message", threadId))));
           const dispatched = yield* threads
-            .dispatch({
+            .dispatch(authority, {
               type: "message.dispatch",
               commandId: messageCommandId,
               threadId,
@@ -915,8 +918,8 @@ const make = Effect.gen(function* () {
 
   const retryPreparation: ThreadLaunchService["Service"]["retryPreparation"] = Effect.fn(
     "ThreadLaunchService.retryPreparation",
-  )(function* (input) {
-    const dispatched = yield* threads.dispatch({
+  )(function* (authority, input) {
+    const dispatched = yield* threads.dispatch(authority, {
       type: "prepared-run.retry",
       commandId: input.commandId,
       threadId: input.threadId,

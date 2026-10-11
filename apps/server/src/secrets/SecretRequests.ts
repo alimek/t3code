@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 /**
  * SecretRequests - secrets an agent asks the user for.
@@ -145,7 +146,7 @@ const make = Effect.gen(function* () {
       }
       const secretStatus = input.answer.type === "save" ? "saved" : "declined";
       yield* threadManagement
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "secret_request.record",
           commandId: CommandId.make(`secret-request:${item.id}:${secretStatus}`),
           threadId: input.threadId,

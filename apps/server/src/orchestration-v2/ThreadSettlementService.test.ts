@@ -557,7 +557,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
       );
     });
 
-  const dispatch: Orchestrator.OrchestratorV2Shape["dispatch"] = (command) => {
+  const dispatch: Orchestrator.OrchestratorV2Shape["dispatch"] = (_authority, command) => {
     if (command.type !== "thread.auto-settle") {
       return Effect.die(new Error(`Unexpected command: ${command.type}`));
     }

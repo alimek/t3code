@@ -64,7 +64,7 @@ it.effect("attributes a launched thread's first message to the calling thread", 
         getThreadShell: () => Effect.succeed(caller),
       }),
       Layer.mock(ThreadLaunch.ThreadLaunchService)({
-        launch: (input) => {
+        launch: (_authority, input) => {
           launchedSender = input.initialMessage?.senderThreadId;
           return Effect.succeed({
             threadId: input.threadId,
@@ -135,7 +135,7 @@ it.effect("launches a scratch thread into the Scratch project", () =>
         getThreadShell: () => Effect.succeed(caller),
       }),
       Layer.mock(ThreadLaunch.ThreadLaunchService)({
-        launch: (input) => {
+        launch: (_authority, input) => {
           launched.push(input);
           return Effect.succeed({
             threadId: input.threadId,
@@ -320,7 +320,7 @@ const clientLaunchHarness = (input: {
     }),
     Layer.mock(ThreadManagement.ThreadManagementService)({}),
     Layer.mock(ThreadLaunch.ThreadLaunchService)({
-      launch: (launch) => {
+      launch: (_authority, launch) => {
         input.launched.push(launch);
         return Effect.succeed({
           threadId: launch.threadId,

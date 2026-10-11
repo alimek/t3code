@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import type { SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -177,7 +178,7 @@ it.effect.each(["child completion", "scheduled message", "user steering"] as con
               Stream.runDrain,
               Effect.forkScoped,
             );
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             commandId: CommandId.make("create"),
             threadId,
@@ -194,7 +195,7 @@ it.effect.each(["child completion", "scheduled message", "user steering"] as con
           const running = yield* watch(
             (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
           );
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             commandId: CommandId.make("first"),
             threadId,
@@ -285,8 +286,8 @@ it.effect.each(["child completion", "scheduled message", "user steering"] as con
               creationSource: "server" as const,
               delegatedCompletion: { parentRunId: parent.id, generation: 1, taskIds: [taskId] },
             };
-            yield* orchestrator.dispatch(command);
-            yield* orchestrator.dispatch(command);
+            yield* orchestrator.dispatch(trustedMutationAuthority, command);
+            yield* orchestrator.dispatch(trustedMutationAuthority, command);
             yield* orchestrator.recoverDelegatedTasks;
           } else if (delivery === "scheduled message") {
             yield* Effect.gen(function* () {
@@ -330,7 +331,7 @@ it.effect.each(["child completion", "scheduled message", "user steering"] as con
               ),
             );
           } else {
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               commandId: CommandId.make("steer"),
               threadId,

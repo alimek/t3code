@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../../auth/CommandAuthorization.ts";
 import type {
   OrchestrationV2Command,
   OrchestrationV2DomainEvent,
@@ -624,7 +625,7 @@ export function runOrchestratorV2Scenario(
         switch (step.type) {
           case "dispatch": {
             if (step.await ?? true) {
-              const result = yield* orchestrator.dispatch(step.command);
+              const result = yield* orchestrator.dispatch(trustedMutationAuthority, step.command);
               storedEventGroups.push(result.storedEvents);
               break;
             }
@@ -633,7 +634,7 @@ export function runOrchestratorV2Scenario(
             const key = step.key ?? `dispatch:${anonymousBackgroundDispatchIndex}`;
             backgroundDispatches.set(
               key,
-              yield* orchestrator.dispatch(step.command).pipe(
+              yield* orchestrator.dispatch(trustedMutationAuthority, step.command).pipe(
                 Effect.map((result) => result.storedEvents),
                 Effect.forkScoped,
               ),
@@ -686,7 +687,7 @@ export function runOrchestratorV2Scenario(
                 yield* orchestrator.getShellSnapshot(),
               );
             }
-            const result = yield* orchestrator.dispatch({
+            const result = yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "runtime-request.respond",
               commandId: step.commandId,
               threadId: step.threadId,

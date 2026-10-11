@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
@@ -349,7 +350,7 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
         title: "Concurrent deletion",
         workspaceRoot: "/work/concurrent-deletion",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         commandId: CommandId.make("runtime-thread-delete-concurrent-create"),
         createdBy: "user",
@@ -372,13 +373,13 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
       let threadLockRequests = 0;
       const commitSpy = vi
         .spyOn(eventSink, "commitCommand")
-        .mockImplementation((input) =>
+        .mockImplementation((admission, input) =>
           input.commandId === updateCommandId
             ? Deferred.succeed(updateReady, undefined).pipe(
                 Effect.andThen(Deferred.await(releaseUpdate)),
-                Effect.andThen(commitCommand(input)),
+                Effect.andThen(commitCommand(admission, input)),
               )
-            : commitCommand(input),
+            : commitCommand(admission, input),
         );
       const observeLock: ThreadCommandExecutor.ThreadCommandExecutor["Service"]["withLock"] = (
         key,
@@ -392,7 +393,7 @@ it.layer(layerProjectDeletionTest)("project deletion during thread commands", (i
       const lockSpy = vi.spyOn(executor, "withLock").mockImplementation(observeLock);
       yield* Effect.gen(function* () {
         const updateFiber = yield* orchestrator
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "thread.metadata.update",
             commandId: updateCommandId,
             threadId,
@@ -483,7 +484,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const threadId = ThreadId.make("runtime-layer-model-selection-events");
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -498,7 +499,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         worktreePath: null,
       });
 
-      const sameInstance = yield* orchestrator.dispatch({
+      const sameInstance = yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.model-selection.set",
         commandId: CommandId.make("runtime-layer-model-selection-events-update"),
         threadId,
@@ -509,7 +510,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         ["thread.model-selection-updated"],
       );
 
-      const differentInstance = yield* orchestrator.dispatch({
+      const differentInstance = yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.model-selection.set",
         commandId: CommandId.make("runtime-layer-model-selection-events-switch"),
         threadId,
@@ -532,7 +533,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       const eventSink = yield* EventSink.EventSinkV2;
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       const threadId = ThreadId.make(name);
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -547,7 +548,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         // Its own path, so other rollback tests keep an isolated worktree.
         worktreePath: `/tmp/t3-${name}`,
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -595,7 +596,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       return {
         threadId,
         rollback: (commandId: CommandId) =>
-          orchestrator.dispatch({
+          orchestrator.dispatch(trustedMutationAuthority, {
             type: "checkpoint.rollback",
             commandId,
             threadId,
@@ -681,7 +682,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       const eventSink = yield* EventSink.EventSinkV2;
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       const threadId = ThreadId.make("runtime-rollback-readiness");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -695,7 +696,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         branch: null,
         worktreePath: process.cwd(),
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -739,7 +740,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
           ],
         });
         const previousSequence = yield* orchestrator.getThreadEventSequence(threadId);
-        const rollback = orchestrator.dispatch({
+        const rollback = orchestrator.dispatch(trustedMutationAuthority, {
           type: "checkpoint.rollback",
           commandId,
           threadId,
@@ -758,7 +759,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
             ["provider-thread.rollback"],
           );
           const path = yield* Path.Path.pipe(Effect.provide(NodeServices.layer));
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             createdBy: "user",
             creationSource: "web",
@@ -775,7 +776,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
           const overlapCommandId = CommandId.make("runtime-rollback-overlap");
           const overlapSequence = yield* orchestrator.getThreadEventSequence(threadId);
           const overlap = yield* orchestrator
-            .dispatch({
+            .dispatch(trustedMutationAuthority, {
               type: "checkpoint.rollback",
               commandId: overlapCommandId,
               threadId,
@@ -786,7 +787,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
           assert.match(String(overlap.cause), /isolated worktree/);
           assert.equal(yield* orchestrator.getThreadEventSequence(threadId), overlapSequence);
           assert.deepEqual(yield* outbox.listByCommandId(overlapCommandId), []);
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.metadata.update",
             commandId: CommandId.make("runtime-rollback-share"),
             threadId,
@@ -795,7 +796,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
           const sharedCommandId = CommandId.make("runtime-rollback-shared");
           const sequence = yield* orchestrator.getThreadEventSequence(threadId);
           const shared = yield* orchestrator
-            .dispatch({
+            .dispatch(trustedMutationAuthority, {
               type: "checkpoint.rollback",
               commandId: sharedCommandId,
               threadId,
@@ -806,7 +807,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
           assert.match(String(shared.cause), /isolated worktree/);
           assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
           assert.deepEqual(yield* outbox.listByCommandId(sharedCommandId), []);
-          const conversationOnly = yield* orchestrator.dispatch({
+          const conversationOnly = yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "checkpoint.rollback",
             commandId: CommandId.make("runtime-rollback-conversation"),
             threadId,
@@ -843,7 +844,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const threadId = ThreadId.make("runtime-delivery-intent");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -857,7 +858,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         branch: null,
         worktreePath: process.cwd(),
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -932,7 +933,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
 
       const steerCommandId = CommandId.make("runtime-delivery-intent-auto");
       const steerMessageId = MessageId.make("runtime-delivery-intent-auto");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -985,7 +986,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         ],
       });
       const nextCommandId = CommandId.make("runtime-delivery-intent-next");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -1018,7 +1019,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       const requestId = RuntimeRequestId.make("runtime-async-question-request");
       const nodeId = NodeId.make("runtime-async-question-node");
       const itemId = TurnItemId.make("runtime-async-question-item");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         commandId: CommandId.make("runtime-async-question-create"),
         createdBy: "user",
@@ -1107,7 +1108,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         ],
       });
       const invalid = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "runtime-request.respond",
           commandId: CommandId.make("runtime-async-question-blank"),
           threadId,
@@ -1127,8 +1128,8 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         requestId,
         answers: { color: "  Blue  " },
       };
-      const accepted = yield* orchestrator.dispatch(command);
-      const repeated = yield* orchestrator.dispatch(command);
+      const accepted = yield* orchestrator.dispatch(trustedMutationAuthority, command);
+      const repeated = yield* orchestrator.dispatch(trustedMutationAuthority, command);
       assert.equal(repeated.sequence, accepted.sequence);
       const answered = yield* orchestrator.getThreadProjection(threadId);
       assert.equal(answered.runtimeRequests[0]?.status, "resolved");
@@ -1151,7 +1152,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       assert.equal(answered.runs.length, 1);
 
       const duplicate = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           ...command,
           commandId: CommandId.make("runtime-async-question-duplicate"),
         })
@@ -1172,7 +1173,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         const nodeId = NodeId.make(`${name}-node`);
         const itemId = TurnItemId.make(`${name}-item`);
         const now = yield* DateTime.now;
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           commandId: CommandId.make(`${name}-create`),
           createdBy: "user",
@@ -1264,7 +1265,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       });
 
       const dismissed = yield* seedQuestion("runtime-dismiss-question");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.user-input.dismiss",
         commandId: CommandId.make("runtime-dismiss-question-command"),
         threadId: dismissed.threadId,
@@ -1284,7 +1285,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       assert.lengthOf(dismissedProjection.messages, 0);
 
       const settled = yield* seedQuestion("runtime-settle-question");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.settle",
         commandId: CommandId.make("runtime-settle-question-command"),
         threadId: settled.threadId,
@@ -1319,7 +1320,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
       );
       const forkTransferId = ContextTransferId.make("runtime-layer-waiting-merge-fork-transfer");
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -1446,7 +1447,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive", (it) => {
         ],
       });
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.merge_back",
         createdBy: "user",
         creationSource: "mobile",
@@ -1621,7 +1622,7 @@ it.layer(layerLegacyImportTest)("OrchestrationV2 legacy import", (it) => {
       yield* importer.reconcileShells;
       assert.isTrue((yield* maintenance.verify).valid);
 
-      yield* threadManagement.dispatch({
+      yield* threadManagement.dispatch(trustedMutationAuthority, {
         type: "thread.metadata.update",
         commandId: CommandId.make("runtime-layer-legacy-metadata-update"),
         threadId: metadataThreadId,
@@ -1646,7 +1647,7 @@ it.layer(layerLegacyImportTest)("OrchestrationV2 legacy import", (it) => {
           .getThreadProjection(trustedReadAuthority, failureThreadId)
           .pipe(Effect.flip),
         hydrationFailure: threadManagement
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "thread.archive",
             commandId: CommandId.make("runtime-layer-legacy-failed-archive"),
             threadId: failureThreadId,
@@ -1668,7 +1669,7 @@ it.layer(layerLegacyImportTest)("OrchestrationV2 legacy import", (it) => {
       const projectionAfterFailure = yield* orchestrator.getThreadProjection(failureThreadId);
       assert.isNull(projectionAfterFailure.thread.archivedAt);
 
-      yield* threadManagement.dispatch({
+      yield* threadManagement.dispatch(trustedMutationAuthority, {
         type: "thread.archive",
         commandId: CommandId.make("runtime-layer-legacy-retried-archive"),
         threadId: failureThreadId,
@@ -1711,12 +1712,12 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         worktreePath: null,
       };
 
-      const firstCreate = yield* orchestrator.dispatch(create);
-      const retriedCreate = yield* orchestrator.dispatch(create);
+      const firstCreate = yield* orchestrator.dispatch(trustedMutationAuthority, create);
+      const retriedCreate = yield* orchestrator.dispatch(trustedMutationAuthority, create);
       assert.equal(retriedCreate.sequence, firstCreate.sequence);
       assert.lengthOf(retriedCreate.storedEvents, 1);
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.metadata.update",
         commandId: CommandId.make("runtime-layer-lifecycle-metadata"),
         threadId,
@@ -1725,7 +1726,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         worktreePath: "/tmp/t3-v2-worktree",
       });
       const staleWorkspaceUpdate = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make("runtime-layer-lifecycle-stale-workspace"),
           threadId,
@@ -1747,7 +1748,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       };
       yield* moveProject(projectId, "/workspace/moved", "2026-09-07T00:01:00.000Z");
       const staleProjectWorkspace = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "thread.pull-request.sync",
           commandId: CommandId.make("runtime-layer-lifecycle-pr-sync-stale-project-workspace"),
           threadId,
@@ -1765,7 +1766,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         .pipe(Effect.flip);
       assert.instanceOf(staleProjectWorkspace, Orchestrator.OrchestratorDispatchError);
       yield* moveProject(projectId, project.workspaceRoot, "2026-09-07T00:02:00.000Z");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.sync",
         commandId: CommandId.make("runtime-layer-lifecycle-pr-sync"),
         threadId,
@@ -1785,7 +1786,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         pullRequest,
       );
       const stalePullRequestSync = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "thread.pull-request.sync",
           commandId: CommandId.make("runtime-layer-lifecycle-pr-sync-stale"),
           threadId,
@@ -1802,25 +1803,25 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         })
         .pipe(Effect.flip);
       assert.instanceOf(stalePullRequestSync, Orchestrator.OrchestratorDispatchError);
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("runtime-layer-lifecycle-runtime"),
         threadId,
         runtimeMode: "approval-required",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.interaction-mode.set",
         commandId: CommandId.make("runtime-layer-lifecycle-interaction"),
         threadId,
         interactionMode: "plan",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.model-selection.set",
         commandId: CommandId.make("runtime-layer-lifecycle-model"),
         threadId,
         modelSelection: { ...modelSelection, model: "gpt-5.5" },
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.active.reorder",
         commandId: CommandId.make("runtime-layer-lifecycle-active-order"),
         threadId,
@@ -1832,7 +1833,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       // made after it, and a fresh one settles like a user settle would.
       const preAutoProjection = yield* orchestrator.getThreadProjection(threadId);
       const staleAutoSettle = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "thread.auto-settle",
           commandId: CommandId.make("runtime-layer-lifecycle-auto-settle-stale"),
           threadId,
@@ -1842,7 +1843,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         })
         .pipe(Effect.flip);
       assert.instanceOf(staleAutoSettle, Orchestrator.OrchestratorDispatchError);
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.auto-settle",
         commandId: CommandId.make("runtime-layer-lifecycle-auto-settle"),
         threadId,
@@ -1851,7 +1852,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const autoSettledProjection = yield* orchestrator.getThreadProjection(threadId);
       assert.equal(autoSettledProjection.thread.settledOverride, "settled");
       assert.isNull(autoSettledProjection.thread.activeOrderKey);
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.unsettle",
         commandId: CommandId.make("runtime-layer-lifecycle-auto-unsettle"),
         threadId,
@@ -1860,7 +1861,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       // An explicit un-settle outranks the sweep even with a fresh snapshot.
       const postUnsettleProjection = yield* orchestrator.getThreadProjection(threadId);
       const overriddenAutoSettle = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "thread.auto-settle",
           commandId: CommandId.make("runtime-layer-lifecycle-auto-settle-overridden"),
           threadId,
@@ -1869,7 +1870,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         .pipe(Effect.flip);
       assert.instanceOf(overriddenAutoSettle, Orchestrator.OrchestratorDispatchError);
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.settle",
         commandId: CommandId.make("runtime-layer-lifecycle-settle"),
         threadId,
@@ -1878,7 +1879,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.equal(settledProjection.thread.settledOverride, "settled");
       assert.isNotNull(settledProjection.thread.settledAt);
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.unsettle",
         commandId: CommandId.make("runtime-layer-lifecycle-unsettle"),
         threadId,
@@ -1893,7 +1894,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       );
       assert.deepEqual(activeShell?.unsettledAt, activeProjection.thread.unsettledAt);
 
-      const archive = yield* orchestrator.dispatch({
+      const archive = yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.archive",
         commandId: CommandId.make("runtime-layer-lifecycle-archive"),
         threadId,
@@ -1932,7 +1933,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         },
       );
 
-      const remove = yield* orchestrator.dispatch({
+      const remove = yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.delete",
         commandId: CommandId.make("runtime-layer-lifecycle-delete"),
         threadId,
@@ -1983,7 +1984,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         url: "https://github.com/pingdotgg/t3code/pull/8160",
       } as const;
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -1997,7 +1998,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         branch: null,
         worktreePath: null,
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.metadata.update",
         commandId: CommandId.make("runtime-layer-linked-pull-request-link"),
         threadId,
@@ -2019,7 +2020,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         linkedPullRequest,
       );
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.metadata.update",
         commandId: CommandId.make("runtime-layer-linked-pull-request-unlink"),
         threadId,
@@ -2045,7 +2046,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         defaultModelSelection: null,
         createdAt: "2026-09-17T00:00:00.000Z",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -2060,7 +2061,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         worktreePath: null,
       });
       const snapshot = yield* orchestrator.getShellSnapshot();
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.sync",
         commandId: CommandId.make("branch-pr-discover"),
         threadId,
@@ -2081,7 +2082,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         },
       });
       for (const [index, number] of [2, 2, 1, 3].entries()) {
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.pull-request.link",
           commandId: CommandId.make(`branch-pr-link-${index}`),
           threadId,
@@ -2096,7 +2097,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           number === 3 ? [1, 2, 3] : [1, 2],
         );
       }
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.unlink",
         commandId: CommandId.make("branch-pr-unlink"),
         threadId,
@@ -2104,7 +2105,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         repository: "pingdotgg/t3code",
         number: 1,
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.link",
         commandId: CommandId.make("branch-pr-link-after-unlink"),
         threadId,
@@ -2127,7 +2128,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
       const threadId = ThreadId.make("runtime-multiple-pull-requests");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -2143,7 +2144,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       });
       const key = { host: "GitHub.com", repository: "Pingdotgg/T3code" };
       for (const number of [1, 2]) {
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.pull-request.link",
           commandId: CommandId.make(`multi-pr-link-${number}`),
           threadId,
@@ -2158,14 +2159,14 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         linked?.pullRequests?.map(({ host, repository, number }) => ({ host, repository, number })),
         [1, 2].map((number) => ({ host: "github.com", repository: "pingdotgg/t3code", number })),
       );
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.unlink",
         commandId: CommandId.make("multi-pr-dismiss"),
         threadId,
         ...key,
         number: 2,
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.unlink",
         commandId: CommandId.make("multi-pr-unlink"),
         threadId,
@@ -2179,7 +2180,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         })),
         [{ number: 2, source: "stack-dismissed" }],
       );
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.link",
         commandId: CommandId.make("multi-pr-rediscover"),
         threadId,
@@ -2197,7 +2198,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         (yield* orchestrator.getThreadShell(threadId))?.pullRequests?.[0]?.source,
         "stack-dismissed",
       );
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.link",
         commandId: CommandId.make("multi-pr-restore"),
         threadId,
@@ -2218,7 +2219,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
       const threadId = ThreadId.make("runtime-pull-request-watch");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -2240,7 +2241,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       );
 
       // Watching an unlinked pull request links it in the same command.
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.watch",
         commandId: CommandId.make("pr-watch-start"),
         threadId,
@@ -2257,7 +2258,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       if (started === undefined) return;
 
       // A legacy client re-linking the same pull request keeps its watch.
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.metadata.update",
         commandId: CommandId.make("pr-watch-legacy-relink"),
         threadId,
@@ -2266,7 +2267,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.deepEqual(yield* watchOf, started);
 
       const recorded = { ...started, headSha: "abc123", failedChecks: ["lint"], wakes: 1 };
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request-watch.sync",
         commandId: CommandId.make("pr-watch-record"),
         threadId,
@@ -2278,7 +2279,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.isTrue((yield* maintenance.rebuild).valid);
       assert.deepEqual(yield* watchOf, recorded);
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.watch",
         commandId: CommandId.make("pr-watch-stop"),
         threadId,
@@ -2287,7 +2288,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       });
       // A wake read before the stop must neither wake the agent nor bring the watch back.
       const late = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "thread.pull-request-watch.sync",
           commandId: CommandId.make("pr-watch-late-record"),
           threadId,
@@ -2313,7 +2314,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const maintenance = yield* ProjectionMaintenance.ProjectionMaintenanceV2;
       const threadId = ThreadId.make(`pr-watch-settle-${mode}`);
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -2329,7 +2330,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       });
       const key = { host: "github.com", repository: "pingdotgg/t3code" };
       for (const number of [7, 8]) {
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.pull-request.watch",
           commandId: CommandId.make(`pr-watch-settle-start-${mode}-${number}`),
           threadId,
@@ -2343,7 +2344,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const started = before?.pullRequests?.[0]?.watch;
       assert.isDefined(started);
       if (started === undefined || before === null) return;
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         ...(mode === "manual"
           ? { type: "thread.settle" as const }
           : { type: "thread.auto-settle" as const, snapshotAt: before.updatedAt }),
@@ -2368,7 +2369,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         },
       ]) {
         const late = yield* orchestrator
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "thread.pull-request-watch.sync",
             commandId: CommandId.make(`pr-watch-settle-late-${mode}-${wake !== undefined}`),
             threadId,
@@ -2389,20 +2390,20 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         watching: true,
       };
       const blocked = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           ...restart,
           commandId: CommandId.make(`pr-watch-settle-blocked-${mode}`),
         })
         .pipe(Effect.flip);
       assert.equal(blocked._tag, "OrchestratorDispatchError");
       assert.deepEqual((yield* orchestrator.getThreadRecords(threadId, ["messages"])).messages, []);
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.unsettle",
         commandId: CommandId.make(`pr-watch-settle-unsettle-${mode}`),
         threadId,
         reason: "user",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         ...restart,
         commandId: CommandId.make(`pr-watch-settle-restart-${mode}`),
       });
@@ -2414,7 +2415,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const threadId = ThreadId.make("runtime-pull-request-watch-archive");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -2441,24 +2442,27 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         orchestrator.getThreadShell(threadId),
         (thread) => thread?.pullRequests?.[0]?.watch !== undefined,
       );
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         ...watch,
         commandId: CommandId.make("pr-watch-archive-start"),
       });
       assert.isTrue(yield* watched);
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.archive",
         commandId: CommandId.make("pr-watch-archive"),
         threadId,
       });
       assert.isFalse(yield* watched);
       const refused = yield* orchestrator
-        .dispatch({ ...watch, commandId: CommandId.make("pr-watch-archive-restart") })
+        .dispatch(trustedMutationAuthority, {
+          ...watch,
+          commandId: CommandId.make("pr-watch-archive-restart"),
+        })
         .pipe(Effect.flip);
       assert.equal(refused._tag, "OrchestratorDispatchError");
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.unarchive",
         commandId: CommandId.make("pr-watch-unarchive"),
         threadId,
@@ -2479,7 +2483,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         defaultModelSelection: null,
         createdAt: "2026-10-01T00:00:00.000Z",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -2493,7 +2497,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         branch: null,
         worktreePath: null,
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.watch",
         commandId: CommandId.make("pr-watch-unreadable-start"),
         threadId,
@@ -2544,7 +2548,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         );
         const watchFrom = (threadId: ThreadId) =>
           Effect.gen(function* () {
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.create",
               createdBy: "user",
               creationSource: "web",
@@ -2558,7 +2562,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
               branch: null,
               worktreePath: null,
             });
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.pull-request.watch",
               commandId: CommandId.make(`watch:${threadId}`),
               threadId,
@@ -2686,7 +2690,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         defaultModelSelection: null,
         createdAt: "2026-10-01T00:00:00.000Z",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -2702,7 +2706,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       });
       const key = { host: "github.com", repository: "pingdotgg/t3code", number: 11 };
       const watching = (on: boolean, id: string) =>
-        orchestrator.dispatch({
+        orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.pull-request.watch",
           commandId: CommandId.make(`pr-watch-ended-${id}`),
           threadId,
@@ -2783,7 +2787,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         defaultModelSelection: null,
         createdAt: "2026-10-01T00:00:00.000Z",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -2797,7 +2801,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         branch: null,
         worktreePath: null,
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.watch",
         commandId: CommandId.make("pr-watch-fingerprint-start"),
         threadId,
@@ -2963,7 +2967,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         defaultModelSelection: null,
         createdAt: "2026-10-01T00:00:00.000Z",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -2979,7 +2983,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       });
       const key = { host: "github.com", repository: "pingdotgg/t3code", number: 7 };
       const url = "https://github.com/pingdotgg/t3code/pull/7";
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.link",
         commandId: CommandId.make(`pr-watch-wake-link-${mode}`),
         threadId,
@@ -2987,7 +2991,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         url,
         source: "agent",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.pull-request.watch",
         commandId: CommandId.make(`pr-watch-wake-start-${mode}`),
         threadId,
@@ -3145,8 +3149,12 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         threadId: ThreadId.make("runtime-layer-missing-thread"),
       };
 
-      const first = yield* orchestrator.dispatch(command).pipe(Effect.flip);
-      const retry = yield* orchestrator.dispatch(command).pipe(Effect.flip);
+      const first = yield* orchestrator
+        .dispatch(trustedMutationAuthority, command)
+        .pipe(Effect.flip);
+      const retry = yield* orchestrator
+        .dispatch(trustedMutationAuthority, command)
+        .pipe(Effect.flip);
 
       assert.equal(first._tag, "OrchestratorProjectionError");
       assert.equal(retry._tag, "OrchestratorCommandPreviouslyRejectedError");
@@ -3160,7 +3168,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const eventSink = yield* EventSink.EventSinkV2;
         const threadId = ThreadId.make("runtime-layer-restart-continuation");
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -3174,7 +3182,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           branch: null,
           worktreePath: "/tmp/runtime-layer-restart",
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",
@@ -3188,7 +3196,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         });
         const original = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
         const now = yield* DateTime.now;
-        yield* eventSink.commitCommand({
+        yield* eventSink.commitCommand(trustedMutationAuthority, {
           commandId: CommandId.make("restart-cancel"),
           threadId,
           commandType: "provider-runtime.reconcile",
@@ -3218,13 +3226,13 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           dispatchMode: { type: "start_immediately" as const },
           restartContinuationOfRunId: original.id,
         };
-        yield* orchestrator.dispatch(command);
-        yield* orchestrator.dispatch(command);
+        yield* orchestrator.dispatch(trustedMutationAuthority, command);
+        yield* orchestrator.dispatch(trustedMutationAuthority, command);
         const admitted = yield* orchestrator.getThreadProjection(threadId);
         assert.lengthOf(admitted.runs, 2);
         assert.equal(admitted.runs[1]?.restartContinuationOfRunId, original.id);
         // A differently identified stale delivery still must not create another run.
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           ...command,
           commandId: CommandId.make("restart-stale-race"),
           messageId: MessageId.make("restart-stale-race"),
@@ -3242,7 +3250,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const eventSink = yield* EventSink.EventSinkV2;
         const threadId = ThreadId.make(`runtime-layer-restart-${status}-source`);
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -3256,7 +3264,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           branch: null,
           worktreePath: "/tmp/runtime-layer-restart-failed",
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",
@@ -3270,7 +3278,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         });
         const original = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
         const now = yield* DateTime.now;
-        yield* eventSink.commitCommand({
+        yield* eventSink.commitCommand(trustedMutationAuthority, {
           commandId: CommandId.make(`restart-${status}-reconcile`),
           threadId,
           commandType: "provider-runtime.reconcile",
@@ -3298,7 +3306,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           ],
           effects: [],
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: "agent",
           creationSource: "server",
@@ -3322,7 +3330,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const threadId = ThreadId.make("runtime-layer-active-settle-thread");
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -3336,12 +3344,12 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         branch: null,
         worktreePath: "/tmp/runtime-layer-active-settle",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.settle",
         commandId: CommandId.make("runtime-layer-active-settle-initial"),
         threadId,
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -3355,7 +3363,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       });
 
       const nonEmptyClaim = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make("runtime-layer-active-settle-empty-claim"),
           threadId,
@@ -3366,7 +3374,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.instanceOf(nonEmptyClaim, Orchestrator.OrchestratorDispatchError);
 
       const error = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "thread.settle",
           commandId: CommandId.make("runtime-layer-active-settle"),
           threadId,
@@ -3390,7 +3398,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const projectId = ProjectId.make("runtime-layer-settle-after-run-project");
       const threadId = ThreadId.make("runtime-layer-settle-after-run-thread");
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -3404,7 +3412,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         branch: null,
         worktreePath: "/tmp/runtime-layer-settle-after-run",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -3422,7 +3430,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const settled = yield* orchestrator
         .streamStoredEventsFrom({ threadId, afterSequence: 0, eventType: "thread.settled" })
         .pipe(Stream.runHead, Effect.forkChild);
-      const result = yield* threadManagement.settleThread({
+      const result = yield* threadManagement.settleThread(trustedMutationAuthority, {
         threadId,
         commandId: CommandId.make("runtime-layer-settle-after-run-settle"),
         byOwnAgent: true,
@@ -3456,7 +3464,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const eventSink = yield* EventSink.EventSinkV2;
       const threadId = ThreadId.make("runtime-layer-settle-automatic-queued");
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -3470,7 +3478,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         branch: null,
         worktreePath: "/tmp/runtime-layer-settle-automatic",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -3483,7 +3491,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         dispatchMode: { type: "start_immediately" },
       });
       const queueMessage = (id: string, automatic: boolean) =>
-        orchestrator.dispatch({
+        orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: automatic ? "agent" : "user",
           creationSource: automatic ? "provider" : "web",
@@ -3511,7 +3519,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         Effect.gen(function* () {
           const projection = yield* orchestrator.getThreadProjection(threadId);
           const now = yield* DateTime.now;
-          yield* eventSink.commitCommand({
+          yield* eventSink.commitCommand(trustedMutationAuthority, {
             commandId: CommandId.make(commandId),
             threadId,
             commandType: "provider-runtime.reconcile",
@@ -3534,7 +3542,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         });
       yield* holdQueueAfterRestart("settle-automatic-restart");
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.settle",
         commandId: CommandId.make("settle-automatic-settle"),
         threadId,
@@ -3544,13 +3552,13 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.isTrue(settled.runs.every((run) => run.status === "cancelled"));
 
       // A held message the user typed still blocks settling.
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.unsettle",
         commandId: CommandId.make("settle-automatic-unsettle"),
         threadId,
         reason: "user",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -3565,7 +3573,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       yield* queueMessage("settle-automatic-user-queued", false);
       yield* holdQueueAfterRestart("settle-automatic-restart-2");
       const error = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "thread.settle",
           commandId: CommandId.make("settle-automatic-settle-2"),
           threadId,
@@ -3580,7 +3588,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const threadId = ThreadId.make("runtime-layer-archive-queued-thread");
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -3594,7 +3602,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         branch: null,
         worktreePath: "/tmp/runtime-layer-archive-queued",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -3606,7 +3614,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         modelSelection,
         dispatchMode: { type: "start_immediately" },
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -3625,7 +3633,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.isDefined(activeRun);
       assert.isDefined(queuedRun);
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.archive",
         commandId: CommandId.make("runtime-layer-archive-queued-archive"),
         threadId,
@@ -3642,7 +3650,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.equal(yield* orchestrator.resumeQueuedRuns, 0);
 
       const promoteError = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "queued-message.promote-to-steer",
           commandId: CommandId.make("runtime-layer-archive-queued-promote"),
           threadId,
@@ -3665,7 +3673,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         const eventSink = yield* EventSink.EventSinkV2;
         const threadId = ThreadId.make(`runtime-layer-serialized-queue-thread-${automatic}`);
 
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -3679,7 +3687,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           branch: null,
           worktreePath: process.cwd(),
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",
@@ -3691,7 +3699,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           modelSelection,
           dispatchMode: { type: "start_immediately" },
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: automatic ? "agent" : "user",
           creationSource: automatic ? "provider" : "web",
@@ -3713,7 +3721,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           modelSelection,
           dispatchMode: { type: "queue_after_active" },
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",
@@ -3865,7 +3873,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const threadId = ThreadId.make("runtime-layer-wake-work-start-thread");
       const messageId = (key: string) => MessageId.make(`runtime-layer-wake-work-start-${key}`);
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -3880,7 +3888,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         worktreePath: process.cwd(),
       });
       const dispatch = (key: string, wake: boolean) =>
-        orchestrator.dispatch({
+        orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: wake ? "agent" : "user",
           creationSource: wake ? "provider" : "web",
@@ -3913,7 +3921,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       yield* dispatch("early-wake", true);
       // The early wake now runs ahead of the older queued prompt, as a
       // delegated result does when it jumps the queue.
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "queued-run.reorder",
         commandId: CommandId.make("runtime-layer-wake-work-start-reorder"),
         threadId,
@@ -3984,7 +3992,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         const eventSink = yield* EventSink.EventSinkV2;
         const threadId = ThreadId.make(`runtime-layer-failed-queue-${failureClass}`);
 
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -3999,7 +4007,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           worktreePath: process.cwd(),
         });
         for (const index of [0, 1]) {
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",
@@ -4092,7 +4100,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           assert.equal(yield* Queue.take(heldRunIds), queuedRun.id);
           const held = yield* orchestrator.getThreadProjection(threadId);
           assert.equal(held.runs.find((run) => run.id === queuedRun.id)?.status, "queued");
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "queue.resume",
             commandId: CommandId.make(`${threadId}:resume`),
             threadId,
@@ -4117,7 +4125,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const threadId = ThreadId.make("runtime-layer-interrupted-queue");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -4132,7 +4140,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         worktreePath: process.cwd(),
       });
       for (const [index, text] of ["Active", "Queued"].entries()) {
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",
@@ -4148,7 +4156,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const before = yield* orchestrator.getThreadProjection(threadId);
       const activeRun = before.runs[0]!;
       const queuedRun = before.runs[1]!;
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "run.interrupt",
         commandId: CommandId.make(`${threadId}:interrupt`),
         threadId,
@@ -4172,7 +4180,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
         const threadId = ThreadId.make(`queue-hold-${trigger}`);
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -4187,7 +4195,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           worktreePath: process.cwd(),
         });
         for (const [index, text] of ["Active", "First queued", "Second queued"].entries()) {
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",
@@ -4232,14 +4240,14 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         // Editing and reordering are allowed without releasing the hold.
         const first = queued[0]!;
         const second = queued[1]!;
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "queued-run.edit",
           commandId: CommandId.make(`${threadId}:edit`),
           threadId,
           runId: second.id,
           text: "Edited second message",
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "queued-run.reorder",
           commandId: CommandId.make(`${threadId}:reorder`),
           threadId,
@@ -4252,8 +4260,8 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           commandId: CommandId.make(`${threadId}:resume`),
           threadId,
         };
-        yield* orchestrator.dispatch(resume);
-        yield* orchestrator.dispatch(resume);
+        yield* orchestrator.dispatch(trustedMutationAuthority, resume);
+        yield* orchestrator.dispatch(trustedMutationAuthority, resume);
         const resumed = yield* orchestrator.getThreadProjection(threadId);
         assert.equal(resumed.runs.find((run) => run.id === second.id)?.status, "starting");
         assert.equal(resumed.runs.find((run) => run.id === first.id)?.status, "queued");
@@ -4271,7 +4279,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const threadId = ThreadId.make("runtime-layer-queued-edit-thread");
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -4285,7 +4293,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         branch: null,
         worktreePath: "/tmp/runtime-layer-queued-edit",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -4297,7 +4305,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         modelSelection,
         dispatchMode: { type: "start_immediately" },
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -4314,7 +4322,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       const queuedRun = before.runs.find((run) => run.status === "queued");
       assert.isDefined(queuedRun);
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "queued-run.edit",
         commandId: CommandId.make("runtime-layer-queued-edit-edit"),
         threadId,
@@ -4332,7 +4340,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       );
       assert.isUndefined(editedItem, "editing queue state must not create a timeline turn item");
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "queued-run.edit",
         commandId: CommandId.make("runtime-layer-queued-edit-attachments"),
         threadId,
@@ -4356,7 +4364,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         ["runtime-layer-queued-edit-attachment"],
       );
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "queued-run.edit",
         commandId: CommandId.make("runtime-layer-queued-edit-text-only"),
         threadId,
@@ -4373,7 +4381,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       );
 
       const emptyEditError = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "queued-run.edit",
           commandId: CommandId.make("runtime-layer-queued-edit-empty"),
           threadId,
@@ -4383,7 +4391,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         .pipe(Effect.flip);
       assert.equal(emptyEditError._tag, "OrchestratorCommandRejectedError");
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "queued-run.cancel",
         commandId: CommandId.make("runtime-layer-queued-edit-cancel"),
         threadId,
@@ -4409,7 +4417,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       assert.equal(yield* orchestrator.resumeQueuedRuns, 0);
 
       const cancelAgainError = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "queued-run.cancel",
           commandId: CommandId.make("runtime-layer-queued-edit-cancel-again"),
           threadId,
@@ -4437,7 +4445,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("pending provider interruption", (
         title: "Pending interrupt project",
         workspaceRoot: "/tmp/runtime-layer-pending-interrupt-project",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -4451,7 +4459,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("pending provider interruption", (
         branch: null,
         worktreePath: null,
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -4469,7 +4477,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("pending provider interruption", (
       assert.isDefined(run);
       assert.equal(run.status, "starting");
 
-      const interrupt = yield* threadManagement.interruptThread({
+      const interrupt = yield* threadManagement.interruptThread(trustedMutationAuthority, {
         projectId,
         commandId: CommandId.make("runtime-layer-pending-interrupt-command"),
         threadId,
@@ -4510,7 +4518,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("snooze projection", (it) => {
         title: "Snoozed shell projection",
         workspaceRoot: "/tmp/runtime-layer-snoozed-project",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -4524,7 +4532,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("snooze projection", (it) => {
         branch: null,
         worktreePath: null,
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.snooze",
         commandId: CommandId.make("runtime-layer-snoozed-thread-snooze"),
         threadId,
@@ -4536,7 +4544,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("snooze projection", (it) => {
       const firstUpdatedAt = firstProjection.thread.updatedAt;
       assert.isNotNull(firstSnoozedAt);
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.snooze",
         commandId: CommandId.make("runtime-layer-snoozed-thread-snooze-again"),
         threadId,
@@ -4550,7 +4558,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("snooze projection", (it) => {
       assert.deepEqual(thread.snoozedAt, firstSnoozedAt);
       assert.deepEqual(thread.updatedAt, firstUpdatedAt);
 
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
@@ -4585,7 +4593,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("visited projection", (it) => {
         title: "Visited shell projection",
         workspaceRoot: "/tmp/runtime-layer-visited-project",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -4604,7 +4612,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("visited projection", (it) => {
       const createdUpdatedAt = created.thread.updatedAt;
 
       yield* TestClock.adjust("1 second");
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.visit",
         commandId: CommandId.make("runtime-layer-visited-thread-visit"),
         threadId,
@@ -4618,7 +4626,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("visited projection", (it) => {
 
       // Monotonic: an older watermark (a replay or a stale device) cannot
       // rewind the marker.
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.visit",
         commandId: CommandId.make("runtime-layer-visited-thread-visit-stale"),
         threadId,
@@ -4635,7 +4643,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("visited projection", (it) => {
 
       // No completed run yet → nothing to mark unread against.
       const markUnread = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "thread.mark-unread",
           commandId: CommandId.make("runtime-layer-visited-thread-mark-unread"),
           threadId,
@@ -4653,7 +4661,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("visited projection", (it) => {
         ${visitedAt}, '{broken'
       )`;
       const nextVisitedAt = "2026-07-24T02:00:00.000Z";
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.visit",
         commandId: CommandId.make("runtime-layer-visited-without-history"),
         threadId,
@@ -4666,7 +4674,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("visited projection", (it) => {
       assert.equal(watermark!.visited_at, nextVisitedAt);
       assert.equal(watermark!.updated_at, DateTime.formatIso(createdUpdatedAt));
       const invalidVisit = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "thread.visit",
           commandId: CommandId.make("runtime-layer-visited-invalid-timestamp"),
           threadId,
@@ -4708,7 +4716,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("shared application data plane", (
       const projectEvent = yield* Queue.take(delivered);
       assert.isTrue("aggregateKind" in projectEvent && projectEvent.aggregateId === projectId);
 
-      const threadResult = yield* orchestrator.dispatch({
+      const threadResult = yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         createdBy: "user",
         creationSource: "web",
@@ -4771,7 +4779,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           defaultModelSelection: modelSelection,
           createdAt,
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           commandId: CommandId.make(`manual-resume:create:${reason}`),
           threadId,
@@ -4785,7 +4793,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           createdBy: "user",
           creationSource: "web",
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           commandId: CommandId.make(`manual-resume:start:${reason}`),
           threadId,
@@ -4796,7 +4804,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           createdBy: "user",
           creationSource: "web",
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           commandId: CommandId.make(`manual-resume:queue:${reason}`),
           threadId,
@@ -4877,6 +4885,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
             (thread) => thread.id === threadId,
           )!;
           yield* orchestrator.dispatch(
+            trustedMutationAuthority,
             limitRecoveryCommand(shell, true, DateTime.toEpochMillis(now))!,
           );
           const armed = (yield* orchestrator.getShellSnapshot()).threads.find(
@@ -4897,18 +4906,20 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           createdBy: "user" as const,
           creationSource: "web" as const,
         });
-        yield* orchestrator.dispatch(resume("first"));
+        yield* orchestrator.dispatch(trustedMutationAuthority, resume("first"));
         const after = yield* orchestrator.getThreadProjection(threadId);
         assert.lengthOf(after.runs, 3);
         assert.equal(after.runs[1]?.status, "queued");
         assert.equal(after.runs[2]?.status, "starting");
         assert.equal(
-          (yield* orchestrator.dispatch(resume("second")).pipe(Effect.exit))._tag,
+          (yield* orchestrator
+            .dispatch(trustedMutationAuthority, resume("second"))
+            .pipe(Effect.exit))._tag,
           "Failure",
         );
         if (scheduledResume !== null) {
           yield* TestClock.adjust("1 minute");
-          yield* orchestrator.dispatch(scheduledResume);
+          yield* orchestrator.dispatch(trustedMutationAuthority, scheduledResume);
         }
         assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 3);
       }),
@@ -4947,7 +4958,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         defaultModelSelection: modelSelection,
         createdAt: DateTime.formatIso(yield* DateTime.now),
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.create",
         commandId: CommandId.make(`recovery:create:${scenario}`),
         threadId,
@@ -4961,7 +4972,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         createdBy: "user",
         creationSource: "web",
       });
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         commandId: CommandId.make(`recovery:message:${scenario}`),
         threadId,
@@ -4973,7 +4984,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         creationSource: "web",
       });
       if (scenario === "queued-resume") {
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           commandId: CommandId.make(`recovery:queued:${scenario}`),
           threadId,
@@ -5052,7 +5063,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           ],
         });
         const resumeHeldQueue = yield* orchestrator
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "queue.resume",
             commandId: CommandId.make("recovery:resume-held:queued-resume"),
             threadId,
@@ -5067,7 +5078,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       assert.isNull(limitRecoveryCommand(shell, false, DateTime.toEpochMillis(now)));
       if (scenario === "invalid-snooze") {
         const result = yield* orchestrator
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "thread.metadata.update",
             commandId: CommandId.make("recovery:invalid-snooze"),
             threadId,
@@ -5091,7 +5102,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       const autoResume = scenario !== "snooze-only" && scenario !== "wake";
       const arm = limitRecoveryCommand(shell, autoResume, DateTime.toEpochMillis(now), snooze);
       assert.isNotNull(arm);
-      yield* orchestrator.dispatch(arm!);
+      yield* orchestrator.dispatch(trustedMutationAuthority, arm!);
       let armedShell = (yield* orchestrator.getShellSnapshot()).threads.find(
         (thread) => thread.id === threadId,
       )!;
@@ -5106,7 +5117,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         assert.equal(DateTime.toEpochMillis(armedShell.snoozedUntil!), Date.parse(resetAt));
       if (scenario === "cancel-resume-keep-snooze" || scenario === "wake-preserve-resume") {
         yield* TestClock.adjust("10 seconds");
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make(`recovery:independent-choice:${scenario}`),
           threadId,
@@ -5137,7 +5148,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       }
       if (scenario === "independent-patches") {
         yield* TestClock.adjust("10 seconds");
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make("recovery:patch-snooze"),
           threadId,
@@ -5148,7 +5159,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         assert.isTrue(current.thread.limitRecovery!.snooze);
         // This is also the payload an older auto-resume-only client sends.
         yield* TestClock.adjust("10 seconds");
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make("recovery:patch-cancel-resume"),
           threadId,
@@ -5162,7 +5173,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           DateTime.toEpochMillis(current.thread.snoozedAt!),
           DateTime.toEpochMillis(current.thread.updatedAt),
         );
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make("recovery:patch-resume"),
           threadId,
@@ -5175,13 +5186,13 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         assert.isTrue(armedShell.limitRecovery!.snooze);
       }
       if (scenario === "manual-snooze" || scenario === "manual-snooze-after-recovery") {
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.snooze",
           commandId: CommandId.make(`recovery:manual-snooze:${scenario}`),
           threadId,
           snoozedUntil: resetAt,
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make(`recovery:manual-cancel:${scenario}`),
           threadId,
@@ -5193,7 +5204,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           ),
           Date.parse(resetAt),
         );
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.unsnooze",
           commandId: CommandId.make(`recovery:manual-wake:${scenario}`),
           threadId,
@@ -5202,7 +5213,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         assert.isNull((yield* orchestrator.getThreadProjection(threadId)).thread.snoozedUntil);
       }
       if (scenario === "wake") {
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make(`recovery:wake:${scenario}`),
           threadId,
@@ -5211,7 +5222,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         assert.isNull((yield* orchestrator.getThreadProjection(threadId)).thread.snoozedUntil);
       }
       assert.isNull(limitRecoveryCommand(armedShell, true, DateTime.toEpochMillis(now)));
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "message.dispatch",
         commandId: CommandId.make(`recovery:early:${scenario}`),
         messageId: MessageId.make(`recovery:early:${scenario}`),
@@ -5237,13 +5248,13 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       else assert.isNull(resume);
       if (scenario === "snooze-race") {
         const wakeAt = DateTime.formatIso(DateTime.add(yield* DateTime.now, { minutes: 1 }));
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.snooze",
           commandId: CommandId.make("recovery:raced-snooze"),
           threadId,
           snoozedUntil: wakeAt,
         });
-        yield* orchestrator.dispatch(resume!);
+        yield* orchestrator.dispatch(trustedMutationAuthority, resume!);
         assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
         yield* TestClock.adjust("1 minute");
         const current = (yield* orchestrator.getShellSnapshot()).threads.find(
@@ -5256,13 +5267,13 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         );
         assert.isNotNull(freshResume);
         assert.notEqual(freshResume!.commandId, resume!.commandId);
-        yield* orchestrator.dispatch(freshResume!);
-        yield* orchestrator.dispatch(freshResume!);
+        yield* orchestrator.dispatch(trustedMutationAuthority, freshResume!);
+        yield* orchestrator.dispatch(trustedMutationAuthority, freshResume!);
         assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 2);
       }
       if (scenario === "expired-snooze") {
         const staleSnooze = yield* orchestrator
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "thread.metadata.update",
             commandId: CommandId.make("recovery:expired-snooze"),
             threadId,
@@ -5277,20 +5288,20 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       }
 
       if (scenario === "cancel" || scenario === "rearm")
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make(`recovery:cancel:${scenario}`),
           threadId,
           limitRecovery: { runId: run.id, resetAt, autoResume: false },
         });
       if (scenario === "archive")
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.archive",
           commandId: CommandId.make(`recovery:archive:${scenario}`),
           threadId,
         });
       if (scenario === "new-message")
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           commandId: CommandId.make(`recovery:new-message:${scenario}`),
           threadId,
@@ -5302,7 +5313,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           creationSource: "web",
         });
       if (scenario === "settle")
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.settle",
           commandId: CommandId.make(`recovery:settle:${scenario}`),
           threadId,
@@ -5332,14 +5343,14 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         });
       }
       if (scenario === "rearm") {
-        yield* orchestrator.dispatch(resume!);
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, resume!);
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make(`recovery:rearm:${scenario}`),
           threadId,
           limitRecovery: { runId: run.id, resetAt, autoResume: true },
         });
-        yield* orchestrator.dispatch(resume!);
+        yield* orchestrator.dispatch(trustedMutationAuthority, resume!);
         assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 1);
         const rearmedShell = (yield* orchestrator.getShellSnapshot()).threads.find(
           (thread) => thread.id === threadId,
@@ -5351,14 +5362,14 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         );
         assert.isNotNull(freshResume);
         assert.notEqual(freshResume!.commandId, resume!.commandId);
-        yield* orchestrator.dispatch(freshResume!);
-        yield* orchestrator.dispatch(freshResume!);
+        yield* orchestrator.dispatch(trustedMutationAuthority, freshResume!);
+        yield* orchestrator.dispatch(trustedMutationAuthority, freshResume!);
         assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 2);
       }
       const before = yield* orchestrator.getThreadProjection(threadId);
       if (resume !== null) {
-        yield* orchestrator.dispatch(resume);
-        yield* orchestrator.dispatch(resume);
+        yield* orchestrator.dispatch(trustedMutationAuthority, resume);
+        yield* orchestrator.dispatch(trustedMutationAuthority, resume);
       }
       const after = yield* orchestrator.getThreadProjection(threadId);
       assert.lengthOf(
@@ -5402,7 +5413,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
             },
           ],
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "queue.resume",
           commandId: CommandId.make("recovery:resume-held-after-limit:queued-resume"),
           threadId,

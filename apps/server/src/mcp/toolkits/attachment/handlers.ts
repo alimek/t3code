@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../../../auth/CommandAuthorization.ts";
 import { type ChatAttachment, MessageId, OrchestratorMcpFailure } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Upload from "../../../assets/AttachmentUpload.ts";
@@ -50,7 +51,7 @@ export const layer = McpToolAccess.toLayer(AttachmentToolkit, {
         );
         const commandId = yield* newCommandId();
         const messageId = MessageId.make(commandId);
-        const result = yield* ThreadMessageIntake.sendToThread({
+        const result = yield* ThreadMessageIntake.sendToThread(trustedMutationAuthority, {
           projectId: projection.thread.projectId,
           threadId: projection.thread.id,
           commandId,

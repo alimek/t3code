@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -41,7 +42,7 @@ const supervised = { runtimeMode: "approval-required", interactionMode: "default
 const createThread = (threadId: ThreadId) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
-    yield* orchestrator.dispatch({
+    yield* orchestrator.dispatch(trustedMutationAuthority, {
       type: "thread.create",
       commandId: CommandId.make(`create:${threadId}`),
       threadId,
@@ -64,7 +65,7 @@ it.layer(layerTest)("DispatchModeLimit", (it) => {
       const threadId = ThreadId.make("thread:limit-raised");
       yield* createThread(threadId);
       // The user raises the thread; the user's own commands have no limit.
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("raise"),
         threadId,
@@ -77,21 +78,21 @@ it.layer(layerTest)("DispatchModeLimit", (it) => {
         title: "After",
       } as const;
       const refused = yield* orchestrator
-        .dispatch(rename)
+        .dispatch(trustedMutationAuthority, rename)
         .pipe(Effect.provideService(DispatchModeLimit, supervised), Effect.flip);
       assert.equal(refused._tag, "OrchestratorThreadAboveModeLimitError");
       assert.equal((yield* projections.getThreadShell(threadId))?.title, "Before");
 
       // Refused before planning, so no receipt holds the command id: once the
       // user lowers the thread again, the same command goes through.
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("lower"),
         threadId,
         runtimeMode: "approval-required",
       });
       yield* orchestrator
-        .dispatch(rename)
+        .dispatch(trustedMutationAuthority, rename)
         .pipe(Effect.provideService(DispatchModeLimit, supervised));
       assert.equal((yield* projections.getThreadShell(threadId))?.title, "After");
     }),
@@ -103,7 +104,7 @@ it.layer(layerTest)("DispatchModeLimit", (it) => {
       const threadId = ThreadId.make("thread:limit-plan");
       yield* createThread(threadId);
       const refused = yield* orchestrator
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make("rename-plan"),
           threadId,
@@ -128,7 +129,7 @@ it.layer(layerTest)("DispatchModeLimit", (it) => {
       const sourceThreadId = ThreadId.make("thread:limit-fork-source");
       const targetThreadId = ThreadId.make("thread:limit-fork-target");
       yield* createThread(sourceThreadId);
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("raise-source"),
         threadId: sourceThreadId,
@@ -144,7 +145,7 @@ it.layer(layerTest)("DispatchModeLimit", (it) => {
         creationSource: "mcp",
       } as const;
       const refused = yield* orchestrator
-        .dispatch(fork)
+        .dispatch(trustedMutationAuthority, fork)
         .pipe(Effect.provideService(DispatchModeLimit, supervised), Effect.flip);
       assert.ok(refused._tag === "OrchestratorThreadAboveModeLimitError");
       assert.equal(refused.threadId, sourceThreadId);
@@ -152,14 +153,14 @@ it.layer(layerTest)("DispatchModeLimit", (it) => {
 
       // The refusal records no receipt: once the source is lowered, the same
       // command is planned again (and fails only for want of a finished run).
-      yield* orchestrator.dispatch({
+      yield* orchestrator.dispatch(trustedMutationAuthority, {
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("lower-source"),
         threadId: sourceThreadId,
         runtimeMode: "approval-required",
       });
       const retried = yield* orchestrator
-        .dispatch(fork)
+        .dispatch(trustedMutationAuthority, fork)
         .pipe(Effect.provideService(DispatchModeLimit, supervised), Effect.flip);
       assert.equal(retried._tag, "OrchestratorDispatchError");
     }),

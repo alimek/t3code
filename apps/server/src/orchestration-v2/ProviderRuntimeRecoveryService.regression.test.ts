@@ -22,7 +22,7 @@ it("uses the thread provider for stale background work without provider threads"
   const runId = RunId.make("run_recovery_background_no_provider_threads");
   const itemId = TurnItemId.make("turn_item_recovery_background_no_provider_threads");
   const providerInstanceId = ProviderInstanceId.make("codex");
-  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | null =
     null;
   const projection = {
     thread: { id: threadId, providerInstanceId },
@@ -55,7 +55,7 @@ it("uses the thread provider for stale background work without provider threads"
           getRuntimeRecoveryProjection: () => Effect.succeed(projection),
         }),
         Layer.mock(EventSink.EventSinkV2)({
-          commitCommand: (input) => {
+          commitCommand: (_authority, input) => {
             committedInput = input;
             return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
           },

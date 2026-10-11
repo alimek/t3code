@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { siblingPullRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import {
   CommandId,
@@ -248,7 +249,7 @@ export const make = Effect.gen(function* () {
         const url = siblingPullRequestUrl(link.url, layer.number);
         if (url === null) continue;
         const uuid = yield* crypto.randomUUIDv4;
-        yield* engine.dispatch({
+        yield* engine.dispatch(trustedMutationAuthority, {
           type: "thread.pull-request.link",
           commandId: CommandId.make(`server:pr-stack-link:${thread.id}:${uuid}`),
           threadId: thread.id,
@@ -260,7 +261,7 @@ export const make = Effect.gen(function* () {
       }
       if (changed) {
         const uuid = yield* crypto.randomUUIDv4;
-        yield* engine.dispatch({
+        yield* engine.dispatch(trustedMutationAuthority, {
           type: "thread.pull-request-link.sync",
           commandId: CommandId.make(`server:pr-sync:${thread.id}:${uuid}`),
           threadId: thread.id,

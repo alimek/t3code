@@ -196,14 +196,14 @@ it.effect.each(["completed", "waiting", "cancelled"] as const)(
       } as unknown as OrchestrationV2ThreadProjection;
       const commands: Parameters<
         ThreadManagementService.ThreadManagementService["Service"]["dispatch"]
-      >[0][] = [];
+      >[1][] = [];
       yield* continueRestartedRun({ threadId, sourceRunId: runId }).pipe(
         Effect.provide(
           Layer.merge(
             Layer.mock(ThreadManagementService.ThreadManagementService)({
               getThreadRecords: () => Effect.succeed(projection),
               recoverDelegatedTask: () => Effect.void,
-              dispatch: (command) => {
+              dispatch: (_authority, command) => {
                 commands.push(command);
                 return Effect.succeed({} as never);
               },
@@ -232,14 +232,14 @@ it.effect("does not continue a failed run that lost background work", () =>
     } as unknown as OrchestrationV2ThreadProjection;
     const commands: Parameters<
       ThreadManagementService.ThreadManagementService["Service"]["dispatch"]
-    >[0][] = [];
+    >[1][] = [];
     yield* continueRestartedRun({ threadId, sourceRunId: runId }).pipe(
       Effect.provide(
         Layer.merge(
           Layer.mock(ThreadManagementService.ThreadManagementService)({
             getThreadRecords: () => Effect.succeed(projection),
             recoverDelegatedTask: () => Effect.void,
-            dispatch: (command) => {
+            dispatch: (_authority, command) => {
               commands.push(command);
               return Effect.succeed({} as never);
             },
@@ -261,7 +261,7 @@ it.effect.each([
   "atomically records restart intent with cancellation when opt-in is %s and project override is %s",
   ([enabled, projectOverride]) =>
     Effect.gen(function* () {
-      let committed: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | undefined;
+      let committed: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | undefined;
       const recovery = yield* ProviderRuntimeRecovery.make.pipe(
         Effect.provide(
           Layer.mergeAll(
@@ -281,7 +281,7 @@ it.effect.each([
               getRuntimeRecoveryProjection: () => Effect.succeed(makeProjection()),
             }),
             Layer.mock(EventSink.EventSinkV2)({
-              commitCommand: (input) => {
+              commitCommand: (_authority, input) => {
                 committed = input;
                 return Effect.succeed({ committed: true, cancelledEffectCount: 1 } as never);
               },
@@ -318,11 +318,11 @@ it.effect("does not duplicate delivery and yields to newer user work or opt-out"
     projection = { ...projection, runs: [{ ...projection.runs[0]!, status: "cancelled" }] };
     const commands: Parameters<
       ThreadManagementService.ThreadManagementService["Service"]["dispatch"]
-    >[0][] = [];
+    >[1][] = [];
     const layerThreads = Layer.mock(ThreadManagementService.ThreadManagementService)({
       getThreadRecords: () => Effect.succeed(projection),
       recoverDelegatedTask: () => Effect.void,
-      dispatch: (command) => {
+      dispatch: (_authority, command) => {
         commands.push(command);
         if (command.type === "message.dispatch")
           projection = { ...projection, messages: [{ id: command.messageId } as never] };
@@ -487,7 +487,7 @@ it.effect.each([
         ],
       } as unknown as OrchestrationV2ThreadProjection;
       for (const trigger of ["startup", "shutdown"] as const) {
-        const commits: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0][] = [];
+        const commits: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1][] = [];
         const writes: Parameters<EventSink.EventSinkV2["Service"]["writeWithEffects"]>[0][] = [];
         const recovery = yield* ProviderRuntimeRecovery.make.pipe(
           Effect.provide(
@@ -503,7 +503,7 @@ it.effect.each([
                     writes.push(input);
                     return [];
                   }),
-                commitCommand: (input) =>
+                commitCommand: (_authority, input) =>
                   Effect.sync(() => {
                     commits.push(input);
                     return { committed: true, cancelledEffectCount: 0 } as never;
@@ -544,7 +544,7 @@ it.effect.each([
 it.effect("does not cancel or resume a run that completes while shutdown intent commits", () =>
   Effect.gen(function* () {
     let projection = makeProjection();
-    const commits: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0][] = [];
+    const commits: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1][] = [];
     const recovery = yield* ProviderRuntimeRecovery.make.pipe(
       Effect.provide(
         Layer.mergeAll(
@@ -564,7 +564,7 @@ it.effect("does not cancel or resume a run that completes while shutdown intent 
                 };
                 return [];
               }),
-            commitCommand: (input) =>
+            commitCommand: (_authority, input) =>
               Effect.sync(() => {
                 commits.push(input);
                 return { committed: true, cancelledEffectCount: 0 } as never;
@@ -615,7 +615,7 @@ const continuationTexts = (projection: OrchestrationV2ThreadProjection) =>
           Layer.mock(ThreadManagementService.ThreadManagementService)({
             getThreadRecords: () => Effect.succeed(projection),
             recoverDelegatedTask: () => Effect.void,
-            dispatch: (command) => {
+            dispatch: (_authority, command) => {
               if (command.type === "message.dispatch") texts.push(command.text);
               return Effect.succeed({} as never);
             },

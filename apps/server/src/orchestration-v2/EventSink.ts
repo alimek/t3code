@@ -1,4 +1,10 @@
 import {
+  authorizeCommandReceipt,
+  trustedMutationAuthority,
+  authorizeCommandAdmission,
+  type CommandAdmission,
+} from "../auth/CommandAuthorization.ts";
+import {
   CommandId,
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
@@ -119,18 +125,21 @@ export interface EventSinkV2Shape {
     },
     EventSinkV2Error
   >;
-  readonly commitCommand: (input: {
-    readonly commandId: CommandId;
-    readonly threadId: ThreadId;
-    readonly commandType: string;
-    readonly acceptedAt: DateTime.Utc;
-    readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
-    readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
-    readonly cancelUnsettledEffects?: {
-      readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
-      readonly reason: string;
-    };
-  }) => Effect.Effect<
+  readonly commitCommand: (
+    admission: CommandAdmission,
+    input: {
+      readonly commandId: CommandId;
+      readonly threadId: ThreadId;
+      readonly commandType: string;
+      readonly acceptedAt: DateTime.Utc;
+      readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
+      readonly effects: ReadonlyArray<EffectOutbox.PendingOrchestrationEffectV2>;
+      readonly cancelUnsettledEffects?: {
+        readonly effectTypes: ReadonlyArray<EffectOutbox.OrchestrationEffectRequestV2["type"]>;
+        readonly reason: string;
+      };
+    },
+  ) => Effect.Effect<
     {
       readonly receipt: CommandReceiptStore.CommandReceiptV2;
       readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
@@ -139,13 +148,16 @@ export interface EventSinkV2Shape {
     },
     EventSinkV2Error
   >;
-  readonly commitRejectedCommand: (input: {
-    readonly commandId: CommandId;
-    readonly threadId: ThreadId;
-    readonly commandType: string;
-    readonly rejectedAt: DateTime.Utc;
-    readonly error: string;
-  }) => Effect.Effect<CommandReceiptStore.CommandReceiptV2, EventSinkV2Error>;
+  readonly commitRejectedCommand: (
+    admission: CommandAdmission,
+    input: {
+      readonly commandId: CommandId;
+      readonly threadId: ThreadId;
+      readonly commandType: string;
+      readonly rejectedAt: DateTime.Utc;
+      readonly error: string;
+    },
+  ) => Effect.Effect<CommandReceiptStore.CommandReceiptV2, EventSinkV2Error>;
   /**
    * Append a project event, fold it into its row and record the receipt in one
    * transaction. A reused command id commits nothing and returns its receipt.
@@ -525,10 +537,12 @@ const layerBase: Layer.Layer<
       });
 
     const commitCommandEffect = Effect.fn("orchestrationV2.EventSink.commitCommand")(function* (
-      input: Parameters<EventSinkV2Shape["commitCommand"]>[0],
+      admission: CommandAdmission,
+      input: Parameters<EventSinkV2Shape["commitCommand"]>[1],
     ) {
       const result = yield* commitThenPublish(
         Effect.gen(function* () {
+          yield* authorizeCommandAdmission(sql, admission, input.commandId, input);
           const reserved = yield* commandReceipts.insertIfAbsent({
             commandId: input.commandId,
             threadId: input.threadId,
@@ -539,6 +553,7 @@ const layerBase: Layer.Layer<
             error: null,
           });
           if (!reserved) {
+            yield* authorizeCommandAdmission(sql, admission, input.commandId, input);
             const existing = yield* existingCommandResult(input.commandId);
             return { ...existing, committed: false as const, cancelledEffectIds: [] };
           }
@@ -555,6 +570,8 @@ const layerBase: Layer.Layer<
             );
           }
           yield* applyStoredEvents(storedEvents);
+          if (admission !== trustedMutationAuthority)
+            yield* authorizeCommandReceipt(sql, admission.authority, input.commandId);
           yield* effectOutbox.enqueue(input.effects);
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
             commandId: input.commandId,
@@ -594,9 +611,13 @@ const layerBase: Layer.Layer<
 
     const commitRejectedCommandEffect = Effect.fn(
       "orchestrationV2.EventSink.commitRejectedCommand",
-    )(function* (input: Parameters<EventSinkV2Shape["commitRejectedCommand"]>[0]) {
+    )(function* (
+      admission: CommandAdmission,
+      input: Parameters<EventSinkV2Shape["commitRejectedCommand"]>[1],
+    ) {
       return yield* sql.withTransaction(
         Effect.gen(function* () {
+          yield* authorizeCommandAdmission(sql, admission, input.commandId, input);
           const sequence = yield* eventStore.latestSequence({ threadId: input.threadId });
           const receipt: CommandReceiptStore.CommandReceiptV2 = {
             commandId: input.commandId,
@@ -608,6 +629,7 @@ const layerBase: Layer.Layer<
             error: input.error,
           };
           const inserted = yield* commandReceipts.insertIfAbsent(receipt);
+          yield* authorizeCommandAdmission(sql, admission, input.commandId, input);
           if (inserted) {
             return receipt;
           }
@@ -804,8 +826,8 @@ const layerBase: Layer.Layer<
               }),
           ),
         ),
-      commitCommand: (input) =>
-        commitCommandEffect(input).pipe(
+      commitCommand: (admission, input) =>
+        commitCommandEffect(admission, input).pipe(
           Effect.mapError(
             (cause) =>
               new EventSinkWriteError({
@@ -815,8 +837,8 @@ const layerBase: Layer.Layer<
               }),
           ),
         ),
-      commitRejectedCommand: (input) =>
-        commitRejectedCommandEffect(input).pipe(
+      commitRejectedCommand: (admission, input) =>
+        commitRejectedCommandEffect(admission, input).pipe(
           Effect.mapError(
             (cause) =>
               new EventSinkWriteError({

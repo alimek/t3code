@@ -109,7 +109,7 @@ const withService = <A, E>(
               },
             ],
           } as never),
-        dispatch: (command) => {
+        dispatch: (_authority, command) => {
           if (command.type === "secret_request.record" && failedRecords > 0) {
             failedRecords -= 1;
             return Effect.fail(new Error("orchestrator unavailable") as never);

@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 /**
  * Runs OpenCode 2 through the whole orchestrator with the real driver: the
  * driver probes the binary, spawns `opencode serve`, and routes to the 2.x
@@ -274,7 +275,7 @@ const send = Effect.fn("OpenCode2Live.send")(function* (
   modelSelection: ModelSelection = MODEL,
 ) {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
-  yield* orchestrator.dispatch({
+  yield* orchestrator.dispatch(trustedMutationAuthority, {
     type: "message.dispatch",
     createdBy: "user",
     creationSource: "web",
@@ -355,7 +356,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         );
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const threadId = ThreadId.make("thread:opencode2-live");
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -403,7 +404,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
           ),
         );
         const secondRun = running.runs.at(-1)!;
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "run.interrupt",
           commandId: CommandId.make("command:opencode2-live:interrupt"),
           threadId,
@@ -445,7 +446,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         yield* EffectWorker.runDaemonWithOptions({ concurrency: 2 }).pipe(Effect.forkScoped);
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const threadId = ThreadId.make("thread:opencode2-live-supervised");
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -466,7 +467,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
           request: OrchestrationV2ThreadProjection["runtimeRequests"][number],
           response: { decision: "accept" | "decline" } | { answers: Record<string, string> },
         ) =>
-          orchestrator.dispatch({
+          orchestrator.dispatch(trustedMutationAuthority, {
             type: "runtime-request.respond",
             commandId: CommandId.make(`command:opencode2-live:${key}`),
             threadId,
@@ -555,7 +556,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         yield* EffectWorker.runDaemonWithOptions({ concurrency: 2 }).pipe(Effect.forkScoped);
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const threadId = ThreadId.make("thread:opencode2-live-plan");
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -595,7 +596,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         // One thread per case: a model that just answered one prompt may repeat it.
         const thread = Effect.fn("OpenCode2Live.subagentThread")(function* (key: string) {
           const threadId = ThreadId.make(`thread:opencode2-live-subagents-${key}`);
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             createdBy: "user",
             creationSource: "web",
@@ -692,7 +693,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
             projection.runs[0]?.status !== "running" &&
             projection.subagents[0]?.status === "running",
         );
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "run.interrupt",
           commandId: CommandId.make("command:opencode2-live:subagents-stop-interrupt"),
           threadId: stopThread,
@@ -749,7 +750,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
           "init",
         );
         const threadId = ThreadId.make("thread:opencode2-live-inbox");
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -771,7 +772,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
             { type: "message.dispatch" }
           >["dispatchMode"],
         ) =>
-          orchestrator.dispatch({
+          orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",
@@ -847,7 +848,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
 
         // 3. Fork from the first turn: the fork only knows what came before the shell turn.
         const forkId = ThreadId.make("thread:opencode2-live-inbox-fork");
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.fork",
           createdBy: "user",
           creationSource: "web",
@@ -860,13 +861,13 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         // the source alone. The fork's session moves there with it.
         const forkWork = path.join(ROOT, "inbox-fork-work");
         yield* fs.makeDirectory(forkWork, { recursive: true });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.metadata.update",
           commandId: CommandId.make("command:opencode2-live-inbox:fork-worktree"),
           threadId: forkId,
           worktreePath: forkWork,
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",
@@ -889,7 +890,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
           (candidate) => candidate.appRunOrdinal === 1 && candidate.status === "ready",
         );
         assert.isDefined(checkpoint);
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "checkpoint.rollback",
           commandId: CommandId.make("command:opencode2-live-inbox:rollback"),
           threadId,
@@ -968,7 +969,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
 
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const threadId = ThreadId.make("thread:opencode2-live-modes");
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -1001,7 +1002,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         assert.isAbove(planSteps.length, 0);
         assert.isTrue(planSteps.every((agent) => agent === "plan"));
 
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.interaction-mode.set",
           commandId: CommandId.make("command:opencode2-live-modes:default"),
           threadId,
@@ -1053,7 +1054,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         assert.isAbove(title.title.length, 0);
 
         const threadId = ThreadId.make("thread:opencode2-live-restart");
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -1128,7 +1129,7 @@ describe.runIf(binaryPath !== undefined && ROOT !== "")("OpenCode 2 live orchest
         yield* EffectWorker.runDaemonWithOptions({ concurrency: 2 }).pipe(Effect.forkScoped);
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const threadId = ThreadId.make("thread:opencode2-live-drop");
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",

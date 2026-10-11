@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../../auth/CommandAuthorization.ts";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -829,7 +830,7 @@ describe("orchestration v2 legacy v1 cutover", () => {
 
               // First continuation of a migrated thread: a fresh provider session
               // receives the newest transcript suffix inside the 32k handoff.
-              yield* orchestrator.dispatch({
+              yield* orchestrator.dispatch(trustedMutationAuthority, {
                 type: "message.dispatch",
                 createdBy: "user",
                 creationSource: "web",
@@ -860,7 +861,7 @@ describe("orchestration v2 legacy v1 cutover", () => {
               // The next continuation reuses the provider thread without a new
               // handoff: the imported context is only reissued until a v2 run
               // completes.
-              yield* orchestrator.dispatch({
+              yield* orchestrator.dispatch(trustedMutationAuthority, {
                 type: "message.dispatch",
                 createdBy: "user",
                 creationSource: "web",

@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -407,7 +408,7 @@ it.live("restarts selection as a new attempt and retries after old-session clean
 
       const result = yield* Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -421,7 +422,7 @@ it.live("restarts selection as a new attempt and retries after old-session clean
           branch: null,
           worktreePath: cwd,
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",
@@ -445,7 +446,7 @@ it.live("restarts selection as a new attempt and retries after old-session clean
           return yield* Effect.die("active restart test run is missing");
         }
 
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",
@@ -572,7 +573,7 @@ it.live.each(["stopped", "error"] as const)(
                 Stream.runDrain,
                 Effect.forkScoped,
               );
-              yield* orchestrator.dispatch({
+              yield* orchestrator.dispatch(trustedMutationAuthority, {
                 type: "message.dispatch",
                 createdBy: "user",
                 creationSource: "web",
@@ -589,7 +590,7 @@ it.live.each(["stopped", "error"] as const)(
               yield* worker.drain();
               return yield* orchestrator.getThreadProjection(threadId);
             });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             createdBy: "user",
             creationSource: "web",
@@ -654,7 +655,7 @@ it.live.each(["stopped", "error"] as const)(
           });
 
           const switchCommandId = CommandId.make(`${name}:switch`);
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.model-selection.set",
             commandId: switchCommandId,
             threadId,
@@ -726,7 +727,7 @@ it.live("detaches the old provider session after an active provider handoff", ()
 
       const result = yield* Effect.gen(function* () {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
@@ -740,7 +741,7 @@ it.live("detaches the old provider session after an active provider handoff", ()
           branch: null,
           worktreePath: cwd,
         });
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",
@@ -765,7 +766,7 @@ it.live("detaches the old provider session after an active provider handoff", ()
           return yield* Effect.die("active provider-handoff run is missing");
         }
 
-        yield* orchestrator.dispatch({
+        yield* orchestrator.dispatch(trustedMutationAuthority, {
           type: "message.dispatch",
           createdBy: "user",
           creationSource: "web",
@@ -887,7 +888,7 @@ it.live.each(["active", "idle", "selection-command", "pooled", "separate-home"] 
             ...initialSelection,
             model: mode === "active" ? initialSelection.model : "complete",
           };
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             commandId: CommandId.make(`${name}:create`),
             threadId,
@@ -913,7 +914,7 @@ it.live.each(["active", "idle", "selection-command", "pooled", "separate-home"] 
                 Stream.runDrain,
                 Effect.forkScoped,
               );
-              yield* orchestrator.dispatch({
+              yield* orchestrator.dispatch(trustedMutationAuthority, {
                 type: "message.dispatch",
                 commandId: CommandId.make(`${name}:${step}`),
                 threadId,
@@ -939,7 +940,7 @@ it.live.each(["active", "idle", "selection-command", "pooled", "separate-home"] 
           )!;
           const targetSelection = { instanceId: targetId, model: "complete" };
           if (mode === "selection-command") {
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "provider.switch",
               commandId: CommandId.make(`${name}:switch`),
               threadId,

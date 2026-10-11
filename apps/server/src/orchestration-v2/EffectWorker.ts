@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { CommandId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -186,7 +187,7 @@ export const layerExecutor: Layer.Layer<
                 // One Stop can interrupt several provider threads, so the
                 // settle is keyed by effect, not by the Stop command.
                 Effect.andThen(
-                  threads.dispatch({
+                  threads.dispatch(trustedMutationAuthority, {
                     type: "thread.background-work.settle",
                     commandId: CommandId.make(`${effect.id}:background-work-settled`),
                     threadId: effect.threadId,
@@ -225,7 +226,7 @@ export const layerExecutor: Layer.Layer<
                     );
                     const message = projection.messages.find((row) => row.id === messageId);
                     if (message?.delegatedCompletion === undefined) return;
-                    yield* threads.dispatch({
+                    yield* threads.dispatch(trustedMutationAuthority, {
                       type: "notification.delivery.accept",
                       commandId: CommandId.make(`command:mailbox-accepted:${effect.id}`),
                       threadId: effect.threadId,
@@ -254,7 +255,7 @@ export const layerExecutor: Layer.Layer<
                     if (message === undefined || run === undefined) return yield* error;
                     // Reuse the message identity and a stable command receipt so an outbox
                     // retry cannot append a duplicate message or start a second follow-up.
-                    yield* threads.dispatch({
+                    yield* threads.dispatch(trustedMutationAuthority, {
                       type: "message.dispatch",
                       commandId: CommandId.make(`command:steer-follow-up:${effect.id}`),
                       threadId: effect.threadId,
@@ -389,7 +390,7 @@ export const layerExecutor: Layer.Layer<
                   willRetry || Cause.hasInterruptsOnly(cause)
                     ? Effect.void
                     : threads
-                        .dispatch({
+                        .dispatch(trustedMutationAuthority, {
                           type: "checkpoint.rollback.fail",
                           commandId: CommandId.make(`${effect.commandId}:rollback-failed`),
                           threadId: effect.threadId,
@@ -472,7 +473,7 @@ export const layerExecutor: Layer.Layer<
               );
           case "delegated-tasks.stop":
             return threads
-              .stopDelegatedTasks({
+              .stopDelegatedTasks(trustedMutationAuthority, {
                 threadId: effect.threadId,
                 commandId: effect.commandId,
                 reason: effect.request.reason,

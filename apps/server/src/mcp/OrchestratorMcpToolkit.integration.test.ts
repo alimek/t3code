@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
@@ -708,7 +709,7 @@ describe("orchestrator MCP toolkit", () => {
           yield* Effect.gen(function* () {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             const server = yield* McpServer.McpServer;
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.create",
               createdBy: "user",
               creationSource: "web",
@@ -722,7 +723,7 @@ describe("orchestrator MCP toolkit", () => {
               branch: null,
               worktreePath: cwd,
             });
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",
@@ -808,7 +809,7 @@ describe("orchestrator MCP toolkit", () => {
             let parentRootNodeId = parentRun.rootNodeId;
             const queueAutomaticCompletion = (suffix: string, taskText: string) =>
               Effect.gen(function* () {
-                const delegated = yield* orchestrator.dispatch({
+                const delegated = yield* orchestrator.dispatch(trustedMutationAuthority, {
                   type: "delegated_task.request",
                   createdBy: "agent",
                   creationSource: "mcp",
@@ -855,7 +856,7 @@ describe("orchestrator MCP toolkit", () => {
                     new Error(`Automatic completion delivery ${suffix} was not reserved.`),
                   );
                 }
-                yield* orchestrator.dispatch({
+                yield* orchestrator.dispatch(trustedMutationAuthority, {
                   type: "message.dispatch",
                   createdBy: "agent",
                   creationSource: "server",
@@ -896,7 +897,7 @@ describe("orchestrator MCP toolkit", () => {
             // message.dispatch, so use the same metadata here while the test
             // probe records the offers instead of starting a worker.
             const coalescedTask = (suffix: string) =>
-              orchestrator.dispatch({
+              orchestrator.dispatch(trustedMutationAuthority, {
                 type: "delegated_task.request",
                 createdBy: "agent",
                 creationSource: "mcp",
@@ -956,7 +957,7 @@ describe("orchestrator MCP toolkit", () => {
               return yield* Effect.die(new Error("Coalesced delivery reservation missing."));
             }
             const coalescedDelivery = coalescedCohort.delivery;
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "agent",
               creationSource: "server",
@@ -993,7 +994,7 @@ describe("orchestrator MCP toolkit", () => {
             // Server-owned delivery ownership is authoritative even if a
             // stale client tries to mutate the queue directly.
             const completionEditError = yield* orchestrator
-              .dispatch({
+              .dispatch(trustedMutationAuthority, {
                 type: "queued-run.edit",
                 commandId: CommandId.make("command:mcp-parent:edit-coalesced-delivery"),
                 threadId: parentThreadId,
@@ -1003,7 +1004,7 @@ describe("orchestrator MCP toolkit", () => {
               .pipe(Effect.flip);
             expect(completionEditError._tag).toBe("OrchestratorCommandRejectedError");
             const completionReorderError = yield* orchestrator
-              .dispatch({
+              .dispatch(trustedMutationAuthority, {
                 type: "queued-run.reorder",
                 commandId: CommandId.make("command:mcp-parent:reorder-coalesced-delivery"),
                 threadId: parentThreadId,
@@ -1013,7 +1014,7 @@ describe("orchestrator MCP toolkit", () => {
               .pipe(Effect.flip);
             expect(completionReorderError._tag).toBe("OrchestratorDispatchError");
             const completionSteerError = yield* orchestrator
-              .dispatch({
+              .dispatch(trustedMutationAuthority, {
                 type: "queued-message.promote-to-steer",
                 commandId: CommandId.make("command:mcp-parent:steer-coalesced-delivery"),
                 threadId: parentThreadId,
@@ -1214,7 +1215,7 @@ describe("orchestrator MCP toolkit", () => {
               "Complete before a user queues follow-up work.",
             );
             const queuedUserMessageId = MessageId.make("message:mcp-parent:queue-race:user");
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",
@@ -1297,7 +1298,7 @@ describe("orchestrator MCP toolkit", () => {
                 projection.subagents.find((task) => task.id === queueRace.task.id)
                   ?.completionDelivery?.state === "acknowledged",
             );
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "queued-run.cancel",
               commandId: CommandId.make("command:mcp-parent:queue-race:cleanup"),
               threadId: parentThreadId,
@@ -1311,7 +1312,7 @@ describe("orchestrator MCP toolkit", () => {
               "Complete before a user steers the parent.",
             );
             const steerMessageId = MessageId.make("message:mcp-parent:steer-race:user");
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",
@@ -1352,7 +1353,7 @@ describe("orchestrator MCP toolkit", () => {
               parentThreadId,
             )).runs.find((run) => run.id === parentRun.id)?.activeAttemptId;
             const restartMessageId = MessageId.make("message:mcp-parent:restart-race:user");
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",
@@ -1601,7 +1602,7 @@ describe("orchestrator MCP toolkit", () => {
               placeholder: "Paste the webhook secret",
             });
             // Asking again with the same id leaves the open card exactly as it was.
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "secret_request.record",
               commandId: CommandId.make("command:test:secret-request-replay"),
               threadId: parentThreadId,
@@ -2205,7 +2206,7 @@ describe("orchestrator MCP toolkit", () => {
             });
             expect(metadataRead.thread).toMatchObject({ settled: false, settledAt: null });
 
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.settle",
               commandId: CommandId.make("command:mcp-empty:settle"),
               threadId: emptyThread.threadId,
@@ -2239,7 +2240,7 @@ describe("orchestrator MCP toolkit", () => {
             expect(
               activeList.threads.some((thread) => thread.threadId === emptyThread.threadId),
             ).toBe(false);
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.unsettle",
               commandId: CommandId.make("command:mcp-empty:unsettle"),
               threadId: emptyThread.threadId,
@@ -2247,7 +2248,7 @@ describe("orchestrator MCP toolkit", () => {
             });
 
             expect(metadataRead.thread).toMatchObject({ snoozed: false, snoozedUntil: null });
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.snooze",
               commandId: CommandId.make("command:mcp-empty:snooze"),
               threadId: emptyThread.threadId,
@@ -2274,7 +2275,7 @@ describe("orchestrator MCP toolkit", () => {
               snoozed: true,
               snoozedUntil: "2099-01-01T00:00:00.000Z",
             });
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.unsnooze",
               commandId: CommandId.make("command:mcp-empty:unsnooze"),
               threadId: emptyThread.threadId,
@@ -2394,7 +2395,7 @@ describe("orchestrator MCP toolkit", () => {
             );
 
             const forkedThreadId = ThreadId.make("thread:mcp-orchestrator-inherited-read");
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.fork",
               createdBy: "user",
               creationSource: "web",
@@ -2578,7 +2579,7 @@ describe("orchestrator MCP toolkit", () => {
             expect(repeatedInterrupt.status).toBe("interrupted");
 
             const foreignThreadId = ThreadId.make("thread:mcp-foreign-project");
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.create",
               createdBy: "user",
               creationSource: "web",
@@ -2702,7 +2703,7 @@ describe("orchestrator MCP toolkit", () => {
             // parent run was live, so finalize skipped its offer under
             // settled_only; the upgrade must accept, persist the policy, and
             // deliver the wake finalize declined.
-            const terminalUpgrade = yield* orchestrator.dispatch({
+            const terminalUpgrade = yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "delegated_task.wake-policy",
               commandId: CommandId.make("command:mcp-parent:wake-policy-terminal"),
               parentThreadId,
@@ -2729,7 +2730,7 @@ describe("orchestrator MCP toolkit", () => {
             // Legacy records omit completionWake and stay settled_only. The
             // MCP service always sets the field now, so dispatch the request
             // directly to cover the legacy shape.
-            const legacyDispatch = yield* orchestrator.dispatch({
+            const legacyDispatch = yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "delegated_task.request",
               createdBy: "agent",
               creationSource: "mcp",
@@ -2765,7 +2766,7 @@ describe("orchestrator MCP toolkit", () => {
             // Stop cancels a queued server-owned delivery for this cohort and
             // records a barrier before any still-running child reaches a
             // terminal state.
-            const stopQueuedDispatch = yield* orchestrator.dispatch({
+            const stopQueuedDispatch = yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "delegated_task.request",
               createdBy: "agent",
               creationSource: "mcp",
@@ -2807,7 +2808,7 @@ describe("orchestrator MCP toolkit", () => {
             if (stopQueuedDelivery === undefined || stopQueuedDelivery === null) {
               return yield* Effect.die(new Error("Stop barrier delivery reservation missing."));
             }
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "agent",
               creationSource: "server",
@@ -2841,7 +2842,7 @@ describe("orchestrator MCP toolkit", () => {
             }
             yield* Ref.set(continuationOffers, []);
 
-            const parentStop = yield* orchestrator.dispatch({
+            const parentStop = yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "run.interrupt",
               commandId: CommandId.make("command:mcp-parent:interrupt-wake"),
               threadId: parentThreadId,
@@ -2883,7 +2884,7 @@ describe("orchestrator MCP toolkit", () => {
                 new Error("Still-running child was missing after parent Stop."),
               );
             }
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "run.interrupt",
               commandId: CommandId.make("command:mcp-parent:interrupt-legacy-after-parent-stop"),
               threadId: legacyChildThreadId,
@@ -2903,7 +2904,7 @@ describe("orchestrator MCP toolkit", () => {
             // Same command against a terminal task whose finalize already
             // offered (the parent was settled then, and still is): the policy
             // must persist without a second offer, or the parent wakes twice.
-            const settledUpgrade = yield* orchestrator.dispatch({
+            const settledUpgrade = yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "delegated_task.wake-policy",
               commandId: CommandId.make("command:mcp-parent:wake-policy-settled"),
               parentThreadId,
@@ -2934,7 +2935,7 @@ describe("orchestrator MCP toolkit", () => {
             parentTerminalGates.set(lateParentThreadId, lateParentGate);
             deliveryTerminalGates.set(lateParentThreadId, lateDeliveryGate);
             yield* Ref.set(continuationOffers, []);
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.create",
               createdBy: "user",
               creationSource: "web",
@@ -2948,7 +2949,7 @@ describe("orchestrator MCP toolkit", () => {
               branch: null,
               worktreePath: cwd,
             });
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",
@@ -2971,7 +2972,7 @@ describe("orchestrator MCP toolkit", () => {
             if (lateParentRun?.rootNodeId === null || lateParentRun === undefined) {
               return yield* Effect.die(new Error("Late completion parent run missing."));
             }
-            const earlyLateDelivery = yield* orchestrator.dispatch({
+            const earlyLateDelivery = yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "delegated_task.request",
               createdBy: "agent",
               creationSource: "mcp",
@@ -2985,7 +2986,7 @@ describe("orchestrator MCP toolkit", () => {
               interactionMode: "default",
               completionWake: "always",
             });
-            const lateChild = yield* orchestrator.dispatch({
+            const lateChild = yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "delegated_task.request",
               createdBy: "agent",
               creationSource: "mcp",
@@ -3012,7 +3013,7 @@ describe("orchestrator MCP toolkit", () => {
             };
             const earlyLateTask = taskFromDispatch(earlyLateDelivery);
             const lateTask = taskFromDispatch(lateChild);
-            const thirdLateChild = yield* orchestrator.dispatch({
+            const thirdLateChild = yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "delegated_task.request",
               createdBy: "agent",
               creationSource: "mcp",
@@ -3028,7 +3029,7 @@ describe("orchestrator MCP toolkit", () => {
             });
             const thirdLateTask = taskFromDispatch(thirdLateChild);
             const fourthLateTask = taskFromDispatch(
-              yield* orchestrator.dispatch({
+              yield* orchestrator.dispatch(trustedMutationAuthority, {
                 type: "delegated_task.request",
                 createdBy: "agent",
                 creationSource: "mcp",
@@ -3069,7 +3070,7 @@ describe("orchestrator MCP toolkit", () => {
             if (firstLateDelivery === undefined || firstLateDelivery === null) {
               return yield* Effect.die(new Error("First late completion delivery missing."));
             }
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "agent",
               creationSource: "server",
@@ -3109,7 +3110,7 @@ describe("orchestrator MCP toolkit", () => {
             if (lateChildRun === undefined) {
               return yield* Effect.die(new Error("Late completion child run missing."));
             }
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "run.interrupt",
               commandId: CommandId.make("command:mcp-late-parent:interrupt-late-child"),
               threadId: lateTask.childThreadId,
@@ -3165,7 +3166,7 @@ describe("orchestrator MCP toolkit", () => {
             // pending once the parent has been told about every child.
             const successorGate = yield* Deferred.make<void>();
             deliveryTerminalGates.set(lateParentThreadId, successorGate);
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "agent",
               creationSource: "server",
@@ -3233,7 +3234,7 @@ describe("orchestrator MCP toolkit", () => {
               if (childRun === undefined) {
                 return yield* Effect.die(new Error(`${label} late completion child run missing.`));
               }
-              yield* orchestrator.dispatch({
+              yield* orchestrator.dispatch(trustedMutationAuthority, {
                 type: "run.interrupt",
                 commandId: CommandId.make(`command:mcp-late-parent:interrupt-${label}-late-child`),
                 threadId: childThreadId,
@@ -3305,7 +3306,7 @@ describe("orchestrator MCP toolkit", () => {
                 );
               }),
             ).toHaveLength(0);
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "agent",
               creationSource: "server",
@@ -3348,7 +3349,7 @@ describe("orchestrator MCP toolkit", () => {
             const removeParentGate = yield* Deferred.make<void>();
             parentTerminalGates.set(lateParentThreadId, removeParentGate);
             const removeParentMessageId = MessageId.make("message:mcp-late-parent:remove-start");
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",
@@ -3374,7 +3375,7 @@ describe("orchestrator MCP toolkit", () => {
             if (removeParentRun?.rootNodeId === null || removeParentRun === undefined) {
               return yield* Effect.die(new Error("Queue Remove parent run missing."));
             }
-            const removeDelegation = yield* orchestrator.dispatch({
+            const removeDelegation = yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "delegated_task.request",
               createdBy: "agent",
               creationSource: "mcp",
@@ -3415,7 +3416,7 @@ describe("orchestrator MCP toolkit", () => {
             if (removeDelivery === undefined || removeDelivery === null) {
               return yield* Effect.die(new Error("Queue Remove delivery reservation missing."));
             }
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "agent",
               creationSource: "server",
@@ -3448,7 +3449,7 @@ describe("orchestrator MCP toolkit", () => {
               return yield* Effect.die(new Error("Queue Remove delivery did not queue."));
             }
             yield* Ref.set(continuationOffers, []);
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "queued-run.cancel",
               commandId: CommandId.make("command:mcp-late-parent:remove-queued-delivery"),
               threadId: lateParentThreadId,
@@ -3486,7 +3487,7 @@ describe("orchestrator MCP toolkit", () => {
             parentTerminalGates.set(fanoutParentThreadId, fanoutParentGate);
             deliveryTerminalGates.set(fanoutParentThreadId, firstFanoutDeliveryGate);
             yield* Ref.set(continuationOffers, []);
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "thread.create",
               createdBy: "user",
               creationSource: "web",
@@ -3500,7 +3501,7 @@ describe("orchestrator MCP toolkit", () => {
               branch: null,
               worktreePath: cwd,
             });
-            yield* orchestrator.dispatch({
+            yield* orchestrator.dispatch(trustedMutationAuthority, {
               type: "message.dispatch",
               createdBy: "user",
               creationSource: "web",
@@ -3528,7 +3529,7 @@ describe("orchestrator MCP toolkit", () => {
               Array.from({ length: 12 }, (_, index) => index),
               (index) =>
                 orchestrator
-                  .dispatch({
+                  .dispatch(trustedMutationAuthority, {
                     type: "delegated_task.request",
                     createdBy: "agent",
                     creationSource: "mcp",
@@ -3565,7 +3566,7 @@ describe("orchestrator MCP toolkit", () => {
                     if (childRun === undefined) {
                       return yield* Effect.die(new Error("Fan-out child run missing."));
                     }
-                    yield* orchestrator.dispatch({
+                    yield* orchestrator.dispatch(trustedMutationAuthority, {
                       type: "run.interrupt",
                       commandId: CommandId.make(`command:mcp-fanout-parent:finish-${task.id}`),
                       threadId: childThreadId,
@@ -3614,7 +3615,7 @@ describe("orchestrator MCP toolkit", () => {
               label: string,
               delivery: OrchestrationV2DelegatedCompletionDelivery,
             ) =>
-              orchestrator.dispatch({
+              orchestrator.dispatch(trustedMutationAuthority, {
                 type: "message.dispatch",
                 createdBy: "agent",
                 creationSource: "server",
@@ -3837,7 +3838,7 @@ describe("orchestrator MCP toolkit", () => {
         yield* Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const server = yield* McpServer.McpServer;
-          const parentCreate = yield* orchestrator.dispatch({
+          const parentCreate = yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             createdBy: "user",
             creationSource: "web",
@@ -3851,7 +3852,7 @@ describe("orchestrator MCP toolkit", () => {
             branch: null,
             worktreePath: cwd,
           });
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",

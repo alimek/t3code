@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import {
   CommandId,
@@ -81,9 +82,9 @@ const make = Effect.gen(function* () {
   const dispatch = <Operation extends ThreadLifecycleError["operation"]>(
     operation: Operation,
     threadId: ThreadId,
-    command: Parameters<ThreadManagement.ThreadManagementService["Service"]["dispatch"]>[0],
+    command: Parameters<ThreadManagement.ThreadManagementService["Service"]["dispatch"]>[1],
   ) =>
-    threads.dispatch(command).pipe(
+    threads.dispatch(trustedMutationAuthority, command).pipe(
       Effect.andThen(threads.getThreadRecords(trustedReadAuthority, threadId, [])),
       Effect.mapError((cause) => new ThreadLifecycleError({ operation, threadId, cause })),
     );

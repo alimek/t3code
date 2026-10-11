@@ -1,3 +1,10 @@
+import {
+  authorizeCommand,
+  authorizeCommandAdmission,
+  type CommandAdmission,
+  type MutationAuthority,
+} from "../auth/CommandAuthorization.ts";
+import * as SqlClient from "effect/sql/SqlClient";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -264,6 +271,7 @@ export const OrchestratorV2Error = Schema.Union([
   OrchestratorThreadAboveModeLimitError,
 ]);
 export type OrchestratorV2Error = typeof OrchestratorV2Error.Type;
+const isOrchestratorError = Schema.is(OrchestratorV2Error);
 
 export interface OrchestratorV2DispatchResult {
   readonly sequence: number;
@@ -284,6 +292,7 @@ export interface OrchestratorV2Shape {
     childThreadId: ThreadId,
   ) => Effect.Effect<boolean, OrchestratorProjectionError>;
   readonly dispatch: (
+    authority: MutationAuthority,
     command: OrchestrationV2ServerCommand,
   ) => Effect.Effect<OrchestratorV2DispatchResult, OrchestratorV2Error>;
   readonly searchThreadStream: (
@@ -799,6 +808,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const checkpointService = yield* CheckpointServiceV2;
   const commandPolicy = yield* CommandPolicyV2;
   const contextHandoffService = yield* ContextHandoffServiceV2;
+  const sql = yield* SqlClient.SqlClient;
   const eventSink = yield* EventSinkV2;
   const commandReceipts = yield* CommandReceiptStoreV2;
   const idAllocator = yield* IdAllocatorV2;
@@ -10420,6 +10430,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   });
 
   const dispatchWithReceiptEffect = Effect.fn("orchestrationV2.dispatch.withReceipt")(function* (
+    authority: MutationAuthority,
     command: OrchestrationV2ServerCommand,
   ): Effect.fn.Return<OrchestratorV2DispatchResult, OrchestratorV2Error> {
     yield* Effect.annotateCurrentSpan({
@@ -10428,70 +10439,96 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       "orchestration_v2.thread_id": commandThreadId(command),
     });
 
-    const existingReceipt = yield* commandReceipts.getByCommandId(command.commandId).pipe(
-      Effect.mapError(
-        (cause) =>
-          new OrchestratorDispatchError({
-            commandId: command.commandId,
-            commandType: command.type,
-            cause,
-          }),
-      ),
-    );
+    const admission: CommandAdmission = { authority, command };
+    const replayed = yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          yield* authorizeCommandAdmission(sql, admission, command.commandId);
+          // A limited sender checked these modes before dispatching; the thread's
+          // user may have raised them since, and only here can they not change.
+          const limit = yield* DispatchModeLimit;
+          if (limit !== undefined) {
+            // A fork or merge-back source is not under this lock: its dispatch
+            // checks the copy it reads instead.
+            const threadId = commandThreadId(command);
+            const shell = yield* projectionStore
+              .getThreadShell(threadId)
+              .pipe(
+                Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })),
+              );
+            if (shell !== null) yield* refuseAboveDispatchModeLimit(command, threadId, shell);
+          }
 
-    if (Option.isSome(existingReceipt)) {
-      const receipt = existingReceipt.value;
-      if (receipt.status === "rejected") {
-        return yield* new OrchestratorCommandPreviouslyRejectedError({
-          commandId: command.commandId,
-          commandType: command.type,
-          detail: receipt.error ?? "Previously rejected.",
-        });
-      }
-      // A receipt only proves this exact command was handled for its own
-      // thread. Replaying it for a command aimed at another thread would
-      // report success for work that never happened.
-      const dispatchThreadId = commandThreadId(command);
-      if (!canReplayCommandReceipt(receipt.threadId, dispatchThreadId)) {
-        return yield* new OrchestratorCommandIdConflictError({
-          commandId: command.commandId,
-          commandType: command.type,
-          receiptThreadId: receipt.threadId,
-          commandThreadId: dispatchThreadId,
-        });
-      }
-      const storedEvents = yield* eventSink.readByCommandId({ commandId: command.commandId }).pipe(
-        Stream.runCollect,
-        Effect.map((events): ReadonlyArray<OrchestrationV2StoredEvent> => Array.from(events)),
-        Effect.mapError(
-          (cause) =>
-            new OrchestratorDispatchError({
-              commandId: command.commandId,
-              commandType: command.type,
-              cause,
-            }),
+          const existingReceipt = yield* commandReceipts.getByCommandId(command.commandId).pipe(
+            Effect.mapError(
+              (cause) =>
+                new OrchestratorDispatchError({
+                  commandId: command.commandId,
+                  commandType: command.type,
+                  cause,
+                }),
+            ),
+          );
+
+          if (Option.isSome(existingReceipt)) {
+            const receipt = existingReceipt.value;
+            if (receipt.status === "rejected") {
+              return yield* new OrchestratorCommandPreviouslyRejectedError({
+                commandId: command.commandId,
+                commandType: command.type,
+                detail: receipt.error ?? "Previously rejected.",
+              });
+            }
+            // A receipt only proves this exact command was handled for its own
+            // thread. Replaying it for a command aimed at another thread would
+            // report success for work that never happened.
+            const dispatchThreadId = commandThreadId(command);
+            if (!canReplayCommandReceipt(receipt.threadId, dispatchThreadId)) {
+              return yield* new OrchestratorCommandIdConflictError({
+                commandId: command.commandId,
+                commandType: command.type,
+                receiptThreadId: receipt.threadId,
+                commandThreadId: dispatchThreadId,
+              });
+            }
+            const storedEvents = yield* eventSink
+              .readByCommandId({ commandId: command.commandId })
+              .pipe(
+                Stream.runCollect,
+                Effect.map((events): ReadonlyArray<OrchestrationV2StoredEvent> =>
+                  Array.from(events),
+                ),
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestratorDispatchError({
+                      commandId: command.commandId,
+                      commandType: command.type,
+                      cause,
+                    }),
+                ),
+              );
+            return {
+              sequence: receipt.resultSequence,
+              storedEvents,
+            } satisfies OrchestratorV2DispatchResult;
+          }
+        }),
+      )
+      .pipe(
+        Effect.mapError((cause) =>
+          isOrchestratorError(cause)
+            ? cause
+            : new OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause,
+              }),
         ),
       );
-      if (command.type === "queue.resume") {
+    if (replayed !== undefined) {
+      if (command.type === "queue.resume")
         yield* mapDispatchError(command)(startNextQueuedRun(command.threadId));
-      }
-      return {
-        sequence: receipt.resultSequence,
-        storedEvents,
-      } satisfies OrchestratorV2DispatchResult;
-    }
-
-    // A limited sender checked these modes before dispatching; the thread's
-    // user may have raised them since, and only here can they not change.
-    const limit = yield* DispatchModeLimit;
-    if (limit !== undefined) {
-      // A fork or merge-back source is not under this lock: its dispatch
-      // checks the copy it reads instead.
-      const threadId = commandThreadId(command);
-      const shell = yield* projectionStore
-        .getThreadShell(threadId)
-        .pipe(Effect.mapError((cause) => new OrchestratorProjectionError({ threadId, cause })));
-      if (shell !== null) yield* refuseAboveDispatchModeLimit(command, threadId, shell);
+      return replayed;
     }
 
     const plan = yield* dispatchOnce(command).pipe(
@@ -10518,7 +10555,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           if (cause._tag === "OrchestratorThreadAboveModeLimitError") return yield* cause;
           const rejectedAt = yield* DateTime.now;
           const receipt = yield* eventSink
-            .commitRejectedCommand({
+            .commitRejectedCommand(admission, {
               commandId: command.commandId,
               threadId: commandThreadId(command),
               commandType: command.type,
@@ -10555,6 +10592,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       // A settle that ended nothing still records its receipt: a replayed Stop
       // effect then finds it instead of settling work that appeared since.
       const resultSequence = yield* Effect.gen(function* () {
+        yield* authorizeCommandAdmission(sql, admission, command.commandId);
         const sequence = yield* eventSink.latestSequence({ threadId: commandThreadId(command) });
         yield* commandReceipts.insertIfAbsent({
           commandId: command.commandId,
@@ -10565,8 +10603,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           status: "accepted",
           error: null,
         });
+        yield* authorizeCommandAdmission(sql, admission, command.commandId);
         return sequence;
       }).pipe(
+        sql.withTransaction,
         Effect.mapError(
           (cause) =>
             new OrchestratorDispatchError({
@@ -10580,7 +10620,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     const acceptedAt = plan.events.at(-1)?.occurredAt ?? (yield* DateTime.now);
     const committed = yield* eventSink
-      .commitCommand({
+      .commitCommand(admission, {
         commandId: command.commandId,
         threadId: commandThreadId(command),
         commandType: command.type,
@@ -10625,8 +10665,27 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     } satisfies OrchestratorV2DispatchResult;
   });
 
-  const dispatchWithReceipt = (command: OrchestrationV2ServerCommand) =>
-    threadDispatch.withLock(commandThreadId(command), dispatchWithReceiptEffect(command));
+  const dispatchWithReceipt = (
+    authority: MutationAuthority,
+    command: OrchestrationV2ServerCommand,
+  ) =>
+    authorizeCommand(sql, authority, command).pipe(
+      Effect.andThen(
+        threadDispatch.withLock(
+          commandThreadId(command),
+          dispatchWithReceiptEffect(authority, command),
+        ),
+      ),
+      Effect.mapError((cause) =>
+        isOrchestratorError(cause)
+          ? cause
+          : new OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause,
+            }),
+      ),
+    );
 
   const handleTerminalRun = (stored: OrchestrationV2StoredEvent) =>
     Effect.gen(function* () {
@@ -10949,6 +11008,7 @@ export const layer: Layer.Layer<
   OrchestratorV2,
   never,
   | CheckpointServiceV2
+  | SqlClient.SqlClient
   | FileSystem.FileSystem
   | Path.Path
   | CommandPolicyV2
@@ -10981,7 +11041,7 @@ const layerUnavailable: Layer.Layer<OrchestratorV2> = Layer.succeed(
     recoverDelegatedTasks: Effect.void,
     recoverDelegatedTask: () => Effect.void,
     delegatedTaskResultPending: () => Effect.succeed(false),
-    dispatch: (command) =>
+    dispatch: (_authority, command) =>
       Effect.fail(
         new OrchestratorDispatchError({
           commandId: command.commandId,

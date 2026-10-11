@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import {
   CommandId,
@@ -1341,7 +1342,7 @@ const make = Effect.gen(function* () {
         const observingRun = ThreadManagementService.latestActiveRun(parentProjection);
         const acknowledgementRequestKey = yield* requestKey(undefined);
         yield* threadManagement
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "delegated_task.completion-delivery.acknowledge",
             commandId: stableCommandId({
               scope,
@@ -1662,7 +1663,7 @@ const make = Effect.gen(function* () {
         );
         const record = (secretStatus: "pending" | "cancelled") =>
           threadManagement
-            .dispatch({
+            .dispatch(trustedMutationAuthority, {
               type: "secret_request.record",
               commandId: stableCommandId({
                 scope,
@@ -1849,7 +1850,7 @@ const make = Effect.gen(function* () {
           operation: "delegate-task",
         });
         const result = yield* threadManagement
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "delegated_task.request",
             createdBy: "agent",
             creationSource: "mcp",
@@ -1903,7 +1904,7 @@ const make = Effect.gen(function* () {
         // effort; on failure the settled_only policy still wakes a settled
         // parent.
         yield* threadManagement
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "delegated_task.wake-policy",
             commandId: stableCommandId({
               scope,
@@ -1983,7 +1984,7 @@ const make = Effect.gen(function* () {
           parentTask?.completionDelivery?.state === "disposed"
             ? Effect.void
             : threadManagement
-                .dispatch({
+                .dispatch(trustedMutationAuthority, {
                   type: "delegated_task.completion-delivery.dispose",
                   commandId: stableCommandId({
                     scope,
@@ -2009,7 +2010,7 @@ const make = Effect.gen(function* () {
           const commandId = stableCommandId({ scope, requestKey: key, operation: "cancel-task" });
           const reason = input.reason;
           yield* threadManagement
-            .dispatch({
+            .dispatch(trustedMutationAuthority, {
               type: "thread.stop",
               commandId,
               threadId: current.childThreadId,
@@ -2025,7 +2026,11 @@ const make = Effect.gen(function* () {
             );
           // A retry with the same clientRequestId repeats only the stops that failed.
           yield* threadManagement
-            .stopDelegatedTasks({ threadId: current.childThreadId, commandId, reason })
+            .stopDelegatedTasks(trustedMutationAuthority, {
+              threadId: current.childThreadId,
+              commandId,
+              reason,
+            })
             .pipe(
               Effect.mapError((error) =>
                 failure(
@@ -2139,7 +2144,7 @@ const make = Effect.gen(function* () {
                 index,
               });
               yield* threadManagement
-                .dispatch({
+                .dispatch(trustedMutationAuthority, {
                   type: "thread.create",
                   createdBy: "agent",
                   creationSource: "mcp",
@@ -2168,7 +2173,7 @@ const make = Effect.gen(function* () {
                 );
               if (request.prompt !== undefined) {
                 yield* threadManagement
-                  .dispatch({
+                  .dispatch(trustedMutationAuthority, {
                     type: "message.dispatch",
                     createdBy: "agent",
                     creationSource: "mcp",
@@ -2202,7 +2207,7 @@ const make = Effect.gen(function* () {
               const projection = yield* loadProjection(threadId);
               const run = projection.runs.at(-1);
               yield* threadManagement
-                .dispatch({
+                .dispatch(trustedMutationAuthority, {
                   type: "thread.created.record",
                   commandId: stableCommandId({
                     scope,
@@ -2394,7 +2399,7 @@ const make = Effect.gen(function* () {
           operation: "thread-send",
         });
         const result = yield* threadManagement
-          .sendToThread({
+          .sendToThread(trustedMutationAuthority, {
             projectId: target.thread.projectId,
             commandId: stableCommandId({
               scope,
@@ -2458,7 +2463,7 @@ const make = Effect.gen(function* () {
         yield* resolveInteractionMode(limits.interactionMode, target.thread.interactionMode);
         const key = yield* requestKey(input.clientRequestId);
         const result = yield* threadManagement
-          .interruptThread({
+          .interruptThread(trustedMutationAuthority, {
             projectId: target.thread.projectId,
             commandId: stableCommandId({
               scope,

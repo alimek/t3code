@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../../../auth/CommandAuthorization.ts";
 import {
   type CommandId,
   type RuntimeRequestId,
@@ -44,7 +45,10 @@ const dispatch = Effect.fn("mcp.dispatchThreadCommand")(function* (
 ) {
   const { threads, projection } = yield* readThread(threadId);
   const result = yield* threads
-    .dispatch(command({ commandId: yield* newCommandId(), threadId: projection.thread.id }))
+    .dispatch(
+      trustedMutationAuthority,
+      command({ commandId: yield* newCommandId(), threadId: projection.thread.id }),
+    )
     .pipe(Effect.mapError(dispatchFailure));
   return { sequence: result.sequence };
 });
@@ -120,7 +124,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       const commandId = yield* newCommandId();
       const targetThreadId = ThreadId.make(`${commandId}:fork`);
       const result = yield* threads
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "thread.fork",
           commandId,
           sourceThreadId: projection.thread.id,
@@ -141,7 +145,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         const context = yield* readThread(input.targetThreadId);
         const source = yield* readThread(input.sourceThreadId);
         const result = yield* context.threads
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "thread.merge_back",
             commandId: yield* newCommandId(),
             sourceThreadId: source.projection.thread.id,
@@ -190,7 +194,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       } = yield* readThread(input.threadId);
       const type = modelSelectionCommandType(thread.providerInstanceId, input.modelSelection);
       const result = yield* threads
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type,
           threadId: thread.id,
           commandId: yield* newCommandId(),
@@ -220,7 +224,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
     Effect.gen(function* () {
       const { threads, projection } = yield* readQuestion(input);
       const result = yield* threads
-        .dispatch({
+        .dispatch(trustedMutationAuthority, {
           type: "runtime-request.respond",
           threadId: projection.thread.id,
           commandId: yield* newCommandId(),
@@ -296,7 +300,10 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       const common = { commandId: yield* newCommandId(), threadId: projection.thread.id };
       if (input.action === "settle") {
         return yield* threads
-          .settleThread({ ...common, byOwnAgent: caller?.id === projection.thread.id })
+          .settleThread(trustedMutationAuthority, {
+            ...common,
+            byOwnAgent: caller?.id === projection.thread.id,
+          })
           .pipe(Effect.mapError(dispatchFailure));
       }
       let command: OrchestrationV2Command;
@@ -320,7 +327,9 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         default:
           command = { ...common, type: `thread.${input.action}` };
       }
-      const result = yield* threads.dispatch(command).pipe(Effect.mapError(dispatchFailure));
+      const result = yield* threads
+        .dispatch(trustedMutationAuthority, command)
+        .pipe(Effect.mapError(dispatchFailure));
       return { sequence: result.sequence };
     }),
   ),

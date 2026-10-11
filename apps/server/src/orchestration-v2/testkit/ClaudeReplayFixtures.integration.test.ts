@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../../auth/CommandAuthorization.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -164,7 +165,7 @@ describe("Claude Agent SDK replay fixtures", () => {
         const before = yield* orchestrator.getThreadEventSequence(child.thread.id);
 
         const refused = yield* orchestrator
-          .dispatch({
+          .dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             createdBy: "user",
             creationSource: "web",

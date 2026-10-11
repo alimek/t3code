@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../../auth/CommandAuthorization.ts";
 import * as NodeOS from "node:os";
 
 import { historyResponseItems } from "../ContextHandoffBudget.ts";
@@ -4409,7 +4410,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
           const threadId = ThreadId.make("thread:background-stop");
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             commandId: CommandId.make("create-background-stop"),
             threadId,
@@ -4430,7 +4431,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             Stream.runHead,
             Effect.forkChild({ startImmediately: true }),
           );
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             commandId: CommandId.make("start-background-stop"),
             threadId,
@@ -4462,7 +4463,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             Stream.runHead,
             Effect.forkChild({ startImmediately: true }),
           );
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "run.interrupt",
             commandId: CommandId.make("stop-background-command"),
             threadId,
@@ -4537,7 +4538,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
           const threadId = ThreadId.make("thread:background-stop-untracked");
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "thread.create",
             commandId: CommandId.make("create-background-stop-untracked"),
             threadId,
@@ -4560,7 +4561,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             Stream.runHead,
             Effect.forkChild({ startImmediately: true }),
           );
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "message.dispatch",
             commandId: CommandId.make("start-background-stop-untracked"),
             threadId,
@@ -4581,7 +4582,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             "the thread still shows the command the gone process never finished",
           );
           const run = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
-          yield* orchestrator.dispatch({
+          yield* orchestrator.dispatch(trustedMutationAuthority, {
             type: "run.interrupt",
             commandId: CommandId.make("stop-background-untracked"),
             threadId,

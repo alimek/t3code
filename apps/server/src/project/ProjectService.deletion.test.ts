@@ -1,3 +1,4 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
@@ -140,7 +141,8 @@ it.effect("retries a partial project deletion without repeating child events or 
       const failingEventSink = EventSink.EventSinkV2.of({
         ...eventSink,
         commitCommand: Effect.fn("ProjectDeletionTest.failSecondChild")(function* (
-          input: Parameters<EventSink.EventSinkV2Shape["commitCommand"]>[0],
+          admission,
+          input: Parameters<EventSink.EventSinkV2Shape["commitCommand"]>[1],
         ) {
           attempts.push(input.threadId);
           if (attempts.length === 2) {
@@ -150,7 +152,7 @@ it.effect("retries a partial project deletion without repeating child events or 
               cause: new Error("Injected failure for the second child"),
             });
           }
-          return yield* eventSink.commitCommand(input);
+          return yield* eventSink.commitCommand(trustedMutationAuthority, input);
         }),
       });
       const service = yield* ProjectService.make.pipe(
@@ -374,7 +376,7 @@ it.effect("rejects a child deletion command ID already accepted for an unrelated
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       const service = yield* ProjectService.make;
       yield* eventSink.write({ events: [nativeThreadCreated(projectId, threadId)] });
-      const accepted = yield* eventSink.commitCommand({
+      const accepted = yield* eventSink.commitCommand(trustedMutationAuthority, {
         commandId: CommandId.make(`${commandId}:delete-thread:${threadId}`),
         commandType: "thread.create",
         threadId: otherThreadId,
@@ -462,7 +464,7 @@ it.effect("deletes a project without force once its imported threads were delete
         now,
         idAllocator,
       });
-      yield* eventSink.commitCommand({
+      yield* eventSink.commitCommand(trustedMutationAuthority, {
         commandId: command.commandId,
         commandType: command.type,
         threadId,

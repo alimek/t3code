@@ -125,10 +125,13 @@ it.effect("reads recovery projections only for threads that need runtime recover
 
 it.effect("expires orphaned runtime requests before command readiness", () => {
   const threadId = ThreadId.make("thread_recovery_requests");
-  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | null =
     null;
   const committed = vi.fn(
-    (input: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0]) => {
+    (
+      _admission: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0],
+      input: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1],
+    ) => {
       committedInput = input;
       return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
     },
@@ -231,7 +234,7 @@ it.effect("preserves async questions across startup and shutdown", () => {
 
 it.effect("uses the same reconciliation path to cancel runtime requests during shutdown", () => {
   const threadId = ThreadId.make("thread_shutdown_requests");
-  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | null =
     null;
   const projection = {
     thread: { id: threadId },
@@ -257,7 +260,7 @@ it.effect("uses the same reconciliation path to cancel runtime requests during s
           getRuntimeRecoveryProjection: () => Effect.succeed(projection),
         }),
         Layer.mock(EventSink.EventSinkV2)({
-          commitCommand: (input) => {
+          commitCommand: (_authority, input) => {
             committedInput = input;
             return Effect.succeed({ committed: true, cancelledEffectCount: 1 } as never);
           },
@@ -298,7 +301,7 @@ it.effect(
     const providerThreadId = ProviderThreadId.make("provider_thread_waiting_checkpoint");
     const providerInstanceId = ProviderInstanceId.make("claude");
     const backgroundItemId = TurnItemId.make("turn_item_waiting_checkpoint");
-    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | null =
       null;
     const projection = {
       thread: { id: threadId },
@@ -340,7 +343,7 @@ it.effect(
             getRuntimeRecoveryProjection: () => Effect.succeed(projection),
           }),
           Layer.mock(EventSink.EventSinkV2)({
-            commitCommand: (input) => {
+            commitCommand: (_authority, input) => {
               committedInput = input;
               return Effect.succeed({
                 committed: true,
@@ -419,7 +422,7 @@ it.effect(
     const codexThreadId = ProviderThreadId.make("provider_thread_switch_note_codex");
     const claude = ProviderInstanceId.make("claude");
     const codex = ProviderInstanceId.make("codex");
-    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | null =
       null;
     // Claude launched a background subagent, then the thread switched to Codex.
     const projection = {
@@ -486,7 +489,7 @@ it.effect(
             getRuntimeRecoveryProjection: () => Effect.succeed(projection),
           }),
           Layer.mock(EventSink.EventSinkV2)({
-            commitCommand: (input) => {
+            commitCommand: (_authority, input) => {
               committedInput = input;
               return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
             },
@@ -522,7 +525,7 @@ it.effect(
 it.effect("cancels a stale waiting run when no checkpoint capture can finish it", () => {
   const threadId = ThreadId.make("thread_stale_waiting");
   const runId = RunId.make("run_stale_waiting");
-  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | null =
     null;
   const projection = {
     thread: { id: threadId },
@@ -552,7 +555,7 @@ it.effect("cancels a stale waiting run when no checkpoint capture can finish it"
           getRuntimeRecoveryProjection: () => Effect.succeed(projection),
         }),
         Layer.mock(EventSink.EventSinkV2)({
-          commitCommand: (input) => {
+          commitCommand: (_authority, input) => {
             committedInput = input;
             return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
           },
@@ -581,7 +584,7 @@ it.effect("cancels a stale waiting run when no checkpoint capture can finish it"
 it.effect("closes a secret request card's form when its run is recovered", () => {
   const threadId = ThreadId.make("thread_secret_recovery");
   const runId = RunId.make("run_secret_recovery");
-  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | null =
     null;
   const projection = {
     thread: { id: threadId },
@@ -617,7 +620,7 @@ it.effect("closes a secret request card's form when its run is recovered", () =>
           getRuntimeRecoveryProjection: () => Effect.succeed(projection),
         }),
         Layer.mock(EventSink.EventSinkV2)({
-          commitCommand: (input) => {
+          commitCommand: (_authority, input) => {
             committedInput = input;
             return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
           },
@@ -648,7 +651,7 @@ it.effect("holds accepted queued work without cancelling its execution state aft
   const runId = RunId.make("run_queued_restart");
   const attemptId = RunAttemptId.make("attempt_queued_restart");
   const rootNodeId = NodeId.make("node_queued_restart");
-  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | null =
     null;
   const projection = {
     thread: { id: threadId },
@@ -692,7 +695,7 @@ it.effect("holds accepted queued work without cancelling its execution state aft
           getRuntimeRecoveryProjection: () => Effect.succeed(projection),
         }),
         Layer.mock(EventSink.EventSinkV2)({
-          commitCommand: (input) => {
+          commitCommand: (_authority, input) => {
             committedInput = input;
             return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
           },
@@ -736,7 +739,7 @@ it.effect(
     const providerThreadId = ProviderThreadId.make("provider_thread_recovery_cancel");
     const providerTurnId = ProviderTurnId.make("provider_turn_recovery_cancel");
     const providerSessionId = ProviderSessionId.make("provider_session_recovery_cancel");
-    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | null =
       null;
     const projection = {
       thread: { id: threadId },
@@ -802,7 +805,7 @@ it.effect(
             getRuntimeRecoveryProjection: () => Effect.succeed(projection),
           }),
           Layer.mock(EventSink.EventSinkV2)({
-            commitCommand: (input) => {
+            commitCommand: (_authority, input) => {
               committedInput = input;
               return Effect.succeed({ committed: true, cancelledEffectCount: 2 } as never);
             },
@@ -877,7 +880,7 @@ it.effect(
     const claudeInstanceId = ProviderInstanceId.make("claude");
     const secondaryInstanceId = ProviderInstanceId.make("claude-secondary");
     const subagentInstanceId = ProviderInstanceId.make("claude-subagent");
-    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | null =
       null;
     const projection = {
       thread: { id: threadId },
@@ -987,7 +990,7 @@ it.effect(
             getRuntimeRecoveryProjection: () => Effect.succeed(projection),
           }),
           Layer.mock(EventSink.EventSinkV2)({
-            commitCommand: (input) => {
+            commitCommand: (_authority, input) => {
               committedInput = input;
               return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
             },
@@ -1079,7 +1082,7 @@ it.effect(
     const orphanWaitNodeId = NodeId.make("node_recovery_orphan_wait");
     const persistentMonitorNodeId = NodeId.make("node_recovery_persistent_monitor");
     const codexInstanceId = ProviderInstanceId.make("codex");
-    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | null =
       null;
     const projection = {
       thread: { id: threadId, providerInstanceId: codexInstanceId },
@@ -1144,7 +1147,7 @@ it.effect(
             getRuntimeRecoveryProjection: () => Effect.succeed(projection),
           }),
           Layer.mock(EventSink.EventSinkV2)({
-            commitCommand: (input) => {
+            commitCommand: (_authority, input) => {
               committedInput = input;
               return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
             },
@@ -1200,7 +1203,7 @@ it.effect(
     const staleItemId = TurnItemId.make("turn_item_recovery_subagent_stale");
     const doneItemId = TurnItemId.make("turn_item_recovery_subagent_done");
     const claudeInstanceId = ProviderInstanceId.make("claude");
-    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | null =
       null;
     const projection = {
       thread: { id: threadId },
@@ -1274,7 +1277,7 @@ it.effect(
             getRuntimeRecoveryProjection: () => Effect.succeed(projection),
           }),
           Layer.mock(EventSink.EventSinkV2)({
-            commitCommand: (input) => {
+            commitCommand: (_authority, input) => {
               committedInput = input;
               return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
             },
@@ -1371,7 +1374,7 @@ it.effect("leaves delegated tasks to their own child threads after process loss"
     providerInstanceId: claudeInstanceId,
     title: `subagent ${subagentId}`,
   });
-  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+  let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[1] | null =
     null;
   const projection = {
     thread: { id: threadId, providerInstanceId: claudeInstanceId },
@@ -1435,7 +1438,7 @@ it.effect("leaves delegated tasks to their own child threads after process loss"
           getRuntimeRecoveryProjection: () => Effect.succeed(projection),
         }),
         Layer.mock(EventSink.EventSinkV2)({
-          commitCommand: (input) => {
+          commitCommand: (_authority, input) => {
             committedInput = input;
             return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
           },
