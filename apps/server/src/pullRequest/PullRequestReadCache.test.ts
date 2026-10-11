@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { PullRequestOperationError } from "@t3tools/contracts";
+import { EnvironmentAuthorizationError, PullRequestOperationError } from "@t3tools/contracts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -332,5 +333,96 @@ it.layer(NodeServices.layer)("PR filesystem cache", (it) => {
         yield* Fiber.join(interrupt);
         assert.strictEqual(yield* cache.get("summary", Effect.succeed("fresh"), ["pr"]), "fresh");
       }).pipe(Effect.provide(KeyValueStore.layerMemory)),
+  );
+  it.effect(
+    "external memory reads retain coalescing, freshness, epochs and cancellation without disk effects",
+    () =>
+      Effect.gen(function* () {
+        const backing = yield* KeyValueStore.KeyValueStore;
+        const effects: string[] = [];
+        const cache = yield* PullRequestReadCache.make.pipe(
+          Effect.provideService(KeyValueStore.KeyValueStore, {
+            ...backing,
+            get: (key) =>
+              Effect.sync(() => {
+                effects.push("get");
+              }).pipe(Effect.andThen(backing.get(key))),
+            set: (key, value) =>
+              Effect.sync(() => {
+                effects.push("set");
+              }).pipe(Effect.andThen(backing.set(key, value))),
+            remove: (key) =>
+              Effect.sync(() => {
+                effects.push("remove");
+              }).pipe(Effect.andThen(backing.remove(key))),
+          }),
+        );
+        const options = {
+          authority: trustedReadAuthority as typeof trustedReadAuthority,
+          revision: "0",
+          // Real admission awaits SQL/canonical paths before lookup; yield once so the cache
+          // awaiter is attached before this synchronous fake lookup announces its start.
+          beforeEffect: Effect.yieldNow,
+        };
+        let reads = 0;
+        const lookup = Effect.sync(() => String(++reads));
+        assert.deepEqual(
+          yield* Effect.all(
+            Array.from({ length: 10 }, () => cache.get("pr", lookup, [], options)),
+            { concurrency: 10 },
+          ),
+          Array(10).fill("1"),
+        );
+        yield* TestClock.adjust("59 seconds");
+        assert.equal(yield* cache.get("pr", lookup, [], options), "1");
+        yield* TestClock.adjust("1 second");
+        assert.equal(yield* cache.get("pr", lookup, [], options), "2");
+        assert.equal(yield* cache.get("pr", lookup, [], { ...options, revision: "1" }), "3");
+        const started = yield* Deferred.make<void>();
+        const read = yield* cache
+          .get(
+            "cancel",
+            Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+            [],
+            options,
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(started);
+        yield* Fiber.interrupt(read);
+        assert.equal(yield* cache.get("cancel", lookup, [], options), "4");
+        const denial = new EnvironmentAuthorizationError({
+          requiredScope: "orchestration:read",
+          message: "Denied",
+        });
+        assert.strictEqual(
+          yield* cache.get("denied", Effect.fail(denial), [], options).pipe(Effect.flip),
+          denial,
+        );
+        assert.equal(yield* cache.get("denied", lookup, [], options), "5");
+        assert.deepEqual(effects, []);
+      }).pipe(Effect.provide(KeyValueStore.layerMemory)),
+  );
+
+  it.effect("ordinary revision write failures retain the existing uncached fallback", () =>
+    Effect.gen(function* () {
+      const backing = yield* KeyValueStore.KeyValueStore;
+      const cache = yield* PullRequestReadCache.make.pipe(
+        Effect.provideService(KeyValueStore.KeyValueStore, {
+          ...backing,
+          set: () =>
+            Effect.fail(
+              new KeyValueStore.KeyValueStoreError({ method: "set", message: "unavailable" }),
+            ),
+        }),
+      );
+      yield* cache.invalidate("pr");
+      let reads = 0;
+      const read = cache.get(
+        "summary",
+        Effect.sync(() => String(++reads)),
+      );
+      assert.equal(yield* read, "1");
+      assert.equal(yield* read, "2");
+    }).pipe(Effect.provide(KeyValueStore.layerMemory)),
   );
 });

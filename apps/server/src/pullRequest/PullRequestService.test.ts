@@ -614,6 +614,7 @@ function makeService(input: {
     sql: SqlClient.SqlClient,
   ) => Effect.Effect<void, import("effect/sql/SqlError").SqlError>;
   readonly readCache?: PullRequestReadCache.PullRequestReadCache["Service"];
+  readonly rateLimits?: SourceControlRateLimit.SourceControlRateLimit["Service"];
   readonly projects: ReadonlyArray<OrchestrationProjectShell>;
   readonly providers: ReadonlyArray<PullRequestProviderApi>;
   readonly resolveHandle?: SourceControlProviderRegistry.SourceControlProviderRegistry["Service"]["resolveHandle"];
@@ -652,7 +653,9 @@ function makeService(input: {
                 input.projects.find((p) => p.workspaceRoot === root)?.repositoryIdentity ?? null,
               )),
         }),
-        SourceControlRateLimit.layer,
+        input.rateLimits === undefined
+          ? SourceControlRateLimit.layer
+          : Layer.succeed(SourceControlRateLimit.SourceControlRateLimit, input.rateLimits),
         ProjectStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
         SqlitePersistence.layerMemory,
         Layer.succeed(
@@ -8417,4 +8420,205 @@ it.effect.each(["list", "listStats"] as const)(
       yield* Fiber.join(pending);
       assert.equal(effects, 0);
     }),
+);
+
+it.effect.each(["summary", "diff", "detail stats", "detail summary", "detail"] as const)(
+  "held PR publication: SQL root cut during %s Clock await cannot replace last admitted value",
+  (method) =>
+    Effect.gen(function* () {
+      const clock = yield* Clock.Clock;
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let database!: SqlClient.SqlClient;
+      let arm = false,
+        ticks = 0,
+        reads = 0;
+      const target = method === "detail summary" ? 2 : method === "detail" ? 3 : 1;
+      const heldClock: Clock.Clock = {
+        ...clock,
+        currentTimeMillis: Effect.suspend(() =>
+          arm && ++ticks === target
+            ? Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(clock.currentTimeMillis),
+              )
+            : clock.currentTimeMillis,
+        ),
+      };
+      const readValue = () =>
+        Effect.sync(() => {
+          reads++;
+          return reads === 1 ? "admitted" : reads === 2 ? "denied" : "restored";
+        });
+      const service = yield* makeService({
+        projects: [
+          project({ id: projectA, title: "a", workspaceRoot: "/a", repository: "acme/a" }),
+        ],
+        setup: (sql) =>
+          Effect.sync(() => {
+            database = sql;
+          }),
+        rateLimits: {
+          check: () => Effect.succeed(0),
+          recordSuccess: () => Effect.void,
+          recordRateLimit: () => Effect.void,
+        },
+        // The persistence bypass itself has separate real-cache proof. Here the next await after
+        // the successful cached read is the exact held summary publication Clock.
+        readCache: {
+          get: (_key, lookup) =>
+            lookup.pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  if (reads === 2) arm = true;
+                }),
+              ),
+            ),
+          invalidate: () => Effect.void,
+        },
+        providers: [
+          fakeProvider("github", {
+            getChangeRequestSummary: () =>
+              readValue().pipe(
+                Effect.map((title) => ({ ...changeRequest(1, "2026-10-11T00:00:00Z"), title })),
+              ),
+            getChangeRequest: () =>
+              readValue().pipe(
+                Effect.map((body) => ({
+                  ...hostedChangeRequest(body),
+                  title: body,
+                  updatedAt: body === "admitted" ? "2026-10-10T00:00:00Z" : "2026-10-11T00:00:00Z",
+                })),
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    if (reads === 2) arm = true;
+                  }),
+                ),
+              ),
+            getDiff: () =>
+              readValue().pipe(
+                Effect.map((patch) => ({ patch, truncated: false, nextCursor: null })),
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    if (reads === 2) arm = true;
+                  }),
+                ),
+              ),
+          }),
+        ],
+      }).pipe(Effect.provideService(Clock.Clock, heldClock));
+      const authority = testAuthority(grantA);
+      const ref = { projectId: projectA, host: "github.com", repository: "acme/a", number: 1 };
+      const read =
+        method === "summary"
+          ? service.summary(authority, { ...ref, allowStale: false }).pipe(Effect.asVoid)
+          : method === "diff"
+            ? service.diff(authority, ref).pipe(Effect.asVoid)
+            : service.detail(authority, { ...ref, allowStale: false }).pipe(Effect.asVoid);
+      yield* read.pipe(Effect.provideService(Clock.Clock, heldClock));
+      yield* TestClock.adjust(method === "diff" ? "11 minutes" : "61 seconds");
+      const pending = yield* assertDenied(read).pipe(
+        Effect.provideService(Clock.Clock, heldClock),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(started);
+      yield* database`UPDATE projection_projects SET workspace_root = '/moved' WHERE project_id = ${projectA}`;
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(pending);
+      arm = false;
+      yield* database`UPDATE projection_projects SET workspace_root = '/a' WHERE project_id = ${projectA}`;
+      if (method === "summary") {
+        assert.equal((yield* service.summary(authority, ref)).title, "admitted");
+        assert.equal(reads, 2);
+      } else if (method === "detail stats") {
+        // A denied stats publication cannot make the next batch answer without its provider.
+        // The fake provider does not support stats, so it returns no rows.
+        assert.deepEqual((yield* service.listStats(authority, { refs: [ref] })).stats, []);
+      } else if (method === "detail summary") {
+        assert.equal((yield* service.summary(authority, ref)).title, "admitted");
+      } else if (method === "detail") {
+        assert.equal((yield* service.detail(authority, ref)).body, "admitted");
+      } else {
+        // Expire the ordinary raw cache while a wrongly published held value would still be
+        // fresh. The admitted foreground read must ask the provider, not serve that value.
+        yield* TestClock.adjust("61 seconds");
+        assert.equal((yield* service.diff(authority, ref)).patch, "restored");
+      }
+    }),
+);
+
+it.effect(
+  "external persisted PR reads: service uses memory epochs while trusted restart data stays on disk",
+  () =>
+    Effect.gen(function* () {
+      const backing = yield* KeyValueStore.KeyValueStore;
+      const effects: string[] = [];
+      const readCache = yield* PullRequestReadCache.make.pipe(
+        Effect.provideService(KeyValueStore.KeyValueStore, {
+          ...backing,
+          get: (key) =>
+            Effect.sync(() => {
+              effects.push(`get:${key}`);
+            }).pipe(Effect.andThen(backing.get(key))),
+          set: (key, value) =>
+            Effect.sync(() => {
+              effects.push(`set:${key}`);
+            }).pipe(Effect.andThen(backing.set(key, value))),
+          remove: (key) =>
+            Effect.sync(() => {
+              effects.push(`remove:${key}`);
+            }).pipe(Effect.andThen(backing.remove(key))),
+        }),
+        Effect.provide(NodeServices.layer),
+      );
+      let summaries = 0,
+        stacks = 0;
+      const service = yield* makeService({
+        projects: [
+          project({ id: projectA, title: "a", workspaceRoot: "/a", repository: "acme/a" }),
+        ],
+        readCache,
+        providers: [
+          fakeProvider("github", {
+            getChangeRequestSummary: () =>
+              Effect.sync(() => {
+                summaries++;
+                return changeRequest(1, "2026-10-11T00:00:00Z");
+              }),
+            getChangeRequestStack: () =>
+              Effect.sync(() => {
+                stacks++;
+                return null;
+              }),
+          }),
+        ],
+      });
+      const authority = testAuthority(grantA);
+      const ref = {
+        projectId: projectA,
+        host: "github.com",
+        repository: "acme/a",
+        number: 1,
+        allowStale: false,
+      };
+      yield* Effect.all(
+        Array.from({ length: 3 }, () => service.summary(authority, ref)),
+        { concurrency: 3 },
+      );
+      yield* service.stack(authority, ref);
+      yield* service.stack(authority, ref);
+      assert.equal(summaries, 1);
+      assert.equal(stacks, 1);
+      assert.deepEqual(effects, []);
+      yield* service.invalidate(authority, { reference: ref });
+      assert.deepEqual(effects, ["get:revisions", "set:revisions"]);
+      effects.length = 0;
+      yield* service.summary(authority, ref);
+      yield* service.stack(authority, ref);
+      assert.equal(summaries, 2);
+      assert.equal(stacks, 2);
+      assert.deepEqual(effects, []);
+      yield* service.summary(trustedReadAuthority, ref);
+      assert.ok(effects.some((effect) => effect.startsWith("set:pr-v2")));
+    }).pipe(Effect.provide(KeyValueStore.layerMemory)),
 );

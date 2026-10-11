@@ -25,6 +25,7 @@ import * as Persistable from "effect/persistence/Persistable";
 import * as PersistedCache from "effect/persistence/PersistedCache";
 import * as Persistence from "effect/persistence/Persistence";
 import * as ServerConfig from "../config.ts";
+import type { ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { forkParked } from "../serverActivation.ts";
 
 const CONCURRENT_READS = 512;
@@ -43,6 +44,12 @@ type ReadError =
   | PullRequestOperationError
   | PullRequestUnavailableError
   | EnvironmentAuthorizationError;
+const isAuthorizationError = Schema.is(EnvironmentAuthorizationError);
+const beforeRevisionEffect = Context.Reference<Effect.Effect<void, EnvironmentAuthorizationError>>(
+  "t3/pullRequest/readCacheAdmission",
+  { defaultValue: () => Effect.void },
+);
+const checkRevisionAccess = beforeRevisionEffect.pipe(Effect.flatten);
 const revisionCodec = Schema.fromJsonString(
   Schema.Record(
     Schema.String,
@@ -50,7 +57,12 @@ const revisionCodec = Schema.fromJsonString(
   ),
 );
 class Read extends Persistable.Class<{
-  payload: { key: string; revision: string; lookup: Effect.Effect<string, ReadError> };
+  payload: {
+    key: string;
+    revision: string;
+    lookup: Effect.Effect<string, ReadError>;
+    authority?: ThreadReadAuthority;
+  };
 }>()("PullRequestRead", {
   primaryKey: ({ key }) => key,
   success: Schema.Struct({
@@ -72,10 +84,15 @@ class Read extends Persistable.Class<{
   }
 
   [Equal.symbol](that: unknown): boolean {
-    return that instanceof Read && that.key === this.key && that.revision === this.revision;
+    return (
+      that instanceof Read &&
+      that.key === this.key &&
+      that.revision === this.revision &&
+      that.authority === this.authority
+    );
   }
   [Hash.symbol](): number {
-    return Hash.string(`${this.key}:${this.revision}`);
+    return Hash.combine(Hash.hash(this.authority))(Hash.string(`${this.key}:${this.revision}`));
   }
 }
 
@@ -86,8 +103,16 @@ export class PullRequestReadCache extends Context.Service<
       key: string,
       lookup: Effect.Effect<string, ReadError>,
       scopes?: ReadonlyArray<string>,
+      external?: {
+        readonly authority: ThreadReadAuthority;
+        readonly revision: string;
+        readonly beforeEffect: Effect.Effect<void, EnvironmentAuthorizationError>;
+      },
     ) => Effect.Effect<string, ReadError>;
-    readonly invalidate: (scope: string) => Effect.Effect<void>;
+    readonly invalidate: (
+      scope: string,
+      beforeEffect?: Effect.Effect<void, EnvironmentAuthorizationError>,
+    ) => Effect.Effect<void, EnvironmentAuthorizationError>;
   }
 >()("t3/pullRequest/PullRequestReadCache") {}
 
@@ -101,9 +126,13 @@ export const make = Effect.gen(function* () {
     crypto.digest("SHA-256", new TextEncoder().encode(key)).pipe(Effect.map(Hex.encode));
   const revisions = yield* Cache.makeWith(
     () =>
-      backing
-        .get("revisions")
-        .pipe(Effect.flatMap((raw) => Schema.decodeEffect(revisionCodec)(raw ?? "{}"))),
+      checkRevisionAccess.pipe(
+        Effect.andThen(backing.get("revisions")),
+        Effect.flatMap((raw) =>
+          checkRevisionAccess.pipe(Effect.andThen(Schema.decodeEffect(revisionCodec)(raw ?? "{}"))),
+        ),
+        Effect.tap(() => checkRevisionAccess),
+      ),
     {
       capacity: 1,
       timeToLive: (exit) => (Exit.isSuccess(exit) ? Duration.infinity : Duration.zero),
@@ -113,22 +142,26 @@ export const make = Effect.gen(function* () {
     Exit.isSuccess(exit)
       ? Duration.millis(Math.max(0, exit.value.expiresAt - clock.currentTimeMillisUnsafe()))
       : Duration.zero;
-  const cache = yield* PersistedCache.make(
-    (request: Read) =>
-      request.lookup.pipe(
-        Effect.map((payload) => ({
-          payload,
-          expiresAt: clock.currentTimeMillisUnsafe() + 60_000,
-          revision: request.revision,
-        })),
-      ),
-    {
-      storeId: STORE_ID,
-      timeToLive,
-      inMemoryTTL: timeToLive,
-      inMemoryCapacity: CONCURRENT_READS,
-    },
-  ).pipe(Effect.provide(Persistence.layerKvs));
+  const lookupRead = (request: Read) =>
+    request.lookup.pipe(
+      Effect.map((payload) => ({
+        payload,
+        expiresAt: clock.currentTimeMillisUnsafe() + 60_000,
+        revision: request.revision,
+      })),
+    );
+  // External reads use the service's epochs and stay off disk. PersistedCache writes after
+  // lookup/serialization and its KVS layer can swallow an expired-entry removal failure.
+  const externalReads = yield* Cache.makeWith(lookupRead, {
+    capacity: CONCURRENT_READS,
+    timeToLive,
+  });
+  const cache = yield* PersistedCache.make(lookupRead, {
+    storeId: STORE_ID,
+    timeToLive,
+    inMemoryTTL: timeToLive,
+    inMemoryCapacity: CONCURRENT_READS,
+  }).pipe(Effect.provide(Persistence.layerKvs));
   const refreshes = yield* Cache.makeWith(
     Effect.fn("PullRequestReadCache.refresh")(function* (request: Read) {
       const stored = yield* cache.get(request);
@@ -139,7 +172,24 @@ export const make = Effect.gen(function* () {
     { capacity: CONCURRENT_READS, timeToLive: () => Duration.zero },
   );
   return PullRequestReadCache.of({
-    get: Effect.fn("PullRequestReadCache.get")(function* (key, lookup, scopes = []) {
+    get: Effect.fn("PullRequestReadCache.get")(function* (key, lookup, scopes = [], external) {
+      if (external !== undefined) {
+        return yield* Effect.gen(function* () {
+          yield* external.beforeEffect;
+          const request = new Read({
+            key,
+            revision: external.revision,
+            authority: external.authority,
+            lookup: external.beforeEffect.pipe(
+              Effect.andThen(lookup),
+              Effect.tap(() => external.beforeEffect),
+            ),
+          });
+          const stored = yield* Cache.get(externalReads, request);
+          yield* external.beforeEffect;
+          return stored.payload;
+        }).pipe(lock.withPermits(1));
+      }
       if (!enabled) return yield* lookup;
       const read = yield* Effect.cached(lookup);
       return yield* Effect.gen(function* () {
@@ -166,22 +216,39 @@ export const make = Effect.gen(function* () {
         lock.withPermits(1),
       );
     }),
-    invalidate: (scope) =>
+    invalidate: (scope, beforeEffect = Effect.void) =>
       Effect.gen(function* () {
+        yield* beforeEffect;
         const now = clock.currentTimeMillisUnsafe();
         const current = yield* Cache.get(revisions, undefined);
+        yield* beforeEffect;
         const next = Object.fromEntries(
           Object.entries(current).filter(([, value]) => value.expiresAt > now),
         );
         next[scope] = { revision: yield* crypto.randomUUIDv4, expiresAt: now + 60_000 };
+        yield* beforeEffect;
         const encoded = yield* Schema.encodeEffect(revisionCodec)(next);
+        yield* beforeEffect;
+        // If authority changes while the write is in flight, the next admitted caller reloads
+        // disk instead of reusing the revision that preceded this write.
+        yield* Cache.invalidate(revisions, undefined);
+        yield* beforeEffect;
         yield* backing.set("revisions", encoded);
+        yield* beforeEffect;
         yield* Cache.set(revisions, undefined, next);
       }).pipe(
-        Effect.catch(() => {
-          enabled = false;
-          return Effect.logWarning("PR cache disabled after clearing failed");
+        Effect.catch((error) => {
+          if (isAuthorizationError(error)) return Effect.fail(error);
+          return beforeEffect.pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                enabled = false;
+              }),
+            ),
+            Effect.andThen(Effect.logWarning("PR cache disabled after clearing failed")),
+          );
         }),
+        Effect.provideService(beforeRevisionEffect, beforeEffect),
         Effect.uninterruptible,
         lock.withPermits(CONCURRENT_READS),
       ),

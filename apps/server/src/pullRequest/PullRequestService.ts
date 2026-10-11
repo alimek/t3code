@@ -887,6 +887,7 @@ export const make = Effect.gen(function* () {
   const rateLimits = yield* SourceControlRateLimit.SourceControlRateLimit;
   const filesViewedStore = yield* PullRequestFilesViewed.PullRequestFilesViewedRepository;
   const readCache = yield* PullRequestReadCache.PullRequestReadCache;
+  const invalidateReadCache = (scope: string) => readCache.invalidate(scope, checkAccess);
 
   const sql = yield* SqlClient.SqlClient;
   const projectStore = yield* ProjectStore.ProjectStoreV2;
@@ -2459,7 +2460,7 @@ export const make = Effect.gen(function* () {
                     Effect.ensuring(
                       input.stackNumber === undefined
                         ? Effect.void
-                        : refreshAfterTurn(project.project.id),
+                        : refreshAfterTurn(project.project.id).pipe(Effect.ignore),
                     ),
                     Effect.mapError(toPullRequestError("runAction")),
                     Effect.as(
@@ -2996,7 +2997,11 @@ export const make = Effect.gen(function* () {
   const revalidate = <A, E>(read: Effect.Effect<A, E>) =>
     Effect.context<never>().pipe(
       Effect.flatMap((caller) =>
-        Effect.sync(() => runFork(Effect.ignore(read).pipe(Effect.provideContext(caller)))),
+        checkAccess.pipe(
+          Effect.andThen(
+            Effect.sync(() => runFork(Effect.ignore(read).pipe(Effect.provideContext(caller)))),
+          ),
+        ),
       ),
     );
 
@@ -3008,7 +3013,9 @@ export const make = Effect.gen(function* () {
     const staleMs = Duration.toMillis(DIFF_STALE_WINDOW);
     const held = new Map<string, { readonly at: number; readonly value: PullRequestDiffResult }>();
     const record = (key: string, value: PullRequestDiffResult) =>
-      Effect.map(Clock.currentTimeMillis, (at) => {
+      Effect.gen(function* () {
+        const at = yield* Clock.currentTimeMillis;
+        yield* checkAccess;
         held.delete(key);
         if (!canCacheDiff(value)) return;
         if (held.size >= DIFF_CACHE_CAPACITY) {
@@ -3019,13 +3026,15 @@ export const make = Effect.gen(function* () {
       });
     return <E>(key: string, read: Effect.Effect<PullRequestDiffResult, E>) => {
       const recorded = read.pipe(Effect.tap((value) => record(key, value)));
-      return Effect.flatMap(Clock.currentTimeMillis, (now) => {
+      return Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis;
+        yield* checkAccess;
         const snapshot = held.get(key);
-        if (snapshot === undefined || now - snapshot.at > staleMs) return recorded;
+        if (snapshot === undefined || now - snapshot.at > staleMs) return yield* recorded;
         // Run as its own fiber rather than a child: the caller is answered and gone before the
         // refresh lands. The read still coalesces on the cache key, so ten stale reads in one
         // window cost one host request — and a failed refresh costs nothing but the retry.
-        return revalidate(recorded).pipe(Effect.as(snapshot.value));
+        return yield* revalidate(recorded).pipe(Effect.as(snapshot.value));
       });
     };
   })();
@@ -3033,7 +3042,9 @@ export const make = Effect.gen(function* () {
   const makeLastGoodRead = <A>(capacity: number) => {
     const held = new Map<string, { readonly at: number; readonly value: A }>();
     const record = (key: string, value: A) =>
-      Effect.map(Clock.currentTimeMillis, (at) => {
+      Effect.gen(function* () {
+        const at = yield* Clock.currentTimeMillis;
+        yield* checkAccess;
         held.delete(key);
         if (held.size >= capacity) {
           const oldest = held.keys().next().value;
@@ -3053,18 +3064,22 @@ export const make = Effect.gen(function* () {
             if (provider.reason !== "failed" && provider.reason !== "rate-limited") {
               return Effect.fail(error);
             }
-            return Effect.flatMap(Clock.currentTimeMillis, (now) => {
+            return Effect.gen(function* () {
+              const now = yield* Clock.currentTimeMillis;
+              yield* checkAccess;
               const snapshot = held.get(key);
               if (
                 snapshot === undefined ||
                 now - snapshot.at > Duration.toMillis(STALE_DETAIL_WINDOW)
               ) {
-                return Effect.fail(error);
+                return yield* Effect.fail(error);
               }
-              return Effect.logWarning("using recent pull request data after a failed refresh", {
+              yield* Effect.logWarning("using recent pull request data after a failed refresh", {
                 operation: error.operation,
                 reason: provider.reason,
-              }).pipe(Effect.as(snapshot.value));
+              });
+              yield* checkAccess;
+              return snapshot.value;
             });
           },
         }),
@@ -3079,12 +3094,16 @@ export const make = Effect.gen(function* () {
       key: string,
       effect: Effect.Effect<A, PullRequestError>,
       mode: "reuse" | "revalidate",
-    ) => {
-      const snapshot = held.get(key);
-      if (snapshot === undefined) return read(key, effect);
-      if (mode === "reuse") return Effect.succeed(snapshot.value);
-      return revalidate(read(key, effect)).pipe(Effect.as(snapshot.value));
-    };
+    ) =>
+      Effect.gen(function* () {
+        yield* checkAccess;
+        const snapshot = held.get(key);
+        if (snapshot === undefined) return yield* read(key, effect);
+        if (mode === "reuse") return snapshot.value;
+        yield* revalidate(read(key, effect));
+        yield* checkAccess;
+        return snapshot.value;
+      });
     return { peek: (key: string) => held.get(key)?.value, read, record, serveHeld };
   };
   const lastGoodSummary = makeLastGoodRead<PullRequestSummary>(DETAIL_CACHE_CAPACITY);
@@ -3233,11 +3252,22 @@ export const make = Effect.gen(function* () {
         ),
       ),
     );
-    const payload = yield* readCache.get(key, encodedRead, [
-      `project:${input.projectId}`,
-      refScope(input),
-    ]);
+    const access = yield* currentAccess;
+    const payload = yield* readCache.get(
+      key,
+      encodedRead,
+      [`project:${input.projectId}`, refScope(input)],
+      access.authority === trustedReadAuthority
+        ? undefined
+        : {
+            authority: access.authority,
+            revision: `${access.scope}:${refEpoch(input)}`,
+            beforeEffect: checkAccess,
+          },
+    );
+    yield* checkAccess;
     const decoded = yield* Schema.decodeEffect(codec)(payload).pipe(Effect.option);
+    yield* checkAccess;
     return Option.isSome(decoded) ? decoded.value : yield* lookup;
   });
   const summaryCodec = Schema.fromJsonString(PullRequestSummary);
@@ -3403,6 +3433,8 @@ export const make = Effect.gen(function* () {
       return detailUncached(refOfCacheKey(key)).pipe(
         Effect.tap(
           Effect.fn("PullRequestService.recordDetailStats")(function* (value: PullRequestDetail) {
+            const at = yield* Clock.currentTimeMillis;
+            yield* checkAccess;
             recordStats(
               statsKey,
               {
@@ -3412,7 +3444,7 @@ export const make = Effect.gen(function* () {
                 additions: value.additions,
                 deletions: value.deletions,
               },
-              yield* Clock.currentTimeMillis,
+              at,
             );
           }),
         ),
@@ -3490,6 +3522,7 @@ export const make = Effect.gen(function* () {
     // than a later strict summary — display reuse would otherwise keep the
     // regression and never ask the host again.
     const read = Cache.get(detailCache, key).pipe(
+      Effect.tap(() => checkAccess),
       Effect.tap((value) => {
         const summary = summaryFromDetail(value, lastGoodSummary.peek(key));
         return noteDetailReading(input, summary).pipe(
@@ -3578,7 +3611,7 @@ export const make = Effect.gen(function* () {
           : Cache.getSuccess(diffCache, key).pipe(
               Effect.flatMap((current) =>
                 Option.isSome(current) && current.value === value
-                  ? Cache.invalidate(diffCache, key)
+                  ? checkAccess.pipe(Effect.andThen(Cache.invalidate(diffCache, key)))
                   : Effect.void,
               ),
               Effect.uninterruptible,
@@ -3614,7 +3647,9 @@ export const make = Effect.gen(function* () {
         refs: refs.map(([projectId, repository, number]) => ({ projectId, repository, number })),
       } as unknown as PullRequestListStatsInput).pipe(
         Effect.flatMap((result) =>
-          Clock.currentTimeMillis.pipe(Effect.map((at) => ({ result, at }))),
+          Clock.currentTimeMillis.pipe(
+            Effect.flatMap((at) => checkAccess.pipe(Effect.as({ result, at }))),
+          ),
         ),
       );
     },
@@ -3642,6 +3677,7 @@ export const make = Effect.gen(function* () {
     };
     if (input.refs.length === 0) return { stats: [] };
     const now = yield* Clock.currentTimeMillis;
+    yield* checkAccess;
     const held: PullRequestDiffStat[] = [];
     const missing = new Map<string, PullRequestRef>();
     for (const ref of input.refs) {
@@ -3660,6 +3696,7 @@ export const make = Effect.gen(function* () {
         Cause.hasInterruptsOnly(cause) ? Cache.get(listStatsCache, key) : Effect.failCause(cause),
       ),
     );
+    yield* checkAccess;
     for (const [key, ref] of missing) {
       const stat = result.stats.find(
         (stat) =>
@@ -3690,8 +3727,11 @@ export const make = Effect.gen(function* () {
         yield* canonicalRef(reference).pipe(
           Effect.flatMap((ref) =>
             checkAccess
-              .pipe(Effect.andThen(readCache.invalidate(refScope(ref))))
-              .pipe(Effect.andThen(Effect.sync(() => bumpRefEpoch(ref)))),
+              .pipe(Effect.andThen(invalidateReadCache(refScope(ref))))
+              .pipe(
+                Effect.andThen(checkAccess),
+                Effect.andThen(Effect.sync(() => bumpRefEpoch(ref))),
+              ),
           ),
           WorkspaceAccess.recoverWorkspaceError(() => undefined),
         );
@@ -3719,9 +3759,10 @@ export const make = Effect.gen(function* () {
         }
       }
       projectEpochs.set(projectId, listingsEpoch);
-      return readCache
-        .invalidate(`project:${projectId}`)
-        .pipe(Effect.andThen(SubscriptionRef.set(pullRequestRefreshes, listingsEpoch)));
+      return invalidateReadCache(`project:${projectId}`).pipe(
+        Effect.andThen(checkAccess),
+        Effect.andThen(SubscriptionRef.set(pullRequestRefreshes, listingsEpoch)),
+      );
     });
 
   // Invalidate before notifying every client so mounted readers immediately fetch the edit.
@@ -3733,10 +3774,10 @@ export const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const ref = yield* canonicalRef(input);
         yield* checkAccess;
-        yield* readCache.invalidate(refScope(ref)).pipe(
+        yield* invalidateReadCache(refScope(ref)).pipe(
           Effect.andThen(method(input)),
           Effect.ensuring(
-            checkAccess.pipe(Effect.andThen(readCache.invalidate(refScope(ref))), Effect.ignore),
+            checkAccess.pipe(Effect.andThen(invalidateReadCache(refScope(ref))), Effect.ignore),
           ),
           Effect.tap(() =>
             Effect.sync(() => {
@@ -3752,10 +3793,10 @@ export const make = Effect.gen(function* () {
   )(function* (input) {
     const ref = yield* canonicalRef(input);
     yield* checkAccess;
-    yield* readCache.invalidate(refScope(ref));
+    yield* invalidateReadCache(refScope(ref));
     const repository = yield* runAction(input).pipe(
       Effect.ensuring(
-        checkAccess.pipe(Effect.andThen(readCache.invalidate(refScope(ref))), Effect.ignore),
+        checkAccess.pipe(Effect.andThen(invalidateReadCache(refScope(ref))), Effect.ignore),
       ),
     );
     bumpRefEpoch({ ...ref, repository });

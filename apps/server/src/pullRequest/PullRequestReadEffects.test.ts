@@ -10,6 +10,8 @@ import {
   ServerSettingsError,
 } from "@t3tools/contracts";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as KeyValueStore from "effect/persistence/KeyValueStore";
+import * as ReadCache from "./PullRequestReadCache.ts";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -1093,4 +1095,203 @@ it.effect(
       yield* read;
       expect(requests).toBe(2);
     }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(["grant", "root", "membership", "action"] as const)(
+  "external PR cache bypass: %s cut after lookup cannot publish or touch backing storage",
+  (cut) =>
+    Effect.gen(function* () {
+      const f = yield* fixture();
+      const admission = yield* f.access.capture(
+        f.authority,
+        { cwd: f.b, projectId: projectB },
+        AuthOrchestrationReadScope,
+      );
+      const backing = yield* KeyValueStore.KeyValueStore;
+      const crypto = yield* Crypto.Crypto;
+      const effects: string[] = [];
+      const cache = yield* ReadCache.make.pipe(
+        Effect.provideService(KeyValueStore.KeyValueStore, {
+          ...backing,
+          get: (key) =>
+            Effect.sync(() => {
+              effects.push(`get:${key}`);
+            }).pipe(Effect.andThen(backing.get(key))),
+          set: (key, value) =>
+            Effect.sync(() => {
+              effects.push(`set:${key}`);
+            }).pipe(Effect.andThen(backing.set(key, value))),
+          remove: (key) =>
+            Effect.sync(() => {
+              effects.push(`remove:${key}`);
+            }).pipe(Effect.andThen(backing.remove(key))),
+        }),
+        Effect.provideService(Crypto.Crypto, {
+          ...crypto,
+          digest: (...args) =>
+            Effect.sync(() => {
+              effects.push("digest");
+            }).pipe(Effect.andThen(crypto.digest(...args))),
+        }),
+      );
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let lookups = 0;
+      const options = {
+        authority: f.authority,
+        revision: "read:0",
+        beforeEffect: admission.beforeEffect(f.b),
+      };
+      const pending = yield* cache
+        .get(
+          "summary",
+          Effect.gen(function* () {
+            lookups++;
+            yield* Deferred.succeed(started, undefined);
+            yield* Deferred.await(release);
+            return "denied payload";
+          }),
+          ["pr"],
+          options,
+        )
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Deferred.await(started);
+      yield* f.cut(cut);
+      yield* Deferred.succeed(release, undefined);
+      expectDenied(yield* Fiber.join(pending));
+      expect(lookups).toBe(1);
+      expect(effects).toEqual([]);
+      // A different admitted current caller cannot reuse the denied successful lookup.
+      const allowed = yield* f.access.capture(
+        f.aAuthority,
+        { cwd: f.a, projectId: projectA },
+        AuthOrchestrationReadScope,
+      );
+      expect(
+        yield* cache.get("summary", Effect.succeed("allowed"), ["pr"], {
+          authority: f.aAuthority,
+          revision: "read:0",
+          beforeEffect: allowed.beforeEffect(f.a),
+        }),
+      ).toBe("allowed");
+      expect(effects).toEqual([]);
+    }).pipe(Effect.provide(Layer.mergeAll(layer, KeyValueStore.layerMemory))),
+);
+
+it.effect.each(["revision read", "UUID", "written revision"] as const)(
+  "PR cache invalidation: current SQL cut at %s preserves denial and caching",
+  (stage) =>
+    Effect.gen(function* () {
+      const f = yield* fixture(AuthSourceControlWriteScope);
+      const admission = yield* f.access.capture(
+        f.authority,
+        { cwd: f.b, projectId: projectB },
+        AuthSourceControlWriteScope,
+      );
+      const backing = yield* KeyValueStore.KeyValueStore;
+      const crypto = yield* Crypto.Crypto;
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let hold = true,
+        writes = 0,
+        reads = 0;
+      const wait = Deferred.succeed(started, undefined).pipe(
+        Effect.andThen(Deferred.await(release)),
+      );
+      const cache = yield* ReadCache.make.pipe(
+        Effect.provideService(KeyValueStore.KeyValueStore, {
+          ...backing,
+          get: (key) =>
+            backing.get(key).pipe(
+              Effect.tap(() => {
+                if (key !== "revisions") return Effect.void;
+                reads++;
+                return hold && stage === "revision read" ? wait : Effect.void;
+              }),
+            ),
+          set: (key, value) =>
+            backing.set(key, value).pipe(
+              Effect.tap(() => {
+                if (key !== "revisions") return Effect.void;
+                writes++;
+                return hold && stage === "written revision" ? wait : Effect.void;
+              }),
+            ),
+        }),
+        Effect.provideService(Crypto.Crypto, {
+          ...crypto,
+          randomUUIDv4: Effect.suspend(() => (hold && stage === "UUID" ? wait : Effect.void)).pipe(
+            Effect.andThen(crypto.randomUUIDv4),
+          ),
+        }),
+      );
+      const pending = yield* cache
+        .invalidate("pr", admission.beforeEffect(f.b))
+        .pipe(Effect.result, Effect.forkChild);
+      yield* Deferred.await(started);
+      yield* f.cut("root");
+      yield* Deferred.succeed(release, undefined);
+      expectDenied(yield* Fiber.join(pending));
+      expect(writes).toBe(stage === "written revision" ? 1 : 0);
+      // The written-revision case started its actual write while admitted. Denial only blocks
+      // the later held revision publication; the next trusted call must reload disk.
+      hold = false;
+      yield* f.restore;
+      let lookups = 0;
+      const lookup = Effect.sync(() => String(++lookups));
+      expect(yield* cache.get("summary", lookup, ["pr"])).toBe("1");
+      expect(yield* cache.get("summary", lookup, ["pr"])).toBe("1");
+      expect(lookups).toBe(1);
+      if (stage !== "UUID") expect(reads).toBe(2);
+      yield* cache.invalidate("pr", admission.beforeEffect(f.b));
+      expect(yield* cache.get("summary", lookup, ["pr"])).toBe("2");
+    }).pipe(Effect.provide(Layer.mergeAll(layer, KeyValueStore.layerMemory))),
+);
+
+it.effect("PR cache invalidation: permit cut does not read revisions or disable persistence", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture(AuthSourceControlWriteScope);
+    const admission = yield* f.access.capture(
+      f.authority,
+      { cwd: f.b, projectId: projectB },
+      AuthSourceControlWriteScope,
+    );
+    const backing = yield* KeyValueStore.KeyValueStore;
+    const effects: string[] = [];
+    const cache = yield* ReadCache.make.pipe(
+      Effect.provideService(KeyValueStore.KeyValueStore, {
+        ...backing,
+        get: (key) =>
+          Effect.sync(() => {
+            effects.push(`get:${key}`);
+          }).pipe(Effect.andThen(backing.get(key))),
+        set: (key, value) =>
+          Effect.sync(() => {
+            effects.push(`set:${key}`);
+          }).pipe(Effect.andThen(backing.set(key, value))),
+      }),
+    );
+    const started = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const read = yield* cache
+      .get(
+        "summary",
+        Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.as("warm"),
+        ),
+      )
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(started);
+    const invalidate = yield* cache
+      .invalidate("pr", admission.beforeEffect(f.b))
+      .pipe(Effect.result, Effect.forkChild({ startImmediately: true }));
+    yield* f.cut("grant");
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(read);
+    const before = [...effects];
+    expectDenied(yield* Fiber.join(invalidate));
+    expect(effects).toEqual(before);
+    expect(yield* cache.get("summary", Effect.die("disabled cache"))).toBe("warm");
+  }).pipe(Effect.provide(Layer.mergeAll(layer, KeyValueStore.layerMemory))),
 );
