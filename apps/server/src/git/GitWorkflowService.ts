@@ -249,14 +249,15 @@ export const make = Effect.gen(function* () {
     cwd: string,
   ) {
     const handle = yield* registry.resolve({ cwd }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new GitManagerError({
-            operation,
-            cwd,
-            detail: "Failed to resolve the VCS driver for this Git workflow.",
-            cause,
-          }),
+      Effect.mapError((cause) =>
+        cause._tag === "EnvironmentAuthorizationError"
+          ? cause
+          : new GitManagerError({
+              operation,
+              cwd,
+              detail: "Failed to resolve the VCS driver for this Git workflow.",
+              cause,
+            }),
       ),
     );
     if (handle.kind !== "git") {
@@ -274,15 +275,16 @@ export const make = Effect.gen(function* () {
     cwd: string,
   ) {
     const handle = yield* registry.resolve({ cwd }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new GitCommandError({
-            operation,
-            command: "vcs-route",
-            cwd,
-            detail: "Failed to resolve the VCS driver for this Git command.",
-            cause,
-          }),
+      Effect.mapError((cause) =>
+        cause._tag === "EnvironmentAuthorizationError"
+          ? cause
+          : new GitCommandError({
+              operation,
+              command: "vcs-route",
+              cwd,
+              detail: "Failed to resolve the VCS driver for this Git command.",
+              cause,
+            }),
       ),
     );
     if (handle.kind !== "git") {
@@ -304,14 +306,15 @@ export const make = Effect.gen(function* () {
       scope: AuthEnvironmentScope = AuthOrchestrationReadScope,
     ) {
       const handle = yield* registry.detect({ cwd }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new GitManagerError({
-              operation,
-              cwd,
-              detail: "Failed to detect a VCS repository for this Git workflow.",
-              cause,
-            }),
+        Effect.mapError((cause) =>
+          cause._tag === "EnvironmentAuthorizationError"
+            ? cause
+            : new GitManagerError({
+                operation,
+                cwd,
+                detail: "Failed to detect a VCS repository for this Git workflow.",
+                cause,
+              }),
         ),
       );
       if (!handle) {
@@ -338,15 +341,16 @@ export const make = Effect.gen(function* () {
     scope: AuthEnvironmentScope = AuthOrchestrationReadScope,
   ) {
     const handle = yield* registry.detect({ cwd }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new GitCommandError({
-            operation,
-            command: "vcs-route",
-            cwd,
-            detail: "Failed to detect a VCS repository for this Git command.",
-            cause,
-          }),
+      Effect.mapError((cause) =>
+        cause._tag === "EnvironmentAuthorizationError"
+          ? cause
+          : new GitCommandError({
+              operation,
+              command: "vcs-route",
+              cwd,
+              detail: "Failed to detect a VCS repository for this Git command.",
+              cause,
+            }),
       ),
     );
     if (!handle) {

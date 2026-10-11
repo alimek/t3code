@@ -10,8 +10,14 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http";
 
-import { GitCommandError } from "@t3tools/contracts";
+import {
+  AuthSourceControlWriteScope,
+  EnvironmentAuthorizationError,
+  GitCommandError,
+} from "@t3tools/contracts";
 import * as BitbucketApi from "./BitbucketApi.ts";
+import { workspaceEffectAdmission } from "../auth/workspaceReadAccess.ts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -680,42 +686,44 @@ it.effect("reports saved credentials as configured when Bitbucket cannot confirm
   }).pipe(Effect.provide(layer));
 });
 
-it.effect("preserves the HTTP client failure without deriving the domain message from it", () => {
-  const transportCause = new Error("socket reset by peer");
-  let requestFailure: HttpClientError.HttpClientError | undefined;
-  const { layer } = makeLayer({
-    response: () => Response.json({}),
-    requestFailure: (request) => {
-      requestFailure = new HttpClientError.HttpClientError({
-        reason: new HttpClientError.TransportError({
-          request,
-          cause: transportCause,
-        }),
-      });
-      return requestFailure;
-    },
-  });
+it.effect.each(["getPullRequest", "request"] as const)(
+  "preserves the %s HTTP client failure without deriving the domain message from it",
+  (operation) => {
+    const transportCause = new Error("socket reset by peer");
+    let requestFailure: HttpClientError.HttpClientError | undefined;
+    const { layer } = makeLayer({
+      response: () => Response.json({}),
+      requestFailure: (request) => {
+        requestFailure = new HttpClientError.HttpClientError({
+          reason: new HttpClientError.TransportError({
+            request,
+            cause: transportCause,
+          }),
+        });
+        return requestFailure;
+      },
+    });
 
-  return Effect.gen(function* () {
-    const bitbucket = yield* BitbucketApi.BitbucketApi;
-    const error = yield* Effect.flip(
-      bitbucket.getPullRequest({
-        cwd: "/repo",
-        reference: "42",
-      }),
-    );
-    if (error._tag === "EnvironmentAuthorizationError") throw error;
+    return Effect.gen(function* () {
+      const bitbucket = yield* BitbucketApi.BitbucketApi;
+      const error = yield* Effect.flip(
+        operation === "getPullRequest"
+          ? bitbucket.getPullRequest({ cwd: "/repo", reference: "42" }).pipe(Effect.asVoid)
+          : bitbucket.request({ method: "GET", url: "/diff" }).pipe(Effect.asVoid),
+      );
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
 
-    assert.instanceOf(error, BitbucketApi.BitbucketRequestError);
-    assert.strictEqual(error.operation, "getPullRequest");
-    assert.strictEqual(
-      error.message,
-      "Bitbucket API failed in getPullRequest: Failed to send the Bitbucket request.",
-    );
-    assert.strictEqual(error.cause, requestFailure);
-    assert.strictEqual(requestFailure?.cause, transportCause);
-  }).pipe(Effect.provide(layer));
-});
+      assert.instanceOf(error, BitbucketApi.BitbucketRequestError);
+      assert.strictEqual(error.operation, operation);
+      assert.strictEqual(
+        error.message,
+        `Bitbucket API failed in ${operation}: Failed to send the Bitbucket request.`,
+      );
+      assert.strictEqual(error.cause, requestFailure);
+      assert.strictEqual(requestFailure?.cause, transportCause);
+    }).pipe(Effect.provide(layer));
+  },
+);
 
 it.effect("keeps Bitbucket response bodies out of checkout diagnostics", () => {
   const responseBody = '{"error":{"message":"credential=secret-value"}}';
@@ -1088,4 +1096,47 @@ it.effect("cuts a response short rather than reading an unbounded diff into memo
       makeLayer({ response: () => new Response("1234567890", { status: 200 }) }).layer,
     ),
   ),
+);
+
+it.effect.each(["request", "redirect", "probeAuth"] as const)(
+  "retains current authority denial before Bitbucket %s HTTP effects",
+  (action) => {
+    const denial = new EnvironmentAuthorizationError({
+      requiredScope: AuthSourceControlWriteScope,
+      message: "denied",
+    });
+    let revoked = action !== "redirect";
+    let checks = 0;
+    const { layer, execute } = makeLayer({
+      response: () => {
+        revoked = true;
+        return new Response(null, { status: 302, headers: { location: "/2.0/redirected" } });
+      },
+    });
+    return Effect.gen(function* () {
+      const api = yield* BitbucketApi.BitbucketApi;
+      const error = yield* (
+        action === "probeAuth"
+          ? api.probeAuth.pipe(Effect.asVoid)
+          : api.request({ method: "GET", url: "/diff" }).pipe(Effect.asVoid)
+      ).pipe(Effect.flip);
+      assert.strictEqual(execute.mock.calls.length, action === "redirect" ? 1 : 0);
+      assert.strictEqual(checks, action === "redirect" ? 2 : 1);
+      assert.strictEqual(error, denial);
+    }).pipe(
+      Effect.provideService(workspaceEffectAdmission, {
+        authority: trustedReadAuthority,
+        input: { cwd: "/repo" },
+        scope: AuthSourceControlWriteScope,
+        projectId: undefined,
+        checkSql: Effect.void,
+        beforeEffect: () =>
+          Effect.suspend(() => {
+            checks++;
+            return revoked ? Effect.fail(denial) : Effect.void;
+          }),
+      }),
+      Effect.provide(layer),
+    );
+  },
 );

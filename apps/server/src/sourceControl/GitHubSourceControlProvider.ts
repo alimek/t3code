@@ -799,24 +799,23 @@ export const make = Effect.gen(function* () {
           upstream: { remoteName, remoteBranch: pullRequest.headRefName },
         };
       }).pipe(
-        Effect.catchIf(
-          (error): error is Exclude<typeof error, EnvironmentAuthorizationError> =>
-            !isEnvironmentAuthorizationError(error),
-          () =>
-            Effect.gen(function* () {
-              yield* runGit(input.cwd, "fetchPullRef", [
-                "fetch",
-                "--quiet",
-                "--no-tags",
-                yield* baseRemote,
-                `refs/pull/${pullRequest.number}/head`,
-              ]);
-              const { commitSha } = yield* git.resolveCommit({
-                cwd: input.cwd,
-                revision: "FETCH_HEAD",
-              });
-              return { ref: commitSha, upstream: null };
-            }),
+        Effect.catch((error) =>
+          isEnvironmentAuthorizationError(error)
+            ? Effect.fail(error)
+            : Effect.gen(function* () {
+                yield* runGit(input.cwd, "fetchPullRef", [
+                  "fetch",
+                  "--quiet",
+                  "--no-tags",
+                  yield* baseRemote,
+                  `refs/pull/${pullRequest.number}/head`,
+                ]);
+                const { commitSha } = yield* git.resolveCommit({
+                  cwd: input.cwd,
+                  revision: "FETCH_HEAD",
+                });
+                return { ref: commitSha, upstream: null };
+              }),
         ),
         Effect.mapError(gitFailure),
       );

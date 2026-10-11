@@ -43,11 +43,8 @@ export const beforeWorkspaceEffect = (cwd: string, scope?: AuthEnvironmentScope)
 export const recoverWorkspaceError =
   <A>(fallback: () => A) =>
   <B, E, R>(operation: Effect.Effect<B, E, R>) =>
-    Effect.catchIf(
-      operation,
-      (error: E): error is Exclude<E, EnvironmentAuthorizationError> =>
-        !isEnvironmentAuthorizationError(error),
-      () => Effect.succeed(fallback()),
+    Effect.catch(operation, (error) =>
+      isEnvironmentAuthorizationError(error) ? Effect.fail(error) : Effect.succeed(fallback()),
     );
 export const beforeCurrentWorkspaceEffect = workspaceEffectAdmission.pipe(
   Effect.flatMap((admission) =>

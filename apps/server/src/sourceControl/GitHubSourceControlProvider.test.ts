@@ -1,3 +1,8 @@
+import {
+  AuthSourceControlWriteScope,
+  EnvironmentAuthorizationError,
+  GitCommandError,
+} from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
@@ -76,6 +81,7 @@ function harness(input: {
   readonly localBranches?: ReadonlyArray<string>;
   /** Fails the local branch listing, the first git read a checkout makes. */
   readonly gitFailure?: unknown;
+  readonly fetchFailure?: GitCommandError | EnvironmentAuthorizationError;
 }) {
   const git: Array<readonly [string, unknown]> = [];
   const record =
@@ -98,7 +104,15 @@ function harness(input: {
         git.push(["ensureRemote", args]);
         return args.preferredName;
       }),
-    fetchRemoteTrackingBranch: (args) => record("fetchRemoteTrackingBranch", undefined)(args),
+    fetchRemoteTrackingBranch: (args) =>
+      record(
+        "fetchRemoteTrackingBranch",
+        undefined,
+      )(args).pipe(
+        Effect.andThen(
+          input.fetchFailure === undefined ? Effect.void : Effect.fail(input.fetchFailure),
+        ),
+      ),
     setBranchUpstream: (args) => record("setBranchUpstream", undefined)(args),
     switchRef: (args) => record("switchRef", { refName: args.refName })(args) as never,
     listLocalBranchNames: () =>
@@ -630,6 +644,55 @@ describe("GitHubSourceControlProvider.checkoutChangeRequest", () => {
       assert.notInclude(error.message, "secret-path");
     }).pipe(Effect.provide(layer));
   });
+
+  it.effect.each(["denied", "offline"] as const)(
+    "checkout fetch %s preserves denial or uses the ordinary pull-ref fallback",
+    (failure) => {
+      const fetchFailure =
+        failure === "denied"
+          ? new EnvironmentAuthorizationError({
+              requiredScope: AuthSourceControlWriteScope,
+              message: "denied",
+            })
+          : new GitCommandError({
+              operation: "fetch",
+              command: "git fetch",
+              cwd: "/repo",
+              detail: "offline",
+            });
+      const { layer, git } = harness({
+        remotes: remotesOutput(["origin", "git@github.com:acme/web.git"]),
+        fetchFailure,
+        api: {
+          graphql: () =>
+            Effect.succeed(
+              encodeJson({ data: { repository: { pullRequest: node(5, "feature/x") } } }),
+            ),
+        },
+      });
+      return Effect.gen(function* () {
+        const gh = yield* GitHubSourceControlProvider.make;
+        const operation = gh.checkoutChangeRequest({ cwd: "/repo", reference: "5" });
+        if (failure === "denied") {
+          assert.strictEqual((yield* Effect.flip(operation)) === fetchFailure, true);
+          assert.deepStrictEqual(
+            git.map(([name]) => name),
+            ["fetchRemoteTrackingBranch"],
+          );
+        } else {
+          yield* operation;
+          assert.deepStrictEqual(git[1], [
+            "execute",
+            ["fetch", "--quiet", "--no-tags", "origin", "refs/pull/5/head"],
+          ]);
+          assert.strictEqual(
+            git.some(([name]) => name === "switchRef"),
+            true,
+          );
+        }
+      }).pipe(Effect.provide(layer));
+    },
+  );
 
   it("names the local branch the way gh pr checkout does", () => {
     const name = (headRefName: string, isCrossRepository: boolean) =>

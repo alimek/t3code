@@ -11,6 +11,7 @@ import {
   AuthSourceControlWriteScope,
   AuthOrchestrationReadScope,
   EnvironmentAuthorizationError,
+  VcsUnsupportedOperationError,
   SourceControlProviderError as SourceControlProviderFailure,
   ThreadId,
   type AuthEnvironmentScope,
@@ -135,6 +136,7 @@ const workflow = (
         Layer.succeed(Git.GitVcsDriver, git),
         Layer.mock(Manager.GitManager)({}),
         Layer.mock(Registry.VcsDriverRegistry)({
+          ...(resolve === undefined ? {} : { detect: resolve }),
           resolve:
             resolve ??
             (({ cwd }) =>
@@ -707,4 +709,119 @@ it.effect(
       yield* broadcaster.refreshStatus(f.authority, f.a);
       expect(pulls).toBe(2);
     }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(["createRef", "renameBranch"] as const)(
+  "registry preflight denial stays typed for %s",
+  (method) =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      let spawned = 0;
+      const git = yield* core(f, () =>
+        Effect.sync(() => {
+          spawned++;
+          return handle();
+        }),
+      );
+      const reached = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      const service = yield* workflow(f, git, ({ cwd }) =>
+        Deferred.succeed(reached, undefined).pipe(
+          Effect.andThen(Deferred.await(resume)),
+          Effect.andThen(Access.beforeWorkspaceEffect(cwd)),
+          Effect.as({ kind: "git", repository: { rootPath: cwd } } as Registry.VcsDriverHandle),
+        ),
+      );
+      const pending = yield* (
+        method === "createRef"
+          ? service.createRef(f.authority, { cwd: f.a, refName: "denied" }).pipe(Effect.asVoid)
+          : service
+              .renameBranch(f.authority, { cwd: f.a, oldBranch: "old", newBranch: "new" })
+              .pipe(Effect.asVoid)
+      ).pipe(Effect.result, Effect.forkScoped);
+      yield* Deferred.await(reached);
+      f.set(grantNone);
+      yield* Deferred.succeed(resume, undefined);
+      const result = yield* Fiber.join(pending);
+      expect(spawned).toBe(0);
+      expect(Result.isFailure(result)).toBe(true);
+      if (Result.isFailure(result))
+        expect(result.failure._tag).toBe("EnvironmentAuthorizationError");
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(["createRef", "renameBranch", "hasCommit", "localStatus"] as const)(
+  "registry %s preserves domain denial and wraps ordinary errors without effects",
+  (method) =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      if (method === "hasCommit" || method === "localStatus")
+        f.set(grantA, [AuthOrchestrationReadScope]);
+      let spawned = 0;
+      const git = yield* core(f, () =>
+        Effect.sync(() => {
+          spawned++;
+          return handle();
+        }),
+      );
+      const ordinary = new VcsUnsupportedOperationError({
+        kind: "unknown",
+        operation: "detect",
+        detail: "no repository",
+      });
+      const denial = new EnvironmentAuthorizationError({
+        requiredScope: AuthSourceControlWriteScope,
+        message: "denied",
+      });
+      for (const cause of [denial, ordinary]) {
+        const service = yield* workflow(f, git, () => Effect.fail(cause));
+        const operation =
+          method === "createRef"
+            ? service.createRef(f.authority, { cwd: f.a, refName: "ordinary" }).pipe(Effect.asVoid)
+            : method === "renameBranch"
+              ? service
+                  .renameBranch(f.authority, { cwd: f.a, oldBranch: "old", newBranch: "new" })
+                  .pipe(Effect.asVoid)
+              : method === "hasCommit"
+                ? service.hasCommit(f.authority, { cwd: f.a, refName: "main" }).pipe(Effect.asVoid)
+                : service.localStatus(f.authority, { cwd: f.a }).pipe(Effect.asVoid);
+        const error = yield* Effect.flip(operation);
+        expect(spawned).toBe(0);
+        if (cause === denial) expect(error).toBe(denial);
+        else {
+          expect(error._tag).toBe(
+            method === "createRef" || method === "hasCommit"
+              ? "GitCommandError"
+              : "GitManagerError",
+          );
+          if (error._tag !== "EnvironmentAuthorizationError") expect(error.cause).toBe(cause);
+        }
+      }
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect("workspace recovery retains denial and recovers ordinary failures only", () =>
+  Effect.gen(function* () {
+    let recovered = 0;
+    const recover = Access.recoverWorkspaceError(() => {
+      recovered++;
+      return "fallback";
+    });
+    const denial = new EnvironmentAuthorizationError({
+      requiredScope: AuthSourceControlWriteScope,
+      message: "denied",
+    });
+    expect(yield* Effect.fail(denial).pipe(recover, Effect.flip)).toBe(denial);
+    expect(recovered).toBe(0);
+    expect(
+      yield* Effect.fail(
+        new VcsUnsupportedOperationError({
+          kind: "unknown",
+          operation: "detect",
+          detail: "offline",
+        }),
+      ).pipe(recover),
+    ).toBe("fallback");
+    expect(recovered).toBe(1);
+  }),
 );

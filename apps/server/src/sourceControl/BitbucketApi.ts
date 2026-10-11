@@ -920,8 +920,10 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((request) =>
         beforeCurrentWorkspaceEffect.pipe(Effect.andThen(httpClient.execute(request))),
       ),
-      Effect.mapError(
-        (cause): BitbucketApiError => new BitbucketRequestError({ operation: "request", cause }),
+      Effect.mapError((cause): BitbucketApiError =>
+        cause._tag === "EnvironmentAuthorizationError"
+          ? cause
+          : new BitbucketRequestError({ operation: "request", cause }),
       ),
       Effect.flatMap((response) => {
         const location = response.headers.location;
@@ -985,10 +987,10 @@ export const make = Effect.gen(function* () {
         host: Option.some("bitbucket.org"),
         detail: Option.none<string>(),
       })),
-      Effect.catchIf(
-        (error): error is Exclude<typeof error, EnvironmentAuthorizationError> =>
-          error._tag !== "EnvironmentAuthorizationError",
-        () => currentCredential.pipe(Effect.map(authFromCredential)),
+      Effect.catch((error) =>
+        error._tag === "EnvironmentAuthorizationError"
+          ? Effect.fail(error)
+          : currentCredential.pipe(Effect.map(authFromCredential)),
       ),
     ),
     listPullRequests: (input) =>
