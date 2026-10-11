@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../../../auth/ResourceAuthorization.ts";
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as GitWorkflow from "../../../git/GitWorkflowService.ts";
@@ -32,7 +33,10 @@ const handlers = {
         });
       const git = yield* GitWorkflow.GitWorkflowService;
       return yield* git
-        .listRefs({ ...refs, cwd: thread.worktreePath ?? project.value.workspaceRoot })
+        .listRefs(trustedReadAuthority, {
+          ...refs,
+          cwd: thread.worktreePath ?? project.value.workspaceRoot,
+        })
         .pipe(Effect.mapError(unavailable));
     }),
   ),

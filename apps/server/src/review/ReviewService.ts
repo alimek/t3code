@@ -1,3 +1,6 @@
+import { AuthFilesystemReadScope, EnvironmentAuthorizationError } from "@t3tools/contracts";
+import * as WorkspaceReadAccess from "../auth/workspaceReadAccess.ts";
+import { trustedReadAuthority, type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -25,16 +28,25 @@ export class ReviewService extends Context.Service<
   ReviewService,
   {
     readonly getDiffPreview: (
+      authority: ThreadReadAuthority,
       input: ReviewDiffPreviewInput,
-    ) => Effect.Effect<ReviewDiffPreviewResult, ReviewDiffPreviewError>;
+    ) => Effect.Effect<
+      ReviewDiffPreviewResult,
+      ReviewDiffPreviewError | EnvironmentAuthorizationError
+    >;
     readonly getDiffFileContents: (
+      authority: ThreadReadAuthority,
       input: ReviewDiffFileContentsInput,
-    ) => Effect.Effect<ReviewDiffFileContentsResult, ReviewDiffPreviewError>;
+    ) => Effect.Effect<
+      ReviewDiffFileContentsResult,
+      ReviewDiffPreviewError | EnvironmentAuthorizationError
+    >;
   }
 >()("t3/review/ReviewService") {}
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  const access = yield* WorkspaceReadAccess.make;
   const config = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -105,11 +117,16 @@ export const make = Effect.gen(function* () {
     });
   });
 
-  const getDiffPreview: ReviewService["Service"]["getDiffPreview"] = Effect.fn(
-    "ReviewService.getDiffPreview",
-  )(function* (input) {
-    yield* assertWorkspaceBoundCwd("ReviewService.getDiffPreview", input.cwd);
+  const getDiffPreview = Effect.fn("ReviewService.getDiffPreview")(function* (
+    authority: ThreadReadAuthority,
+    input: ReviewDiffPreviewInput,
+  ) {
+    const grant =
+      authority === trustedReadAuthority ? undefined : (yield* authority.current).resourceGrant;
+    if (grant === undefined || (grant.projects.mode === "all" && grant.providers.mode === "all"))
+      yield* assertWorkspaceBoundCwd("ReviewService.getDiffPreview", input.cwd);
 
+    yield* access.admit(authority, input, AuthFilesystemReadScope);
     const handle = yield* vcsRegistry.detect({ cwd: input.cwd, requestedKind: "auto" });
     if (!handle) {
       return {
@@ -119,6 +136,7 @@ export const make = Effect.gen(function* () {
       };
     }
 
+    yield* access.repository(authority, input, handle.repository.rootPath, AuthFilesystemReadScope);
     const getDriverDiffPreview = handle.driver.getDiffPreview;
     if (!getDriverDiffPreview) {
       if (handle.kind === "git") {
@@ -134,11 +152,16 @@ export const make = Effect.gen(function* () {
     return yield* getDriverDiffPreview(input);
   });
 
-  const getDiffFileContents: ReviewService["Service"]["getDiffFileContents"] = Effect.fn(
-    "ReviewService.getDiffFileContents",
-  )(function* (input) {
-    yield* assertWorkspaceBoundCwd("ReviewService.getDiffFileContents", input.cwd);
+  const getDiffFileContents = Effect.fn("ReviewService.getDiffFileContents")(function* (
+    authority: ThreadReadAuthority,
+    input: ReviewDiffFileContentsInput,
+  ) {
+    const grant =
+      authority === trustedReadAuthority ? undefined : (yield* authority.current).resourceGrant;
+    if (grant === undefined || (grant.projects.mode === "all" && grant.providers.mode === "all"))
+      yield* assertWorkspaceBoundCwd("ReviewService.getDiffFileContents", input.cwd);
 
+    yield* access.admit(authority, input, AuthFilesystemReadScope);
     const handle = yield* vcsRegistry.detect({ cwd: input.cwd, requestedKind: "auto" });
     if (handle?.kind !== "git") {
       return yield* new VcsUnsupportedOperationError({
@@ -148,12 +171,15 @@ export const make = Effect.gen(function* () {
       });
     }
 
+    yield* access.repository(authority, input, handle.repository.rootPath, AuthFilesystemReadScope);
     return yield* git.getReviewDiffFileContents(input);
   });
 
   return ReviewService.of({
-    getDiffPreview,
-    getDiffFileContents,
+    getDiffPreview: (authority, input) =>
+      access.read(authority, input, getDiffPreview(authority, input), AuthFilesystemReadScope),
+    getDiffFileContents: (authority, input) =>
+      access.read(authority, input, getDiffFileContents(authority, input), AuthFilesystemReadScope),
   });
 });
 

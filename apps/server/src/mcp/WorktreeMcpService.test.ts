@@ -1,3 +1,5 @@
+import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { describe, expect, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -129,7 +131,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
       ),
     ),
   );
-  const listLocalBranchNames = vi.fn((_: string) =>
+  const listLocalBranchNames = vi.fn((_authority: unknown, _: string) =>
     Effect.succeed(
       options.existingBranchWorktreePath === undefined
         ? ["dev"]
@@ -231,7 +233,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
             ),
           ),
   );
-  const listRefs = vi.fn((input: { readonly query?: string | undefined }) =>
+  const listRefs = vi.fn((_authority: unknown, input: { readonly query?: string | undefined }) =>
     Effect.succeed({
       refs:
         options.existingBranchWorktreePath === undefined
@@ -260,7 +262,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
       workingTree: { files: [], insertions: 0, deletions: 0 },
     }),
   );
-  const refreshStatus = vi.fn((_: string) => Effect.die("refreshStatus stub"));
+  const refreshStatus = vi.fn((_authority: unknown, _: string) => Effect.die("refreshStatus stub"));
   const runForThread = vi.fn((input: { readonly worktreePath: string }) => {
     switch (options.setupScript ?? "started") {
       case "no-script":
@@ -412,6 +414,7 @@ describe("t3_worktree_handoff", () => {
         path: null,
       });
       expect(harness.dispatch).toHaveBeenCalledWith(
+        trustedMutationAuthority,
         expect.objectContaining({
           type: "thread.metadata.update",
           threadId,
@@ -449,6 +452,7 @@ describe("t3_worktree_handoff", () => {
 
       expect(result.continuation).toEqual({ status: "scheduled", delivery: "queued" });
       expect(harness.sendToThread).toHaveBeenCalledWith(
+        trustedMutationAuthority,
         expect.objectContaining({
           projectId,
           threadId,
@@ -519,7 +523,7 @@ describe("t3_worktree_handoff", () => {
         cwd: workspaceRoot,
         remoteName: "origin",
       });
-      expect(harness.resolveRemoteTrackingCommit).toHaveBeenCalledWith({
+      expect(harness.resolveRemoteTrackingCommit).toHaveBeenCalledWith(trustedReadAuthority, {
         cwd: workspaceRoot,
         refName: "dev",
         fallbackRemoteName: "origin",

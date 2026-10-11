@@ -1,3 +1,5 @@
+import { EnvironmentAuthorizationError } from "@t3tools/contracts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
@@ -683,7 +685,7 @@ function resolvePullRequest(
   manager: GitManager.GitManager["Service"],
   input: { cwd: string; reference: string },
 ) {
-  return manager.resolvePullRequest(input);
+  return manager.resolvePullRequest(trustedReadAuthority, input);
 }
 
 function preparePullRequestThread(
@@ -791,6 +793,7 @@ function makeManager(input?: {
 const asThreadId = (threadId: string) => threadId as ThreadId;
 
 const layerGitManagerTest = GitVcsDriver.layer.pipe(
+  Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-git-manager-test-" })),
   Layer.provideMerge(VcsProcess.layer),
   Layer.provideMerge(NodeServices.layer),
@@ -815,8 +818,8 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           Layer.provide(
             Layer.succeed(GitManager.GitManager, {
               ...manager,
-              remoteStatus: (input, options) =>
-                manager.remoteStatus(input, options).pipe(
+              remoteStatus: (_authority, input, options) =>
+                manager.remoteStatus(_authority, input, options).pipe(
                   Effect.tap(() =>
                     Effect.sync(() => {
                       remoteReads += 1;
@@ -854,13 +857,17 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         VcsStatusBroadcaster.VcsStatusBroadcaster,
       );
       const passiveScope = yield* Scope.make();
-      const snapshots = yield* Deferred.make<void, GitManagerServiceError>();
+      const snapshots = yield* Deferred.make<
+        void,
+        GitManagerServiceError | EnvironmentAuthorizationError
+      >();
       const localUpdated = yield* Deferred.make<void>();
       const remoteUpdated = yield* Deferred.make<void>();
       let snapshotCount = 0;
       for (const cwd of [repoDir, worktreeDir]) {
         yield* Stream.runForEach(
           broadcaster.streamStatus(
+            trustedReadAuthority,
             { cwd, includeRemote: false },
             { automaticRemoteRefreshInterval: Effect.succeed(Duration.seconds(1)) },
           ),
@@ -894,14 +901,14 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
 
       const fs = yield* FileSystem.FileSystem;
       yield* fs.writeFileString(NodePath.join(worktreeDir, "README.md"), "changed\n");
-      yield* broadcaster.refreshLocalStatus(worktreeDir);
+      yield* broadcaster.refreshLocalStatus(trustedReadAuthority, worktreeDir);
       yield* Deferred.await(localUpdated);
       expect(remoteReads).toBe(0);
 
       const activeScope = yield* Scope.make();
-      yield* Stream.runDrain(broadcaster.streamStatus({ cwd: worktreeDir })).pipe(
-        Effect.forkIn(activeScope),
-      );
+      yield* Stream.runDrain(
+        broadcaster.streamStatus(trustedReadAuthority, { cwd: worktreeDir }),
+      ).pipe(Effect.forkIn(activeScope));
       yield* Deferred.await(remoteUpdated);
       expect(remoteReads).toBe(1);
       yield* Scope.close(activeScope, Exit.void);
@@ -937,7 +944,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const status = yield* manager.status({ cwd: repoDir });
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(status.isRepo).toBe(true);
       expect(status.hasPrimaryRemote).toBe(true);
       expect(status.isDefaultRef).toBe(false);
@@ -980,7 +987,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const status = yield* manager.status({ cwd: repoDir });
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
 
       expect(status.pr).toEqual({
         number: 14,
@@ -1032,7 +1039,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const status = yield* manager.status({ cwd: repoDir });
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
 
       expect(status.pr).toEqual({
         number: 15,
@@ -1082,7 +1089,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const status = yield* manager.status({ cwd: repoDir });
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
 
       expect(status.pr).toEqual({
         number: 17,
@@ -1101,7 +1108,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       const cwd = yield* makeTempDir("t3code-git-manager-non-repo-");
       const { manager } = yield* makeManager();
 
-      const status = yield* manager.status({ cwd });
+      const status = yield* manager.status(trustedReadAuthority, { cwd });
 
       expect(status).toEqual({
         isRepo: false,
@@ -1131,7 +1138,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* removePath(cwd);
       const { manager } = yield* makeManager();
 
-      const status = yield* manager.status({ cwd });
+      const status = yield* manager.status(trustedReadAuthority, { cwd });
 
       expect(status).toEqual({
         isRepo: false,
@@ -1175,8 +1182,8 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const first = yield* manager.status({ cwd: repoDir });
-      const second = yield* manager.status({ cwd: repoDir });
+      const first = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
+      const second = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
 
       expect(first.pr?.number).toBe(113);
       expect(second.pr?.number).toBe(113);
@@ -1196,9 +1203,17 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       const gitConfigReads: string[] = [];
       const { manager } = yield* makeManager({ gitConfigReads });
 
-      yield* manager.remoteStatus({ cwd: repoDir }, { refreshUpstream: false });
+      yield* manager.remoteStatus(
+        trustedReadAuthority,
+        { cwd: repoDir },
+        { refreshUpstream: false },
+      );
       gitConfigReads.length = 0;
-      yield* manager.remoteStatus({ cwd: repoDir }, { refreshUpstream: false });
+      yield* manager.remoteStatus(
+        trustedReadAuthority,
+        { cwd: repoDir },
+        { refreshUpstream: false },
+      );
 
       const identityReads = gitConfigReads.filter(
         (key) =>
@@ -1238,9 +1253,12 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      yield* manager.branchPullRequest({ cwd: repoDir, branch: "feature/origin-once" });
+      yield* manager.branchPullRequest(trustedReadAuthority, {
+        cwd: repoDir,
+        branch: "feature/origin-once",
+      });
       gitConfigReads.length = 0;
-      const pullRequest = yield* manager.branchPullRequest({
+      const pullRequest = yield* manager.branchPullRequest(trustedReadAuthority, {
         cwd: repoDir,
         branch: "feature/origin-once",
       });
@@ -1277,17 +1295,23 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           ],
         },
       });
-      expect((yield* manager.remoteStatus({ cwd: repoDir }))?.pr).toBeNull();
+      expect((yield* manager.remoteStatus(trustedReadAuthority, { cwd: repoDir }))?.pr).toBeNull();
       expect(
-        (yield* manager.remoteStatus({ cwd: repoDir }, { refreshUpstream: false }))?.pr,
+        (yield* manager.remoteStatus(
+          trustedReadAuthority,
+          { cwd: repoDir },
+          { refreshUpstream: false },
+        ))?.pr,
       ).toBeNull();
 
       const refreshed = yield* manager.remoteStatus(
+        trustedReadAuthority,
         { cwd: repoDir },
         { refreshUpstream: false, refreshMissingPullRequest: true },
       );
       expect(refreshed?.pr?.number).toBe(114);
       yield* manager.remoteStatus(
+        trustedReadAuthority,
         { cwd: repoDir },
         { refreshUpstream: false, refreshMissingPullRequest: true },
       );
@@ -1309,9 +1333,10 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
             "No GitHub credential on the server. Set GH_TOKEN, or install the GitHub CLI and run `gh auth login`.",
         },
       });
-      yield* manager.remoteStatus({ cwd: repoDir });
+      yield* manager.remoteStatus(trustedReadAuthority, { cwd: repoDir });
       const callsAfterFailure = ghCalls.length;
       yield* manager.remoteStatus(
+        trustedReadAuthority,
         { cwd: repoDir },
         { refreshUpstream: false, refreshMissingPullRequest: true },
       );
@@ -1331,7 +1356,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
 
       const { manager, ghCalls } = yield* makeManager();
 
-      const status = yield* manager.status({ cwd: repoDir });
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
 
       expect(status.refName).toBe("feature/never-pushed");
       expect(status.pr).toBeNull();
@@ -1345,7 +1370,10 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* initRepo(repoDir);
       const { manager, ghCalls } = yield* makeManager();
 
-      const pullRequest = yield* manager.branchPullRequest({ cwd: repoDir, branch: "main" });
+      const pullRequest = yield* manager.branchPullRequest(trustedReadAuthority, {
+        cwd: repoDir,
+        branch: "main",
+      });
 
       expect(pullRequest).toBeNull();
       expect(ghCalls).toHaveLength(0);
@@ -1383,7 +1411,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const pullRequest = yield* manager.branchPullRequest({
+      const pullRequest = yield* manager.branchPullRequest(trustedReadAuthority, {
         cwd: repoDir,
         branch: "feature/saved-branch",
       });
@@ -1436,7 +1464,10 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const pullRequest = yield* manager.branchPullRequest({ cwd: repoDir, branch: "main" });
+      const pullRequest = yield* manager.branchPullRequest(trustedReadAuthority, {
+        cwd: repoDir,
+        branch: "main",
+      });
 
       expect(pullRequest).toMatchObject({
         state: "merged",
@@ -1485,7 +1516,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const pullRequest = yield* manager.branchPullRequest({
+      const pullRequest = yield* manager.branchPullRequest(trustedReadAuthority, {
         cwd: repoDir,
         branch: "feature/deleted-local-branch",
       });
@@ -1550,7 +1581,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const pullRequest = yield* manager.branchPullRequest({
+      const pullRequest = yield* manager.branchPullRequest(trustedReadAuthority, {
         cwd: repoDir,
         branch: "feature/deleted-fork-branch",
       });
@@ -1584,7 +1615,10 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       const { manager, ghCalls } = yield* makeManager();
 
       const error = yield* manager
-        .branchPullRequest({ cwd: repoDir, branch: "feature/ambiguous-remote" })
+        .branchPullRequest(trustedReadAuthority, {
+          cwd: repoDir,
+          branch: "feature/ambiguous-remote",
+        })
         .pipe(Effect.flip);
 
       expect(error).toMatchObject({
@@ -1629,7 +1663,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const first = yield* manager.branchPullRequest({
+      const first = yield* manager.branchPullRequest(trustedReadAuthority, {
         cwd: repoDir,
         branch: "feature/repointed-lookup",
       });
@@ -1643,7 +1677,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         replacementRemoteDir,
       );
 
-      const second = yield* manager.branchPullRequest({
+      const second = yield* manager.branchPullRequest(trustedReadAuthority, {
         cwd: repoDir,
         branch: "feature/repointed-lookup",
       });
@@ -1693,8 +1727,8 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const status = yield* manager.status({ cwd: repoDir });
-      const pullRequest = yield* manager.branchPullRequest({
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
+      const pullRequest = yield* manager.branchPullRequest(trustedReadAuthority, {
         cwd: repoDir,
         branch: "feature/shared-pr-cache",
       });
@@ -1704,6 +1738,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       expect(pullRequest?.headSha).toBe("a".repeat(40));
       expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(1);
       const refreshed = yield* manager.branchPullRequest(
+        trustedReadAuthority,
         { cwd: repoDir, branch: "feature/shared-pr-cache" },
         { refresh: true },
       );
@@ -1746,7 +1781,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       });
       const lookupAll = Effect.forEach(
         ["feature/open-pr", "feature/merged-pr", "feature/no-pr"],
-        (branch) => manager.branchPullRequest({ cwd: repoDir, branch }),
+        (branch) => manager.branchPullRequest(trustedReadAuthority, { cwd: repoDir, branch }),
       );
       const prListCalls = () => ghCalls.filter((call) => call.startsWith("pr list "));
 
@@ -1807,7 +1842,8 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         });
         const changes = yield* manager.subscribePullRequestStateChanges;
-        const lookup = (branch: string) => manager.branchPullRequest({ cwd: repoDir, branch });
+        const lookup = (branch: string) =>
+          manager.branchPullRequest(trustedReadAuthority, { cwd: repoDir, branch });
 
         yield* lookup("feature/merges-later");
         yield* lookup("feature/already-merged");
@@ -1843,12 +1879,16 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       });
 
       const error = yield* manager
-        .branchPullRequest({ cwd: repoDir, branch: "feature/lookup-failure" })
+        .branchPullRequest(trustedReadAuthority, { cwd: repoDir, branch: "feature/lookup-failure" })
         .pipe(Effect.flip);
 
       expect(error._tag).toBe("SourceControlProviderError");
       const refreshError = yield* manager
-        .branchPullRequest({ cwd: repoDir, branch: "feature/lookup-failure" }, { refresh: true })
+        .branchPullRequest(
+          trustedReadAuthority,
+          { cwd: repoDir, branch: "feature/lookup-failure" },
+          { refresh: true },
+        )
         .pipe(Effect.flip);
       expect(refreshError._tag).toBe("SourceControlProviderError");
       expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(1);
@@ -1907,7 +1947,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const status = yield* manager.status({ cwd: repoDir });
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
 
       expect(status.hasUpstream).toBe(false);
       expect(status.pr).toEqual({
@@ -1954,7 +1994,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const status = yield* manager.status({ cwd: repoDir });
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
 
       expect(status.pr?.number).toBe(214);
       expect(ghCalls.filter((call) => call.startsWith("pr list ")).length).toBeGreaterThan(0);
@@ -2053,7 +2093,9 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         },
       });
-      expect(yield* manager.branchPullRequest({ cwd: repoDir, branch: "feature" })).toMatchObject({
+      expect(
+        yield* manager.branchPullRequest(trustedReadAuthority, { cwd: repoDir, branch: "feature" }),
+      ).toMatchObject({
         number: 1,
         repositoryKey: "github.example.com/team/repository",
       });
@@ -2126,7 +2168,9 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       );
       const { manager } = yield* makeManager({ sourceControlProvider: provider });
 
-      expect(yield* manager.branchPullRequest({ cwd: repoDir, branch })).toMatchObject({
+      expect(
+        yield* manager.branchPullRequest(trustedReadAuthority, { cwd: repoDir, branch }),
+      ).toMatchObject({
         number: 1,
         repositoryKey: "gitlab.com/group/upstream/repository",
       });
@@ -2183,7 +2227,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         });
 
-        const status = yield* manager.status({ cwd: repoDir });
+        const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
         expect(status.refName).toBe("main");
         expect(status.pr).toBeNull();
       }),
@@ -2236,7 +2280,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         });
 
-        const status = yield* manager.status({ cwd: repoDir });
+        const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
         expect(status.refName).toBe("t3code/pr-488/statemachine");
         expect(status.pr).toEqual({
           number: 488,
@@ -2301,7 +2345,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         });
 
-        const status = yield* manager.status({ cwd: repoDir });
+        const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
         expect(status.refName).toBe("t3code/pr-777/main");
         expect(status.pr).toEqual({
           number: 777,
@@ -2380,7 +2424,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         });
 
-        const status = yield* manager.status({ cwd: repoDir });
+        const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
         expect(status.refName).toBe("upstream/effect-atom");
         expect(status.pr).toEqual({
           number: 1618,
@@ -2431,7 +2475,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const status = yield* manager.status({ cwd: repoDir });
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(status.refName).toBe("feature/status-merged-pr");
       expect(status.pr).toEqual({
         number: 22,
@@ -2469,7 +2513,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const status = yield* manager.status({ cwd: repoDir });
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(status.refName).toBe("main");
       expect(status.pr).toBeNull();
     }),
@@ -2504,7 +2548,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const status = yield* manager.status({ cwd: repoDir });
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(status.refName).toBe("feature/from-main");
       expect(status.pr).toBeNull();
       expect(ghCalls.some((call) => call.includes("pr list"))).toBe(false);
@@ -2542,7 +2586,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const status = yield* manager.status({ cwd: repoDir });
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(status.refName).toBe("feature/pushed-plain");
       expect(status.pr?.number).toBe(88);
       expect(ghCalls.some((call) => call.includes("--head main"))).toBe(false);
@@ -2599,7 +2643,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         });
 
-        const status = yield* manager.status({ cwd: repoDir });
+        const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
         expect(status.pr?.number).toBe(89);
         expect(ghCalls.some((call) => call.includes("--head feature/fork-plain"))).toBe(true);
         expect(ghCalls.some((call) => call.includes("--head contributor:"))).toBe(false);
@@ -2654,7 +2698,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const pullRequest = yield* manager.branchPullRequest({
+      const pullRequest = yield* manager.branchPullRequest(trustedReadAuthority, {
         cwd: repoDir,
         branch: "feature/fork-settle",
       });
@@ -2701,11 +2745,11 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const first = yield* manager.status({ cwd: repoDir });
+      const first = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(first.pr?.number).toBe(90);
 
       yield* manager.invalidateStatus(repoDir);
-      const second = yield* manager.status({ cwd: repoDir });
+      const second = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(second.pr?.number).toBe(90);
     }),
   );
@@ -2744,7 +2788,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const status = yield* manager.status({ cwd: repoDir });
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(status.refName).toBe("feature/status-open-over-merged");
       expect(status.pr).toEqual({
         number: 46,
@@ -2774,7 +2818,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const status = yield* manager.status({ cwd: repoDir });
+      const status = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(status.refName).toBe("feature/status-no-gh");
       expect(status.pr).toBeNull();
     }),
@@ -2805,7 +2849,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       });
 
       const status = yield* manager
-        .status({ cwd: repoDir })
+        .status(trustedReadAuthority, { cwd: repoDir })
         .pipe(Effect.provide(Logger.layer([logger], { mergeWithExisting: false })));
 
       expect(status.pr).toBeNull();
@@ -2852,14 +2896,14 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const first = yield* manager.status({ cwd: repoDir });
+      const first = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(first.pr?.number).toBe(214);
 
       // An explicit invalidation (user refresh, git action) bypasses the PR
       // cache and forces a live lookup — which now fails. The badge must keep
       // the last known PR instead of blanking out.
       yield* manager.invalidateStatus(repoDir);
-      const second = yield* manager.status({ cwd: repoDir });
+      const second = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(second.pr?.number).toBe(214);
     }),
   );
@@ -2892,7 +2936,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         });
 
-        const first = yield* manager.status({ cwd: repoDir });
+        const first = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
         expect(first.pr?.number).toBe(214);
 
         // Retarget the branch to a different remote/upstream (e.g. the PR was
@@ -2908,7 +2952,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         ]);
 
         yield* manager.invalidateStatus(repoDir);
-        const second = yield* manager.status({ cwd: repoDir });
+        const second = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
         expect(second.pr).toBeNull();
       }),
   );
@@ -2937,13 +2981,13 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const first = yield* manager.status({ cwd: repoDir });
+      const first = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(first.pr?.number).toBe(215);
 
       yield* runGit(repoDir, ["push", "-u", "origin", "feature/pr-sticky-first-push"]);
       yield* manager.invalidateStatus(repoDir);
 
-      const second = yield* manager.status({ cwd: repoDir });
+      const second = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(second.pr?.number).toBe(215);
     }),
   );
@@ -2973,7 +3017,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const first = yield* manager.status({ cwd: repoDir });
+      const first = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(first.pr?.number).toBe(216);
 
       const replacementRemoteDir = yield* createBareRemote();
@@ -2982,7 +3026,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* runGit(repoDir, ["remote", "set-url", "origin", replacementRemoteDir]);
       yield* manager.invalidateStatus(repoDir);
 
-      const second = yield* manager.status({ cwd: repoDir });
+      const second = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(second.pr).toBeNull();
     }),
   );
@@ -3012,7 +3056,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
         },
       });
 
-      const first = yield* manager.status({ cwd: repoDir });
+      const first = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(first.pr?.number).toBe(217);
 
       // `remote.origin.url` reads go through readConfigValueNullable, which
@@ -3026,7 +3070,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
       yield* runGit(repoDir, ["config", "--unset", "remote.origin.url"]);
       yield* manager.invalidateStatus(repoDir);
 
-      const second = yield* manager.status({ cwd: repoDir });
+      const second = yield* manager.status(trustedReadAuthority, { cwd: repoDir });
       expect(second.pr?.number).toBe(217);
     }),
   );

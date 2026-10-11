@@ -1,4 +1,8 @@
+import { EnvironmentAuthorizationError } from "@t3tools/contracts";
+import * as WorkspaceReadAccess from "../auth/workspaceReadAccess.ts";
+import { type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as Arr from "effect/Array";
+import * as Cause from "effect/Cause";
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -113,6 +117,15 @@ interface SourceControlTextGenerationSettings {
   readonly style: SourceControlWritingStyleSettings;
 }
 
+// Cache lookups inherit the invoking read's live authority, including coalesced misses.
+const statusReadAuthority = Context.Reference<
+  | {
+      readonly authority: ThreadReadAuthority;
+      readonly input: WorkspaceReadAccess.WorkspaceReadInput;
+    }
+  | undefined
+>("t3/git/GitManager/statusReadAuthority", { defaultValue: () => undefined });
+
 export class GitManager extends Context.Service<
   GitManager,
   {
@@ -121,26 +134,43 @@ export class GitManager extends Context.Service<
       options?: GitVcsDriver.CreateWorktreeOptions,
     ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
     readonly status: (
+      authority: ThreadReadAuthority,
       input: VcsStatusInput,
-    ) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
+    ) => Effect.Effect<VcsStatusResult, GitManagerServiceError | EnvironmentAuthorizationError>;
     readonly localStatus: (
+      authority: ThreadReadAuthority,
       input: VcsStatusInput,
-    ) => Effect.Effect<VcsStatusLocalResult, GitManagerServiceError>;
+    ) => Effect.Effect<
+      VcsStatusLocalResult,
+      GitManagerServiceError | EnvironmentAuthorizationError
+    >;
     readonly remoteStatus: (
+      authority: ThreadReadAuthority,
       input: VcsStatusInput,
       options?: GitRemoteStatusOptions,
-    ) => Effect.Effect<VcsStatusRemoteResult | null, GitManagerServiceError>;
+    ) => Effect.Effect<
+      VcsStatusRemoteResult | null,
+      GitManagerServiceError | EnvironmentAuthorizationError
+    >;
     /** Resolve the PR for a saved branch without changing the current checkout. */
     readonly branchPullRequest: (
+      authority: ThreadReadAuthority,
       input: { readonly cwd: string; readonly branch: string },
       options?: { readonly refresh?: boolean },
-    ) => Effect.Effect<GitBranchPullRequest | null, GitManagerServiceError>;
+    ) => Effect.Effect<
+      GitBranchPullRequest | null,
+      GitManagerServiceError | EnvironmentAuthorizationError
+    >;
     readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
     readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
     readonly invalidateStatus: (cwd: string) => Effect.Effect<void, never>;
     readonly resolvePullRequest: (
+      authority: ThreadReadAuthority,
       input: GitPullRequestRefInput,
-    ) => Effect.Effect<GitResolvePullRequestResult, GitManagerServiceError>;
+    ) => Effect.Effect<
+      GitResolvePullRequestResult,
+      GitManagerServiceError | EnvironmentAuthorizationError
+    >;
     readonly preparePullRequestThread: (
       input: GitPreparePullRequestThreadInput,
     ) => Effect.Effect<GitPreparePullRequestThreadResult, GitManagerServiceError>;
@@ -182,6 +212,7 @@ const PR_LOOKUP_NO_OPEN_PR_CACHE_TTL = Duration.minutes(5);
 const PR_LOOKUP_FAILURE_BASE_TTL = Duration.seconds(20);
 const PR_LOOKUP_FAILURE_MAX_TTL = Duration.minutes(15);
 const PR_LOOKUP_CACHE_CAPACITY = 2_048;
+const isEnvironmentAuthorizationError = Schema.is(EnvironmentAuthorizationError);
 const isSourceControlProviderError = Schema.is(SourceControlProviderError);
 
 /**
@@ -724,6 +755,7 @@ function toPullRequestHeadRemoteInfo(pr: {
 }
 
 export const make = Effect.gen(function* () {
+  const access = yield* WorkspaceReadAccess.make;
   const gitCore = yield* GitVcsDriver.GitVcsDriver;
   const sourceControlProviders = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   const textGeneration = yield* TextGeneration.TextGeneration;
@@ -733,7 +765,24 @@ export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
-  const sourceControlProvider = (cwd: string) => sourceControlProviders.resolve({ cwd });
+  const admitStatusRead = Effect.fnUntraced(function* (cwd: string) {
+    const authority = yield* statusReadAuthority;
+    if (authority === undefined)
+      return yield* new EnvironmentAuthorizationError({
+        requiredScope: "orchestration:read",
+        message: "Workspace read authority is required.",
+      });
+    yield* access.admit(authority.authority, authority.input);
+    if (cwd !== authority.input.cwd)
+      yield* access.admit(authority.authority, { ...authority.input, cwd });
+  });
+  // Preparation/writes remain deferred to 04c2; only read invocations carry this ephemeral context.
+  const beforeReadEffect = (cwd: string) =>
+    statusReadAuthority.pipe(
+      Effect.flatMap((authority) => (authority === undefined ? Effect.void : admitStatusRead(cwd))),
+    );
+  const sourceControlProvider = (cwd: string) =>
+    beforeReadEffect(cwd).pipe(Effect.andThen(sourceControlProviders.resolve({ cwd })));
   const serverSettingsService = yield* ServerSettings.ServerSettingsService;
   const threads = yield* ProjectionStore.ProjectionStoreV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
@@ -1061,11 +1110,13 @@ export const make = Effect.gen(function* () {
     aheadOfDefaultCount: 0,
   };
   const readLocalStatus = Effect.fn("readLocalStatus")(function* (cwd: string) {
+    yield* admitStatusRead(cwd);
     const details = yield* gitCore
       .statusDetailsLocal(cwd, { includeDivergence: false, includeBranchChanges: true })
       .pipe(
         Effect.catchIf(isNotGitRepositoryError, () => Effect.succeed(nonRepositoryStatusDetails)),
       );
+    yield* admitStatusRead(cwd);
     const hostingProvider = details.isRepo
       ? yield* resolveHostingProvider(cwd, details.branch)
       : null;
@@ -1192,6 +1243,7 @@ export const make = Effect.gen(function* () {
           return { latest: null, headContext };
         }
         const latest = yield* findLatestPrForHeadContext(cwd, headContext);
+        yield* beforeReadEffect(cwd);
         if (latest !== null) yield* noteLookupState(latest);
         return { latest, headContext };
       });
@@ -1205,6 +1257,12 @@ export const make = Effect.gen(function* () {
             ? PR_LOOKUP_CACHE_TTL
             : PR_LOOKUP_NO_OPEN_PR_CACHE_TTL;
         }
+        if (
+          exit.cause.reasons.some(
+            (reason) => Cause.isFailReason(reason) && isEnvironmentAuthorizationError(reason.error),
+          )
+        )
+          return Duration.zero;
         return nextPrLookupFailureTtl(key);
       },
     },
@@ -1300,6 +1358,7 @@ export const make = Effect.gen(function* () {
         }
         return { pr: toStatusPr(latest), headContext };
       }),
+      Effect.tap(() => beforeReadEffect(cwd)),
       Effect.tap(({ pr, headContext }) =>
         Effect.sync(() =>
           rememberLastKnownPr(branchKey, {
@@ -1313,33 +1372,35 @@ export const make = Effect.gen(function* () {
       ),
       Effect.map(({ pr }) => pr),
       Effect.catch((error) =>
-        Effect.logWarning("PR lookup failed; keeping last known PR state.").pipe(
-          Effect.annotateLogs({
-            operation: "lookupStatusPr",
-            branch: details.branch,
-            errorTag:
-              typeof error === "object" && error !== null && "_tag" in error
-                ? String(error._tag)
-                : typeof error,
-            ...(isSourceControlProviderError(error)
-              ? {
-                  provider: error.provider,
-                  providerOperation: error.operation,
-                  ...(error.command === undefined ? {} : { providerCommand: error.command }),
-                  errorDetail: error.detail,
-                }
-              : {}),
-          }),
-          Effect.andThen(resolveLookupHeadContext(cwd, details)),
-          Effect.map(({ headContext }) =>
-            resolveLastKnownPr(branchKey, {
-              upstreamRef: details.upstreamRef,
-              headBranch: headContext.headBranch,
-              remoteName: headContext.remoteName,
-              headRemoteUrlKey: headContext.headRemoteUrlKey,
-            }),
-          ),
-        ),
+        isEnvironmentAuthorizationError(error)
+          ? Effect.fail(error)
+          : Effect.logWarning("PR lookup failed; keeping last known PR state.").pipe(
+              Effect.annotateLogs({
+                operation: "lookupStatusPr",
+                branch: details.branch,
+                errorTag:
+                  typeof error === "object" && error !== null && "_tag" in error
+                    ? String(error._tag)
+                    : typeof error,
+                ...(isSourceControlProviderError(error)
+                  ? {
+                      provider: error.provider,
+                      providerOperation: error.operation,
+                      ...(error.command === undefined ? {} : { providerCommand: error.command }),
+                      errorDetail: error.detail,
+                    }
+                  : {}),
+              }),
+              Effect.andThen(resolveLookupHeadContext(cwd, details)),
+              Effect.map(({ headContext }) =>
+                resolveLastKnownPr(branchKey, {
+                  upstreamRef: details.upstreamRef,
+                  headBranch: headContext.headBranch,
+                  remoteName: headContext.remoteName,
+                  headRemoteUrlKey: headContext.headRemoteUrlKey,
+                }),
+              ),
+            ),
       ),
     );
   });
@@ -1347,9 +1408,11 @@ export const make = Effect.gen(function* () {
     cwd: string,
     options?: GitRemoteStatusOptions,
   ) {
+    yield* admitStatusRead(cwd);
     const details = yield* gitCore
       .statusDetailsRemote(cwd, options)
       .pipe(Effect.catchIf(isNotGitRepositoryError, () => Effect.succeed(null)));
+    yield* admitStatusRead(cwd);
     if (details === null || !details.isRepo) {
       return null;
     }
@@ -1386,7 +1449,9 @@ export const make = Effect.gen(function* () {
     );
 
   const readConfigValueNullable = (cwd: string, key: string) =>
-    gitCore.readConfigValue(cwd, key).pipe(Effect.orElseSucceed(() => null));
+    beforeReadEffect(cwd).pipe(
+      Effect.andThen(gitCore.readConfigValue(cwd, key).pipe(Effect.orElseSucceed(() => null))),
+    );
 
   const resolveHostingProvider = Effect.fn("resolveHostingProvider")(function* (
     cwd: string,
@@ -1402,6 +1467,7 @@ export const make = Effect.gen(function* () {
 
     const provider = remoteUrl ? detectSourceControlProviderFromGitRemoteUrl(remoteUrl) : null;
     if (!remoteUrl || provider?.kind !== "unknown") return provider;
+    yield* beforeReadEffect(cwd);
     const handle = yield* sourceControlProviders
       .resolveHandle({
         cwd,
@@ -1560,27 +1626,35 @@ export const make = Effect.gen(function* () {
   ) {
     if (branch.length === 0) return null;
     return yield* Effect.gen(function* () {
-      const remoteNames = (yield* gitCore.execute({
-        operation: "GitManager.findRemoteTrackingRemote.remotes",
-        cwd,
-        args: ["remote"],
-        timeoutMs: 5_000,
-      })).stdout
+      const remoteNames = (yield* beforeReadEffect(cwd).pipe(
+        Effect.andThen(
+          gitCore.execute({
+            operation: "GitManager.findRemoteTrackingRemote.remotes",
+            cwd,
+            args: ["remote"],
+            timeoutMs: 5_000,
+          }),
+        ),
+      )).stdout
         .split("\n")
         .map((name) => name.trim())
         .filter((name) => name.length > 0);
       if (remoteNames.length === 0) return null;
       const refs = new Set(
-        (yield* gitCore.execute({
-          operation: "GitManager.findRemoteTrackingRemote.refs",
-          cwd,
-          args: [
-            "for-each-ref",
-            "--format=%(refname)",
-            ...remoteNames.map((name) => `refs/remotes/${name}/${branch}`),
-          ],
-          timeoutMs: 5_000,
-        })).stdout
+        (yield* beforeReadEffect(cwd).pipe(
+          Effect.andThen(
+            gitCore.execute({
+              operation: "GitManager.findRemoteTrackingRemote.refs",
+              cwd,
+              args: [
+                "for-each-ref",
+                "--format=%(refname)",
+                ...remoteNames.map((name) => `refs/remotes/${name}/${branch}`),
+              ],
+              timeoutMs: 5_000,
+            }),
+          ),
+        )).stdout
           .split("\n")
           .map((ref) => ref.trim())
           .filter((ref) => ref.length > 0),
@@ -1660,20 +1734,24 @@ export const make = Effect.gen(function* () {
       return false;
     }
     const matchesRef = (pattern: string) =>
-      gitCore
-        .execute({
-          operation: "GitManager.isUnpublishedBranch",
-          cwd,
-          args: ["for-each-ref", "--count=1", "--format=%(refname)", pattern],
-          timeoutMs: 5_000,
-        })
-        .pipe(Effect.map((result) => result.stdout.trim().length > 0));
+      beforeReadEffect(cwd).pipe(
+        Effect.andThen(
+          gitCore
+            .execute({
+              operation: "GitManager.isUnpublishedBranch",
+              cwd,
+              args: ["for-each-ref", "--count=1", "--format=%(refname)", pattern],
+              timeoutMs: 5_000,
+            })
+            .pipe(Effect.map((result) => result.stdout.trim().length > 0)),
+        ),
+      );
 
     return yield* Effect.gen(function* () {
       const [configuredRemote, configuredMerge] = yield* Effect.all(
         [
-          gitCore.readConfigValue(cwd, `branch.${headContext.localBranch}.remote`),
-          gitCore.readConfigValue(cwd, `branch.${headContext.localBranch}.merge`),
+          readConfigValueNullable(cwd, `branch.${headContext.localBranch}.remote`),
+          readConfigValueNullable(cwd, `branch.${headContext.localBranch}.merge`),
         ],
         { concurrency: "unbounded" },
       );
@@ -1703,6 +1781,7 @@ export const make = Effect.gen(function* () {
     const provider = yield* sourceControlProvider(cwd);
     const headSelectors = probeableHeadSelectors(provider.kind, headContext.headSelectors);
     for (const headSelector of headSelectors) {
+      yield* beforeReadEffect(cwd);
       const pullRequests = yield* provider.listChangeRequests({
         cwd,
         headSelector,
@@ -1734,6 +1813,7 @@ export const make = Effect.gen(function* () {
 
     const provider = yield* sourceControlProvider(cwd);
     for (const headSelector of probeableHeadSelectors(provider.kind, headContext.headSelectors)) {
+      yield* beforeReadEffect(cwd);
       const pullRequests = yield* provider.listChangeRequests({
         cwd,
         headSelector,
@@ -2195,31 +2275,34 @@ export const make = Effect.gen(function* () {
     };
   });
 
-  const localStatus: GitManager["Service"]["localStatus"] = Effect.fn("localStatus")(
-    function* (input) {
-      const cacheKey = yield* normalizeStatusCacheKey(input.cwd);
-      return yield* Cache.get(localStatusResultCache, cacheKey);
-    },
-  );
-  const remoteStatus: GitManager["Service"]["remoteStatus"] = Effect.fn("remoteStatus")(
-    function* (input, options) {
-      const cacheKey = yield* normalizeStatusCacheKey(input.cwd);
-      if (options?.refreshUpstream === false || options?.refreshMissingPullRequest) {
-        return yield* readRemoteStatus(cacheKey, options);
-      }
-      return yield* Cache.get(remoteStatusResultCache, cacheKey);
-    },
-  );
-  const status: GitManager["Service"]["status"] = Effect.fn("status")(function* (input) {
+  const localStatus = Effect.fn("localStatus")(function* (input: VcsStatusInput) {
+    const cacheKey = yield* normalizeStatusCacheKey(input.cwd);
+    yield* admitStatusRead(input.cwd);
+    return yield* Cache.get(localStatusResultCache, cacheKey);
+  });
+  const remoteStatus = Effect.fn("remoteStatus")(function* (
+    input: VcsStatusInput,
+    options?: GitRemoteStatusOptions,
+  ) {
+    const cacheKey = yield* normalizeStatusCacheKey(input.cwd);
+    yield* admitStatusRead(input.cwd);
+    if (options?.refreshUpstream === false || options?.refreshMissingPullRequest) {
+      return yield* readRemoteStatus(cacheKey, options);
+    }
+    return yield* Cache.get(remoteStatusResultCache, cacheKey);
+  });
+  const status = Effect.fn("status")(function* (input: VcsStatusInput) {
     const [local, remote] = yield* Effect.all([localStatus(input), remoteStatus(input)], {
       concurrency: "unbounded",
     });
     return mergeGitStatusParts(local, remote);
   });
-  const branchPullRequest: GitManager["Service"]["branchPullRequest"] = Effect.fn(
-    "branchPullRequest",
-  )(function* ({ cwd, branch }, options) {
+  const branchPullRequest = Effect.fn("branchPullRequest")(function* (
+    { cwd, branch }: { readonly cwd: string; readonly branch: string },
+    options?: { readonly refresh?: boolean },
+  ) {
     const cacheCwd = yield* normalizeStatusCacheKey(cwd);
+    yield* admitStatusRead(cwd);
     const remotes = yield* gitCore.execute({
       operation: "GitManager.branchPullRequest.remotes",
       cwd: cacheCwd,
@@ -2231,6 +2314,7 @@ export const make = Effect.gen(function* () {
       .filter((remoteName) => remoteName.length > 0);
     const [firstRemoteName] = remoteNames;
     if (firstRemoteName === undefined) return null;
+    yield* beforeReadEffect(cwd);
     const branchRef = yield* gitCore.execute({
       operation: "GitManager.branchPullRequest.branchRef",
       cwd: cacheCwd,
@@ -2261,6 +2345,7 @@ export const make = Effect.gen(function* () {
       const upstreamBranch = savedRemoteRef.replace(/^refs\/heads\//, "");
       upstreamRef = `${remoteName}/${upstreamBranch}`;
     } else if (!localBranchExists) {
+      yield* beforeReadEffect(cwd);
       const trackingRefs = yield* gitCore.execute({
         operation: "GitManager.branchPullRequest.remoteTrackingRefs",
         cwd: cacheCwd,
@@ -2288,6 +2373,7 @@ export const make = Effect.gen(function* () {
       }
     }
     const defaultRemoteName = remoteNames.includes("origin") ? "origin" : firstRemoteName;
+    yield* beforeReadEffect(cwd);
     const defaultBranch = yield* gitCore
       .resolveDefaultBranchName(cacheCwd, defaultRemoteName)
       .pipe(Effect.orElseSucceed(() => null));
@@ -2298,6 +2384,7 @@ export const make = Effect.gen(function* () {
       localBranchExists,
       ...(localBranchExists ? {} : { remoteName }),
     });
+    yield* beforeReadEffect(cwd);
     if (options?.refresh) {
       // A completed turn can create a PR or reuse a merged PR's branch.
       // Refresh successful answers, but keep failed lookups' retry backoff.
@@ -2306,6 +2393,7 @@ export const make = Effect.gen(function* () {
       );
       if (Option.isSome(cached)) yield* Cache.invalidate(prLookupCache, cacheKey);
     }
+    yield* beforeReadEffect(cwd);
     let cached = yield* getPrLookup(cacheKey);
     // The cached head context may have resolved on a different remote than
     // the saved upstream: a branch tracking origin/main but pushed to a fork
@@ -2391,10 +2479,12 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const resolvePullRequest: GitManager["Service"]["resolvePullRequest"] = Effect.fn(
-    "resolvePullRequest",
-  )(function* (input) {
-    const pullRequest = yield* (yield* sourceControlProvider(input.cwd))
+  const resolvePullRequest = Effect.fn("resolvePullRequest")(function* (
+    input: GitPullRequestRefInput,
+  ) {
+    const provider = yield* sourceControlProvider(input.cwd);
+    yield* beforeReadEffect(input.cwd);
+    const pullRequest = yield* provider
       .getChangeRequest({
         cwd: input.cwd,
         reference: normalizePullRequestReference(input.reference),
@@ -2404,9 +2494,9 @@ export const make = Effect.gen(function* () {
     return { pullRequest };
   });
 
-  const preparePullRequestThread: GitManager["Service"]["preparePullRequestThread"] = Effect.fn(
-    "preparePullRequestThread",
-  )(function* (input) {
+  const preparePullRequestThread = Effect.fn("preparePullRequestThread")(function* (
+    input: GitPreparePullRequestThreadInput,
+  ) {
     const maybeRunSetupScript = (worktreePath: string) => {
       if (!input.threadId) {
         return Effect.void;
@@ -2723,7 +2813,7 @@ export const make = Effect.gen(function* () {
 
       const runAction = Effect.fn("runStackedAction.runAction")(function* (): Effect.fn.Return<
         GitRunStackedActionResult,
-        GitManagerServiceError
+        GitManagerServiceError | EnvironmentAuthorizationError
       > {
         const initialStatus = yield* gitCore.statusDetails(input.cwd);
         const wantsCommit = isCommitAction(input.action);
@@ -2921,19 +3011,59 @@ export const make = Effect.gen(function* () {
         ),
       );
     },
+    (effect) =>
+      effect.pipe(
+        Effect.provideService(statusReadAuthority, undefined),
+        Effect.catchTags({ EnvironmentAuthorizationError: Effect.die }),
+      ),
   );
 
   return GitManager.of({
     createWorktree,
-    localStatus,
-    remoteStatus,
-    status,
-    branchPullRequest,
+    localStatus: (authority, input) =>
+      access.read(
+        authority,
+        input,
+        localStatus(input).pipe(Effect.provideService(statusReadAuthority, { authority, input })),
+      ),
+    remoteStatus: (authority, input, options) =>
+      access.read(
+        authority,
+        input,
+        remoteStatus(input, options).pipe(
+          Effect.provideService(statusReadAuthority, { authority, input }),
+        ),
+      ),
+    status: (authority, input) =>
+      access.read(
+        authority,
+        input,
+        status(input).pipe(Effect.provideService(statusReadAuthority, { authority, input })),
+      ),
+    branchPullRequest: (authority, input, options) =>
+      access.read(
+        authority,
+        input,
+        branchPullRequest(input, options).pipe(
+          Effect.provideService(statusReadAuthority, { authority, input }),
+        ),
+      ),
     invalidateLocalStatus,
     invalidateRemoteStatus,
     invalidateStatus,
-    resolvePullRequest,
-    preparePullRequestThread,
+    resolvePullRequest: (authority, input) =>
+      access.read(
+        authority,
+        input,
+        resolvePullRequest(input).pipe(
+          Effect.provideService(statusReadAuthority, { authority, input }),
+        ),
+      ),
+    preparePullRequestThread: (input) =>
+      preparePullRequestThread(input).pipe(
+        Effect.provideService(statusReadAuthority, undefined),
+        Effect.catchTags({ EnvironmentAuthorizationError: Effect.die }),
+      ),
     runStackedAction,
     subscribePullRequestStateChanges: PubSub.subscribe(pullRequestStateChanges).pipe(
       Effect.map((subscription) => Stream.fromSubscription(subscription)),

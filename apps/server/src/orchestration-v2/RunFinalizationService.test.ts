@@ -106,7 +106,7 @@ it.effect.each(
             }),
           refreshStatus: () =>
             Effect.die("turn completion must preserve known PRs and lookup backoff"),
-          refreshPullRequestStatus: (cwd) =>
+          refreshPullRequestStatus: (_authority, cwd) =>
             Effect.sync(() => {
               refreshed.push(cwd);
               return null;

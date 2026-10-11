@@ -1,3 +1,6 @@
+import { EnvironmentAuthorizationError } from "@t3tools/contracts";
+import * as WorkspaceReadAccess from "../auth/workspaceReadAccess.ts";
+import { type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
 import type {
   ThreadId,
   WorktreeSetupSnapshot,
@@ -80,9 +83,15 @@ export class WorktreeSetupTracker extends Context.Service<
      * Returns false when nothing is running or the setup is past cancellation.
      */
     readonly cancel: (threadId: ThreadId) => Effect.Effect<boolean>;
-    readonly get: (threadId: ThreadId) => Effect.Effect<WorktreeSetupSnapshot | null>;
+    readonly get: (
+      authority: ThreadReadAuthority,
+      threadId: ThreadId,
+    ) => Effect.Effect<WorktreeSetupSnapshot | null, EnvironmentAuthorizationError>;
     /** Emits the current snapshot (or null) first, then every change until unsubscribed. */
-    readonly stream: (threadId: ThreadId) => Stream.Stream<WorktreeSetupSnapshot | null>;
+    readonly stream: (
+      authority: ThreadReadAuthority,
+      threadId: ThreadId,
+    ) => Stream.Stream<WorktreeSetupSnapshot | null, EnvironmentAuthorizationError>;
   }
 >()("t3/project/WorktreeSetupTracker") {}
 
@@ -118,6 +127,7 @@ function emptyStage(id: WorktreeSetupStageId): WorktreeSetupStage {
 }
 
 export const make = Effect.gen(function* () {
+  const access = yield* WorkspaceReadAccess.make;
   const setups = yield* Ref.make(new Map<ThreadId, TrackedSetup>());
   const changes = yield* PubSub.unbounded<{
     readonly threadId: ThreadId;
@@ -316,7 +326,7 @@ export const make = Effect.gen(function* () {
       return true;
     });
 
-  const get: WorktreeSetupTracker["Service"]["get"] = (threadId) =>
+  const get = (threadId: ThreadId) =>
     Ref.get(setups).pipe(Effect.map((current) => current.get(threadId)?.snapshot ?? null));
 
   /**
@@ -324,7 +334,7 @@ export const make = Effect.gen(function* () {
    * ever holds the newest snapshot, so a chatty setup script cannot grow the
    * server heap. Snapshots are whole states, so skipping intermediates is safe.
    */
-  const stream: WorktreeSetupTracker["Service"]["stream"] = (threadId) =>
+  const stream = (threadId: ThreadId) =>
     Stream.callback<WorktreeSetupSnapshot | null>(
       (mailbox) =>
         Effect.gen(function* () {
@@ -349,6 +359,15 @@ export const make = Effect.gen(function* () {
       { bufferSize: 1, strategy: "sliding" },
     );
 
+  const admitSnapshot = Effect.fnUntraced(function* (
+    authority: ThreadReadAuthority,
+    threadId: ThreadId,
+    snapshot: WorktreeSetupSnapshot | null,
+  ) {
+    const owner = yield* access.thread(authority, threadId);
+    if (owner !== undefined)
+      yield* access.admit(authority, { cwd: snapshot?.worktreePath ?? owner.root, threadId });
+  });
   return WorktreeSetupTracker.of({
     begin,
     update,
@@ -358,8 +377,25 @@ export const make = Effect.gen(function* () {
     finish,
     markUncancellable,
     cancel,
-    get,
-    stream,
+    get: (authority, threadId) =>
+      access.thread(authority, threadId).pipe(
+        Effect.andThen(get(threadId)),
+        Effect.tap((snapshot) => admitSnapshot(authority, threadId, snapshot)),
+      ),
+    stream: (authority, threadId) =>
+      Stream.unwrap(
+        access
+          .thread(authority, threadId)
+          .pipe(
+            Effect.as(
+              stream(threadId).pipe(
+                Stream.mapEffect((snapshot) =>
+                  admitSnapshot(authority, threadId, snapshot).pipe(Effect.as(snapshot)),
+                ),
+              ),
+            ),
+          ),
+      ),
   });
 });
 

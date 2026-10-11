@@ -544,7 +544,10 @@ const make = Effect.gen(function* () {
         const startFromOrigin =
           input.workspaceStrategy.startFromOrigin === true &&
           (yield* git
-            .remoteExists({ cwd: project.workspaceRoot, remoteName: "origin" })
+            .remoteExists(trustedReadAuthority, {
+              cwd: project.workspaceRoot,
+              remoteName: "origin",
+            })
             .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId))));
         yield* setupTracker.stageStatus(threadId, "fetch", startFromOrigin ? "running" : "skipped");
         if (startFromOrigin) {
@@ -556,7 +559,7 @@ const make = Effect.gen(function* () {
             })
             .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
           const remoteBaseExists = yield* git
-            .remoteBranchExists({
+            .remoteBranchExists(trustedReadAuthority, {
               cwd: project.workspaceRoot,
               refName: input.workspaceStrategy.baseRef,
               remoteName: "origin",
@@ -564,7 +567,7 @@ const make = Effect.gen(function* () {
             .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
           if (remoteBaseExists) {
             startRef = yield* git
-              .resolveRemoteTrackingCommit({
+              .resolveRemoteTrackingCommit(trustedReadAuthority, {
                 cwd: project.workspaceRoot,
                 refName: input.workspaceStrategy.baseRef,
                 fallbackRemoteName: "origin",
@@ -580,7 +583,7 @@ const make = Effect.gen(function* () {
           branch !== null &&
           isTemporaryWorktreeBranch(branch) &&
           (yield* git
-            .hasCommit({
+            .hasCommit(trustedReadAuthority, {
               cwd: project.workspaceRoot,
               refName: `refs/heads/${WORKTREE_BRANCH_PREFIX}`,
             })

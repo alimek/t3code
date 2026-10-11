@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import {
   requireUnrestrictedMutation,
   type MutationAuthority,
@@ -279,7 +280,7 @@ const make = Effect.gen(function* () {
   // failures hide Scratch rather than failing callers. An interrupted probe
   // invalidates the cache so the next caller probes again.
   const [probe, invalidate] = yield* Effect.cachedInvalidateWithTTL(
-    gitWorkflow.isRepository(config.baseDir).pipe(
+    gitWorkflow.isRepository(trustedReadAuthority, config.baseDir).pipe(
       Effect.map((isRepository) =>
         isRepository ? Option.none<string>() : Option.some(path.resolve(config.baseDir, "scratch")),
       ),

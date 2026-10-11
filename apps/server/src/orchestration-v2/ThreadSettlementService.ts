@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -489,6 +490,7 @@ export const make = Effect.gen(function* () {
           // Eligibility that changes after this check waits for the next sweep.
           if (!(yield* wouldSettle(group, terminal))) return undefined;
           const current = yield* git.branchPullRequest(
+            trustedReadAuthority,
             { cwd, branch: thread.branch },
             { refresh: true },
           );
@@ -508,7 +510,7 @@ export const make = Effect.gen(function* () {
       if (cwd === undefined) {
         return yield* Effect.die(new Error("thread project not found"));
       }
-      return yield* git.branchPullRequest({ cwd, branch: thread.branch });
+      return yield* git.branchPullRequest(trustedReadAuthority, { cwd, branch: thread.branch });
     });
 
     yield* Effect.forEach(

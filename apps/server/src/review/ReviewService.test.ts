@@ -1,5 +1,7 @@
+import * as Sqlite from "../persistence/Sqlite.ts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, describe, it } from "@effect/vitest";
+import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -42,7 +44,7 @@ function layer(input: {
   );
 }
 
-describe("ReviewService", () => {
+it.layer(Layer.mergeAll(Sqlite.layerMemory, NodeServices.layer))("ReviewService", (it) => {
   it.effect("rejects diff preview cwd outside the configured workspace roots", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -53,11 +55,16 @@ describe("ReviewService", () => {
 
       const error = yield* Effect.gen(function* () {
         const review = yield* ReviewService.ReviewService;
-        return yield* review.getDiffPreview({ cwd: outsideRoot }).pipe(Effect.flip);
+        return yield* review
+          .getDiffPreview(trustedReadAuthority, { cwd: outsideRoot })
+          .pipe(Effect.flip);
       }).pipe(Effect.provide(layer({ workspaceRoot, baseDir, detectCalls })));
 
       assert.strictEqual(error._tag, "VcsRepositoryDetectionError");
-      assert.strictEqual(error.operation, "ReviewService.getDiffPreview");
+      assert.strictEqual(
+        "operation" in error ? error.operation : undefined,
+        "ReviewService.getDiffPreview",
+      );
       assert.match(
         "detail" in error ? error.detail : "",
         /must stay within the configured workspace root/,
@@ -77,7 +84,7 @@ describe("ReviewService", () => {
       const error = yield* Effect.gen(function* () {
         const review = yield* ReviewService.ReviewService;
         return yield* review
-          .getDiffFileContents({
+          .getDiffFileContents(trustedReadAuthority, {
             cwd: outsideRoot,
             sourceKind: "working-tree",
             changeType: "change",
@@ -90,7 +97,10 @@ describe("ReviewService", () => {
       }).pipe(Effect.provide(layer({ workspaceRoot, baseDir, detectCalls })));
 
       assert.strictEqual(error._tag, "VcsRepositoryDetectionError");
-      assert.strictEqual(error.operation, "ReviewService.getDiffFileContents");
+      assert.strictEqual(
+        "operation" in error ? error.operation : undefined,
+        "ReviewService.getDiffFileContents",
+      );
       assert.match(
         "detail" in error ? error.detail : "",
         /must stay within the configured workspace root/,
@@ -109,7 +119,7 @@ describe("ReviewService", () => {
 
       const result = yield* Effect.gen(function* () {
         const review = yield* ReviewService.ReviewService;
-        return yield* review.getDiffPreview({ cwd: previous });
+        return yield* review.getDiffPreview(trustedReadAuthority, { cwd: previous });
       }).pipe(
         Effect.provide(
           layer({
@@ -127,7 +137,9 @@ describe("ReviewService", () => {
       for (const worktreesDirectory of ["/", rootLink]) {
         const error = yield* Effect.gen(function* () {
           const review = yield* ReviewService.ReviewService;
-          return yield* review.getDiffPreview({ cwd: outsideRoot }).pipe(Effect.flip);
+          return yield* review
+            .getDiffPreview(trustedReadAuthority, { cwd: outsideRoot })
+            .pipe(Effect.flip);
         }).pipe(Effect.provide(layer({ workspaceRoot, baseDir, worktreesDirectory })));
         assert.strictEqual(error._tag, "VcsRepositoryDetectionError");
       }
@@ -143,7 +155,7 @@ describe("ReviewService", () => {
 
       const result = yield* Effect.gen(function* () {
         const review = yield* ReviewService.ReviewService;
-        return yield* review.getDiffPreview({ cwd: workspaceRoot });
+        return yield* review.getDiffPreview(trustedReadAuthority, { cwd: workspaceRoot });
       }).pipe(Effect.provide(layer({ workspaceRoot, baseDir, detectCalls })));
 
       assert.strictEqual(result.cwd, workspaceRoot);
@@ -162,12 +174,17 @@ describe("ReviewService", () => {
 
       const error = yield* Effect.gen(function* () {
         const review = yield* ReviewService.ReviewService;
-        return yield* review.getDiffPreview({ cwd: invalidCwd }).pipe(Effect.flip);
+        return yield* review
+          .getDiffPreview(trustedReadAuthority, { cwd: invalidCwd })
+          .pipe(Effect.flip);
       }).pipe(Effect.provide(layer({ workspaceRoot, baseDir, detectCalls })));
 
       assert.strictEqual(error._tag, "VcsRepositoryDetectionError");
       if (error._tag !== "VcsRepositoryDetectionError") return;
-      assert.strictEqual(error.operation, "ReviewService.assertWorkspaceBoundCwd.canonicalizePath");
+      assert.strictEqual(
+        "operation" in error ? error.operation : undefined,
+        "ReviewService.assertWorkspaceBoundCwd.canonicalizePath",
+      );
       assert.strictEqual(error.cwd, invalidCwd);
       assert.match(error.detail, /Failed to resolve a path/);
       assert.instanceOf(error.cause, PlatformError.PlatformError);

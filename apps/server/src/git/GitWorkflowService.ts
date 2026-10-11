@@ -1,3 +1,6 @@
+import { EnvironmentAuthorizationError } from "@t3tools/contracts";
+import * as WorkspaceReadAccess from "../auth/workspaceReadAccess.ts";
+import { type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -35,21 +38,36 @@ import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 export class GitWorkflowService extends Context.Service<
   GitWorkflowService,
   {
-    readonly isRepository: (cwd: string) => Effect.Effect<boolean, GitManagerServiceError>;
-    readonly hasCommit: (input: {
-      readonly cwd: string;
-      readonly refName: string;
-    }) => Effect.Effect<boolean, GitCommandError>;
+    readonly isRepository: (
+      authority: ThreadReadAuthority,
+      cwd: string,
+    ) => Effect.Effect<boolean, GitManagerServiceError | EnvironmentAuthorizationError>;
+    readonly hasCommit: (
+      authority: ThreadReadAuthority,
+      input: {
+        readonly cwd: string;
+        readonly refName: string;
+      },
+    ) => Effect.Effect<boolean, GitCommandError | EnvironmentAuthorizationError>;
     readonly status: (
+      authority: ThreadReadAuthority,
       input: VcsStatusInput,
-    ) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
+    ) => Effect.Effect<VcsStatusResult, GitManagerServiceError | EnvironmentAuthorizationError>;
     readonly localStatus: (
+      authority: ThreadReadAuthority,
       input: VcsStatusInput,
-    ) => Effect.Effect<VcsStatusLocalResult, GitManagerServiceError>;
+    ) => Effect.Effect<
+      VcsStatusLocalResult,
+      GitManagerServiceError | EnvironmentAuthorizationError
+    >;
     readonly remoteStatus: (
+      authority: ThreadReadAuthority,
       input: VcsStatusInput,
       options?: GitManager.GitRemoteStatusOptions,
-    ) => Effect.Effect<VcsStatusRemoteResult | null, GitManagerServiceError>;
+    ) => Effect.Effect<
+      VcsStatusRemoteResult | null,
+      GitManagerServiceError | EnvironmentAuthorizationError
+    >;
     readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
     readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
     readonly invalidateStatus: (cwd: string) => Effect.Effect<void, never>;
@@ -59,40 +77,57 @@ export class GitWorkflowService extends Context.Service<
       options?: GitManager.GitRunStackedActionOptions,
     ) => Effect.Effect<GitRunStackedActionResult, GitManagerServiceError>;
     readonly resolvePullRequest: (
+      authority: ThreadReadAuthority,
       input: GitPullRequestRefInput,
-    ) => Effect.Effect<GitResolvePullRequestResult, GitManagerServiceError>;
+    ) => Effect.Effect<
+      GitResolvePullRequestResult,
+      GitManagerServiceError | EnvironmentAuthorizationError
+    >;
     readonly preparePullRequestThread: (
       input: GitPreparePullRequestThreadInput,
     ) => Effect.Effect<GitPreparePullRequestThreadResult, GitManagerServiceError>;
     readonly listRefs: (
+      authority: ThreadReadAuthority,
       input: VcsListRefsInput,
-    ) => Effect.Effect<VcsListRefsResult, GitCommandError>;
+    ) => Effect.Effect<VcsListRefsResult, GitCommandError | EnvironmentAuthorizationError>;
     readonly createWorktree: (
       input: VcsCreateWorktreeInput,
       options?: GitVcsDriver.CreateWorktreeOptions,
     ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
-    readonly listLocalBranchNames: (cwd: string) => Effect.Effect<string[], GitCommandError>;
+    readonly listLocalBranchNames: (
+      authority: ThreadReadAuthority,
+      cwd: string,
+    ) => Effect.Effect<string[], GitCommandError | EnvironmentAuthorizationError>;
     readonly fetchRemote: (input: {
       readonly cwd: string;
       readonly remoteName: string;
       readonly refName?: string;
     }) => Effect.Effect<void, GitCommandError>;
-    readonly remoteExists: (input: {
-      readonly cwd: string;
-      readonly remoteName: string;
-    }) => Effect.Effect<boolean, GitCommandError>;
-    readonly remoteBranchExists: (input: {
-      readonly cwd: string;
-      readonly remoteName: string;
-      readonly refName: string;
-    }) => Effect.Effect<boolean, GitCommandError>;
-    readonly resolveRemoteTrackingCommit: (input: {
-      readonly cwd: string;
-      readonly refName: string;
-      readonly fallbackRemoteName: string;
-    }) => Effect.Effect<
+    readonly remoteExists: (
+      authority: ThreadReadAuthority,
+      input: {
+        readonly cwd: string;
+        readonly remoteName: string;
+      },
+    ) => Effect.Effect<boolean, GitCommandError | EnvironmentAuthorizationError>;
+    readonly remoteBranchExists: (
+      authority: ThreadReadAuthority,
+      input: {
+        readonly cwd: string;
+        readonly remoteName: string;
+        readonly refName: string;
+      },
+    ) => Effect.Effect<boolean, GitCommandError | EnvironmentAuthorizationError>;
+    readonly resolveRemoteTrackingCommit: (
+      authority: ThreadReadAuthority,
+      input: {
+        readonly cwd: string;
+        readonly refName: string;
+        readonly fallbackRemoteName: string;
+      },
+    ) => Effect.Effect<
       { readonly commitSha: string; readonly remoteRefName: string },
-      GitCommandError
+      GitCommandError | EnvironmentAuthorizationError
     >;
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
@@ -156,6 +191,7 @@ function nonRepositoryListRefs(): VcsListRefsResult {
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  const access = yield* WorkspaceReadAccess.make;
   const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const gitManager = yield* GitManager.GitManager;
@@ -182,6 +218,7 @@ export const make = Effect.gen(function* () {
         detail: `The ${operation} workflow currently supports Git repositories only; detected ${handle.kind}. (${cwd})`,
       });
     }
+    return handle;
   });
 
   const ensureGitCommand = Effect.fn("GitWorkflowService.ensureGitCommand")(function* (
@@ -208,10 +245,11 @@ export const make = Effect.gen(function* () {
         detail: `The ${operation} command currently supports Git repositories only; detected ${handle.kind}.`,
       });
     }
+    return handle;
   });
 
   const detectGitRepositoryForStatus = Effect.fn("GitWorkflowService.detectGitRepositoryForStatus")(
-    function* (operation: string, cwd: string) {
+    function* (operation: string, cwd: string, authority: ThreadReadAuthority) {
       const handle = yield* registry.detect({ cwd }).pipe(
         Effect.mapError(
           (cause) =>
@@ -226,6 +264,7 @@ export const make = Effect.gen(function* () {
       if (!handle) {
         return false;
       }
+      yield* access.repository(authority, { cwd }, handle.repository.rootPath);
       if (handle.kind !== "git") {
         return yield* new GitManagerError({
           operation,
@@ -239,7 +278,7 @@ export const make = Effect.gen(function* () {
 
   const detectGitRepositoryForCommand = Effect.fn(
     "GitWorkflowService.detectGitRepositoryForCommand",
-  )(function* (operation: string, cwd: string) {
+  )(function* (operation: string, cwd: string, authority: ThreadReadAuthority) {
     const handle = yield* registry.detect({ cwd }).pipe(
       Effect.mapError(
         (cause) =>
@@ -255,6 +294,7 @@ export const make = Effect.gen(function* () {
     if (!handle) {
       return false;
     }
+    yield* access.repository(authority, { cwd }, handle.repository.rootPath);
     if (handle.kind !== "git") {
       return yield* new GitCommandError({
         operation,
@@ -275,49 +315,81 @@ export const make = Effect.gen(function* () {
       ensureGit(operation, input.cwd).pipe(Effect.andThen(run(input)));
 
   return GitWorkflowService.of({
-    isRepository: (cwd) =>
-      registry.detect({ cwd }).pipe(
-        Effect.map((handle) => handle?.kind === "git"),
-        Effect.mapError(
-          (cause) =>
-            new GitManagerError({
-              operation: "GitWorkflowService.isRepository",
-              cwd,
-              detail: "Failed to detect a VCS repository for this Git workflow.",
-              cause,
+    isRepository: (authority, cwd) =>
+      access.read(
+        authority,
+        { cwd },
+        registry.detect({ cwd }).pipe(
+          Effect.tap((handle) =>
+            handle === null
+              ? Effect.void
+              : access.repository(authority, { cwd }, handle.repository.rootPath),
+          ),
+          Effect.map((handle) => handle?.kind === "git"),
+          Effect.mapError((cause) =>
+            cause._tag === "EnvironmentAuthorizationError"
+              ? cause
+              : new GitManagerError({
+                  operation: "GitWorkflowService.isRepository",
+                  cwd,
+                  detail: "Failed to detect a VCS repository for this Git workflow.",
+                  cause,
+                }),
+          ),
+        ),
+      ),
+    hasCommit: (authority, input) =>
+      access.read(
+        authority,
+        input,
+        ensureGitCommand("GitWorkflowService.hasCommit", input.cwd).pipe(
+          Effect.tap((handle) => access.repository(authority, input, handle.repository.rootPath)),
+          Effect.andThen(access.admit(authority, input)),
+          Effect.andThen(
+            git.execute({
+              operation: "GitWorkflowService.hasCommit",
+              cwd: input.cwd,
+              args: ["rev-parse", "--verify", `${input.refName}^{commit}`],
+              allowNonZeroExit: true,
             }),
+          ),
+          Effect.map((result) => result.exitCode === 0),
         ),
       ),
-    hasCommit: (input) =>
-      ensureGitCommand("GitWorkflowService.hasCommit", input.cwd).pipe(
-        Effect.andThen(
-          git.execute({
-            operation: "GitWorkflowService.hasCommit",
-            cwd: input.cwd,
-            args: ["rev-parse", "--verify", `${input.refName}^{commit}`],
-            allowNonZeroExit: true,
-          }),
-        ),
-        Effect.map((result) => result.exitCode === 0),
-      ),
-    status: (input) =>
-      detectGitRepositoryForStatus("GitWorkflowService.status", input.cwd).pipe(
-        Effect.flatMap((isGitRepository) =>
-          isGitRepository ? gitManager.status(input) : Effect.succeed(nonRepositoryStatus()),
+    status: (authority, input) =>
+      access.read(
+        authority,
+        input,
+        detectGitRepositoryForStatus("GitWorkflowService.status", input.cwd, authority).pipe(
+          Effect.flatMap((isGitRepository) =>
+            isGitRepository
+              ? gitManager.status(authority, input)
+              : Effect.succeed(nonRepositoryStatus()),
+          ),
         ),
       ),
-    localStatus: (input) =>
-      detectGitRepositoryForStatus("GitWorkflowService.localStatus", input.cwd).pipe(
-        Effect.flatMap((isGitRepository) =>
-          isGitRepository
-            ? gitManager.localStatus(input)
-            : Effect.succeed(nonRepositoryLocalStatus()),
+    localStatus: (authority, input) =>
+      access.read(
+        authority,
+        input,
+        detectGitRepositoryForStatus("GitWorkflowService.localStatus", input.cwd, authority).pipe(
+          Effect.flatMap((isGitRepository) =>
+            isGitRepository
+              ? gitManager.localStatus(authority, input)
+              : Effect.succeed(nonRepositoryLocalStatus()),
+          ),
         ),
       ),
-    remoteStatus: (input, options) =>
-      detectGitRepositoryForStatus("GitWorkflowService.remoteStatus", input.cwd).pipe(
-        Effect.flatMap((isGitRepository) =>
-          isGitRepository ? gitManager.remoteStatus(input, options) : Effect.succeed(null),
+    remoteStatus: (authority, input, options) =>
+      access.read(
+        authority,
+        input,
+        detectGitRepositoryForStatus("GitWorkflowService.remoteStatus", input.cwd, authority).pipe(
+          Effect.flatMap((isGitRepository) =>
+            isGitRepository
+              ? gitManager.remoteStatus(authority, input, options)
+              : Effect.succeed(null),
+          ),
         ),
       ),
     invalidateLocalStatus: gitManager.invalidateLocalStatus,
@@ -331,43 +403,78 @@ export const make = Effect.gen(function* () {
       ensureGit("GitWorkflowService.runStackedAction", input.cwd).pipe(
         Effect.andThen(gitManager.runStackedAction(input, options)),
       ),
-    resolvePullRequest: routeGitManager(
-      "GitWorkflowService.resolvePullRequest",
-      gitManager.resolvePullRequest,
-    ),
+    resolvePullRequest: (authority, input) =>
+      access.read(
+        authority,
+        input,
+        ensureGit("GitWorkflowService.resolvePullRequest", input.cwd).pipe(
+          Effect.tap((handle) => access.repository(authority, input, handle.repository.rootPath)),
+          Effect.andThen(gitManager.resolvePullRequest(authority, input)),
+        ),
+      ),
     preparePullRequestThread: routeGitManager(
       "GitWorkflowService.preparePullRequestThread",
       gitManager.preparePullRequestThread,
     ),
-    listRefs: (input) =>
-      detectGitRepositoryForCommand("GitWorkflowService.listRefs", input.cwd).pipe(
-        Effect.flatMap((isGitRepository) =>
-          isGitRepository ? git.listRefs(input) : Effect.succeed(nonRepositoryListRefs()),
+    listRefs: (authority, input) =>
+      access.read(
+        authority,
+        input,
+        detectGitRepositoryForCommand("GitWorkflowService.listRefs", input.cwd, authority).pipe(
+          Effect.flatMap((isGitRepository) =>
+            isGitRepository
+              ? access.admit(authority, input).pipe(Effect.andThen(git.listRefs(input)))
+              : Effect.succeed(nonRepositoryListRefs()),
+          ),
         ),
       ),
     createWorktree: (input, options) =>
       ensureGitCommand("GitWorkflowService.createWorktree", input.cwd).pipe(
         Effect.andThen(gitManager.createWorktree(input, options)),
       ),
-    listLocalBranchNames: (cwd) =>
-      ensureGitCommand("GitWorkflowService.listLocalBranchNames", cwd).pipe(
-        Effect.andThen(git.listLocalBranchNames(cwd)),
+    listLocalBranchNames: (authority, cwd) =>
+      access.read(
+        authority,
+        { cwd },
+        ensureGitCommand("GitWorkflowService.listLocalBranchNames", cwd).pipe(
+          Effect.tap((handle) => access.repository(authority, { cwd }, handle.repository.rootPath)),
+          Effect.andThen(access.admit(authority, { cwd })),
+          Effect.andThen(git.listLocalBranchNames(cwd)),
+        ),
       ),
     fetchRemote: (input) =>
       ensureGitCommand("GitWorkflowService.fetchRemote", input.cwd).pipe(
         Effect.andThen(git.fetchRemote(input)),
       ),
-    remoteExists: (input) =>
-      ensureGitCommand("GitWorkflowService.remoteExists", input.cwd).pipe(
-        Effect.andThen(git.remoteExists(input)),
+    remoteExists: (authority, input) =>
+      access.read(
+        authority,
+        input,
+        ensureGitCommand("GitWorkflowService.remoteExists", input.cwd).pipe(
+          Effect.tap((handle) => access.repository(authority, input, handle.repository.rootPath)),
+          Effect.andThen(access.admit(authority, input)),
+          Effect.andThen(git.remoteExists(input)),
+        ),
       ),
-    remoteBranchExists: (input) =>
-      ensureGitCommand("GitWorkflowService.remoteBranchExists", input.cwd).pipe(
-        Effect.andThen(git.remoteBranchExists(input)),
+    remoteBranchExists: (authority, input) =>
+      access.read(
+        authority,
+        input,
+        ensureGitCommand("GitWorkflowService.remoteBranchExists", input.cwd).pipe(
+          Effect.tap((handle) => access.repository(authority, input, handle.repository.rootPath)),
+          Effect.andThen(access.admit(authority, input)),
+          Effect.andThen(git.remoteBranchExists(input)),
+        ),
       ),
-    resolveRemoteTrackingCommit: (input) =>
-      ensureGitCommand("GitWorkflowService.resolveRemoteTrackingCommit", input.cwd).pipe(
-        Effect.andThen(git.resolveRemoteTrackingCommit(input)),
+    resolveRemoteTrackingCommit: (authority, input) =>
+      access.read(
+        authority,
+        input,
+        ensureGitCommand("GitWorkflowService.resolveRemoteTrackingCommit", input.cwd).pipe(
+          Effect.tap((handle) => access.repository(authority, input, handle.repository.rootPath)),
+          Effect.andThen(access.admit(authority, input)),
+          Effect.andThen(git.resolveRemoteTrackingCommit(input)),
+        ),
       ),
     removeWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(

@@ -160,7 +160,10 @@ function makeHarness(options: HarnessOptions = {}) {
     options.generateTitle ?? (() => Effect.succeed({ title: "Generated title" })),
   );
   const layerExternalServices = Layer.mergeAll(
-    WorktreeSetupTracker.layer,
+    WorktreeSetupTracker.layer.pipe(
+      Layer.provide(layerDatabase),
+      Layer.provide(NodeServices.layer),
+    ),
     Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({ get: () => Effect.succeed(null) }),
     Layer.mock(TerminalManager.TerminalManager)({ close: () => Effect.void }),
     Layer.succeed(ProjectService.ProjectService, {
@@ -1234,7 +1237,7 @@ it.effect("renames a temporary t3/<hash> branch off the provisioning critical pa
 it.effect("provisions under t3-<hash> when a plain t3 branch blocks t3/*", () =>
   Effect.gen(function* () {
     const harness = makeHarness({
-      hasCommit: (input) => Effect.succeed(input.refName === "refs/heads/t3"),
+      hasCommit: (_authority, input) => Effect.succeed(input.refName === "refs/heads/t3"),
       createWorktree: (input) =>
         Effect.succeed({
           worktree: { path: "/repo-worktrees/temp", refName: input.newRefName, headSha: "abc" },
@@ -1532,7 +1535,7 @@ it.effect("a retry reuses a recorded worktree without undoing its branch rename"
     assert.equal(retried.thread.branch, "generated-branch");
     assert.equal(retried.thread.worktreePath, "/repo-worktrees/feature");
     // Clients see the retry's setup, not the failed one it replaced.
-    const snapshot = yield* tracker.get(launched.threadId);
+    const snapshot = yield* tracker.get(trustedReadAuthority, launched.threadId);
     assert.equal(snapshot?.phase, "done");
     assert.deepEqual(
       snapshot?.stages.map((stage) => stage.id),
@@ -2286,9 +2289,12 @@ it.effect("cancels tracked setup before provider work is released", () =>
       });
       const launched = yield* launches.launch(trustedMutationAuthority, input);
       yield* Deferred.await(entered);
-      assert.equal((yield* tracker.get(launched.threadId))?.phase, "running");
+      assert.equal((yield* tracker.get(trustedReadAuthority, launched.threadId))?.phase, "running");
       assert.isTrue(yield* tracker.cancel(launched.threadId));
-      assert.equal((yield* tracker.get(launched.threadId))?.phase, "cancelled");
+      assert.equal(
+        (yield* tracker.get(trustedReadAuthority, launched.threadId))?.phase,
+        "cancelled",
+      );
       const projection = yield* threads.getThreadProjection(
         trustedReadAuthority,
         launched.threadId,
@@ -2329,7 +2335,7 @@ it.effect.each([0, 1])("releases an async setup before its completion with exit 
           workspace: { type: "worktree", baseRef: "main" },
         }),
       );
-      yield* tracker.stream(launched.threadId).pipe(
+      yield* tracker.stream(trustedReadAuthority, launched.threadId).pipe(
         Stream.filter(
           (snapshot) =>
             snapshot?.stages.some((stage) => stage.id === "agent" && stage.status === "done") ===
@@ -2339,13 +2345,13 @@ it.effect.each([0, 1])("releases an async setup before its completion with exit 
       );
       const running = yield* threads.getThreadProjection(trustedReadAuthority, launched.threadId);
       assert.equal(running.runs[0]?.status, "starting");
-      assert.equal((yield* tracker.get(launched.threadId))?.phase, "running");
+      assert.equal((yield* tracker.get(trustedReadAuthority, launched.threadId))?.phase, "running");
       yield* Deferred.succeed(completion, { exitCode, durationMs: 1 });
-      yield* tracker.stream(launched.threadId).pipe(
+      yield* tracker.stream(trustedReadAuthority, launched.threadId).pipe(
         Stream.filter((snapshot) => snapshot?.phase === "done"),
         Stream.runHead,
       );
-      const settled = yield* tracker.get(launched.threadId);
+      const settled = yield* tracker.get(trustedReadAuthority, launched.threadId);
       assert.equal(
         settled?.stages.find((stage) => stage.id === "setup-script")?.status,
         exitCode === 0 ? "done" : "failed",

@@ -181,7 +181,7 @@ const make = Effect.gen(function* () {
     // non-repository workspace fails with an actionable error instead of an
     // opaque git failure further down.
     const localStatus = yield* gitWorkflow
-      .localStatus({ cwd: projectCwd })
+      .localStatus(trustedReadAuthority, { cwd: projectCwd })
       .pipe(asOperationFailed("Unable to read git status"));
     if (!localStatus.isRepo) {
       return yield* failure(
@@ -197,11 +197,11 @@ const make = Effect.gen(function* () {
     // paginated substring search only enriches the message with the checkout
     // location when available.
     const localBranchNames = yield* gitWorkflow
-      .listLocalBranchNames(projectCwd)
+      .listLocalBranchNames(trustedReadAuthority, projectCwd)
       .pipe(asOperationFailed("Unable to list branches"));
     if (localBranchNames.includes(input.branch)) {
       const existingRef = yield* gitWorkflow
-        .listRefs({ cwd: projectCwd, query: input.branch, refKind: "local" })
+        .listRefs(trustedReadAuthority, { cwd: projectCwd, query: input.branch, refKind: "local" })
         .pipe(
           Effect.map((result) =>
             result.refs.find((ref) => ref.name === input.branch && ref.isRemote !== true),
@@ -238,7 +238,7 @@ const make = Effect.gen(function* () {
         .fetchRemote({ cwd: projectCwd, remoteName: "origin" })
         .pipe(asOperationFailed("Unable to fetch origin"));
       const resolvedRemoteBase = yield* gitWorkflow
-        .resolveRemoteTrackingCommit({
+        .resolveRemoteTrackingCommit(trustedReadAuthority, {
           cwd: projectCwd,
           refName: baseRef,
           fallbackRemoteName: "origin",
@@ -394,7 +394,7 @@ const make = Effect.gen(function* () {
         const continuation = yield* recheckAndBind.pipe(Effect.andThen(queueContinuation));
 
         yield* vcsStatusBroadcaster
-          .refreshStatus(worktreePath)
+          .refreshStatus(trustedReadAuthority, worktreePath)
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach);
 
         let setupScript: WorktreeMcpSetupScriptStatus = { status: "skipped" };

@@ -1,4 +1,7 @@
-import { assert, describe, expect, it, vi } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Sqlite from "../persistence/Sqlite.ts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
+import { assert, expect, it, vi } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -25,11 +28,11 @@ function layer(input: {
   );
 }
 
-describe("GitWorkflowService", () => {
+it.layer(Layer.mergeAll(Sqlite.layerMemory, NodeServices.layer))("GitWorkflowService", (it) => {
   it.effect("reports a non-Git VCS repository as not a Git repository", () =>
     Effect.gen(function* () {
       const workflow = yield* GitWorkflowService.GitWorkflowService;
-      const isRepository = yield* workflow.isRepository("/jj-repo");
+      const isRepository = yield* workflow.isRepository(trustedReadAuthority, "/jj-repo");
 
       assert.equal(isRepository, false);
     }).pipe(
@@ -58,7 +61,7 @@ describe("GitWorkflowService", () => {
   it.effect("returns an empty local status when no VCS repository is detected", () =>
     Effect.gen(function* () {
       const workflow = yield* GitWorkflowService.GitWorkflowService;
-      const status = yield* workflow.localStatus({ cwd: "/not-a-repo" });
+      const status = yield* workflow.localStatus(trustedReadAuthority, { cwd: "/not-a-repo" });
 
       assert.deepStrictEqual(status, {
         isRepo: false,
@@ -84,7 +87,7 @@ describe("GitWorkflowService", () => {
   it.effect("returns an empty full status when no VCS repository is detected", () =>
     Effect.gen(function* () {
       const workflow = yield* GitWorkflowService.GitWorkflowService;
-      const status = yield* workflow.status({ cwd: "/not-a-repo" });
+      const status = yield* workflow.status(trustedReadAuthority, { cwd: "/not-a-repo" });
 
       assert.deepStrictEqual(status, {
         isRepo: false,
@@ -135,9 +138,9 @@ describe("GitWorkflowService", () => {
 
     return Effect.gen(function* () {
       const workflow = yield* GitWorkflowService.GitWorkflowService;
-      yield* workflow.localStatus({ cwd: "/not-a-repo" });
-      yield* workflow.remoteStatus({ cwd: "/not-a-repo" });
-      yield* workflow.status({ cwd: "/not-a-repo" });
+      yield* workflow.localStatus(trustedReadAuthority, { cwd: "/not-a-repo" });
+      yield* workflow.remoteStatus(trustedReadAuthority, { cwd: "/not-a-repo" });
+      yield* workflow.status(trustedReadAuthority, { cwd: "/not-a-repo" });
 
       assert.equal(localStatus.mock.calls.length, 0);
       assert.equal(remoteStatus.mock.calls.length, 0);
@@ -148,7 +151,7 @@ describe("GitWorkflowService", () => {
   it.effect("returns an empty ref list when no VCS repository is detected", () =>
     Effect.gen(function* () {
       const workflow = yield* GitWorkflowService.GitWorkflowService;
-      const refs = yield* workflow.listRefs({ cwd: "/not-a-repo" });
+      const refs = yield* workflow.listRefs(trustedReadAuthority, { cwd: "/not-a-repo" });
 
       assert.deepStrictEqual(refs, {
         refs: [],
@@ -175,7 +178,9 @@ describe("GitWorkflowService", () => {
 
     return Effect.gen(function* () {
       const workflow = yield* GitWorkflowService.GitWorkflowService;
-      const error = yield* workflow.status({ cwd: "/repo" }).pipe(Effect.flip);
+      const error = yield* workflow
+        .status(trustedReadAuthority, { cwd: "/repo" })
+        .pipe(Effect.flip);
 
       expect(error).toMatchObject({
         _tag: "GitManagerError",
@@ -202,7 +207,9 @@ describe("GitWorkflowService", () => {
 
     return Effect.gen(function* () {
       const workflow = yield* GitWorkflowService.GitWorkflowService;
-      const error = yield* workflow.listRefs({ cwd: "/repo" }).pipe(Effect.flip);
+      const error = yield* workflow
+        .listRefs(trustedReadAuthority, { cwd: "/repo" })
+        .pipe(Effect.flip);
 
       expect(error).toMatchObject({
         _tag: "GitCommandError",

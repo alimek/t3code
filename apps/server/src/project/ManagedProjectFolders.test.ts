@@ -41,7 +41,7 @@ const layerGitWorkflow = Layer.unwrap(
   Effect.gen(function* () {
     const registry = yield* VcsDriverRegistry.VcsDriverRegistry;
     return Layer.mock(GitWorkflow.GitWorkflowService)({
-      isRepository: (cwd) =>
+      isRepository: (_authority, cwd) =>
         registry.detect({ cwd }).pipe(
           Effect.map((handle) => handle?.kind === "git"),
           Effect.orDie,

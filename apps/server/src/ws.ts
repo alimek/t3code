@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "./auth/ResourceAuthorization.ts";
 import { trustedMutationAuthority, type MutationAuthority } from "./auth/CommandAuthorization.ts";
 import { type OrchestrationV2DomainEvent } from "@t3tools/contracts";
 import {
@@ -1379,6 +1380,41 @@ export const subscribeOrchestrationV2ArchivedShell = Effect.fn(
   return Stream.concat(rpcInitialItems([{ kind: "snapshot" as const, snapshot }]), live);
 });
 
+/** Thin direct workspace read controllers; external authority is always explicit. */
+export const workspaceReadHandlers = (
+  authority: ThreadReadAuthority,
+  services: {
+    readonly gitWorkflow: GitWorkflowService.GitWorkflowService["Service"];
+    readonly vcsStatusBroadcaster: VcsStatusBroadcaster.VcsStatusBroadcaster["Service"];
+    readonly review: ReviewService.ReviewService["Service"];
+    readonly worktreeSetupTracker: WorktreeSetupTracker.WorktreeSetupTracker["Service"];
+  },
+  automaticRemoteRefreshInterval: Effect.Effect<Duration.Duration>,
+) => ({
+  [WS_METHODS.subscribeVcsStatus]: (
+    input: Parameters<typeof services.vcsStatusBroadcaster.streamStatus>[1],
+  ) =>
+    services.vcsStatusBroadcaster.streamStatus(authority, input, {
+      automaticRemoteRefreshInterval,
+    }),
+  [WS_METHODS.subscribeWorktreeSetup]: (input: { readonly threadId: ThreadId }) =>
+    services.worktreeSetupTracker.stream(authority, input.threadId),
+  [WS_METHODS.vcsRefreshStatus]: (
+    input: Parameters<typeof services.vcsStatusBroadcaster.getStatus>[1],
+  ) => services.vcsStatusBroadcaster.refreshStatus(authority, input.cwd),
+  [WS_METHODS.gitResolvePullRequest]: (
+    input: Parameters<typeof services.gitWorkflow.resolvePullRequest>[1],
+  ) => services.gitWorkflow.resolvePullRequest(authority, input),
+  [WS_METHODS.vcsListRefs]: (input: Parameters<typeof services.gitWorkflow.listRefs>[1]) =>
+    services.gitWorkflow.listRefs(authority, input),
+  [WS_METHODS.reviewGetDiffPreview]: (
+    input: Parameters<typeof services.review.getDiffPreview>[1],
+  ) => services.review.getDiffPreview(authority, input),
+  [WS_METHODS.reviewGetDiffFileContents]: (
+    input: Parameters<typeof services.review.getDiffFileContents>[1],
+  ) => services.review.getDiffFileContents(authority, input),
+});
+
 const layerWsRpc = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   clientOrigin: OrchestrationClientOrigin,
@@ -1947,7 +1983,7 @@ const layerWsRpc = (
 
       const refreshGitStatus = (cwd: string) =>
         vcsStatusBroadcaster
-          .refreshStatus(cwd)
+          .refreshStatus(trustedReadAuthority, cwd)
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
       const mutateProject = Effect.fn("ws.projects.mutate")(function* (mutation: ProjectMutation) {
@@ -3006,16 +3042,15 @@ const layerWsRpc = (
           }),
         [WS_METHODS.assetsPersistChatAttachments]: (input) =>
           persistChatAttachments(input).pipe(Effect.map((attachments) => ({ attachments }))),
-        [WS_METHODS.subscribeVcsStatus]: (input) =>
-          vcsStatusBroadcaster.streamStatus(input, {
-            automaticRemoteRefreshInterval: automaticGitFetchInterval,
-          }),
-        [WS_METHODS.subscribeWorktreeSetup]: (input) => worktreeSetupTracker.stream(input.threadId),
+        ...workspaceReadHandlers(
+          readAuthority,
+          { gitWorkflow, vcsStatusBroadcaster, review, worktreeSetupTracker },
+          automaticGitFetchInterval,
+        ),
         [WS_METHODS.worktreeSetupCancel]: (input) =>
           worktreeSetupTracker
             .cancel(input.threadId)
             .pipe(Effect.map((cancelled) => ({ cancelled }))),
-        [WS_METHODS.vcsRefreshStatus]: (input) => vcsStatusBroadcaster.refreshStatus(input.cwd),
         [WS_METHODS.vcsPull]: (input) =>
           gitWorkflow.pullCurrentBranch(input.cwd).pipe(
             Effect.matchCauseEffect({
@@ -3064,12 +3099,10 @@ const layerWsRpc = (
                 }),
               ),
           ),
-        [WS_METHODS.gitResolvePullRequest]: (input) => gitWorkflow.resolvePullRequest(input),
         [WS_METHODS.gitPreparePullRequestThread]: (input) =>
           gitWorkflow
             .preparePullRequestThread(input)
             .pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
-        [WS_METHODS.vcsListRefs]: (input) => gitWorkflow.listRefs(input),
         [WS_METHODS.vcsCreateWorktree]: (input) =>
           gitWorkflow.createWorktree(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         [WS_METHODS.vcsRemoveWorktree]: (input) =>
@@ -3080,8 +3113,6 @@ const layerWsRpc = (
           gitWorkflow.switchRef(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
         [WS_METHODS.vcsInit]: (input) =>
           vcsProvisioning.initRepository(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
-        [WS_METHODS.reviewGetDiffPreview]: (input) => review.getDiffPreview(input),
-        [WS_METHODS.reviewGetDiffFileContents]: (input) => review.getDiffFileContents(input),
         [WS_METHODS.terminalOpen]: (input) => terminalManager.open(input),
         [WS_METHODS.terminalAttach]: (input) =>
           Stream.callback<TerminalAttachStreamEvent, TerminalError>((queue) =>

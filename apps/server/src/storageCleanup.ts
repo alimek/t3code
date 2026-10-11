@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "./auth/ResourceAuthorization.ts";
 import {
   OrchestrationV2AppThreadJson,
   OrchestrationV2ProviderSessionJson,
@@ -330,6 +331,7 @@ export const make = Effect.gen(function* () {
           eligible = integrated && settings.worktreeUnchanged;
           if (!eligible && settings.worktreeOnMerge && thread.branch !== null) {
             const pullRequest = yield* gitManager.branchPullRequest(
+              trustedReadAuthority,
               { cwd: worktreePath, branch: thread.branch },
               { refresh: true },
             );

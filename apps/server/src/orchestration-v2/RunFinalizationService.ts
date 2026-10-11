@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { CheckpointScopeId, ProjectId, RunId, ThreadId } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -99,14 +100,17 @@ export const layerObserver = Layer.effect(
       refresh: ({ cwd, threadId, runId }) =>
         Effect.gen(function* () {
           const [, local] = yield* Effect.all(
-            [workspaceEntries.refresh(cwd), vcsStatus.refreshLocalStatus(cwd)],
+            [
+              workspaceEntries.refresh(cwd),
+              vcsStatus.refreshLocalStatus(trustedReadAuthority, cwd),
+            ],
             { concurrency: "unbounded" },
           );
           if (local.refName === null || local.isDefaultRef) return;
           const thread = yield* projections.getThreadShell(threadId);
           if (!thread || thread.branch !== local.refName) return;
           if (thread.activeRunId !== null && thread.activeRunId !== runId) return;
-          yield* vcsStatus.refreshPullRequestStatus(cwd).pipe(
+          yield* vcsStatus.refreshPullRequestStatus(trustedReadAuthority, cwd).pipe(
             Effect.catch((error) =>
               Effect.logWarning("failed to refresh pull request status after run completion", {
                 threadId,
