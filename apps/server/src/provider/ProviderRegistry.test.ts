@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as CodexInstallation from "./CodexInstallation.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
@@ -1203,14 +1204,17 @@ it.layer(
                 : [customModel, ...cachedProvider.models];
               assert.deepStrictEqual((yield* registry.getProviders)[0]?.models, expectedModels);
 
-              yield* registry.refreshInstance(instance.instanceId);
+              yield* registry.refreshInstance(trustedReadAuthority, instance.instanceId);
               assert.deepStrictEqual(
                 (yield* readProviderStatusCache(filePath))?.models,
                 restarted ? retainedModels : refreshedProvider.models,
               );
 
               yield* Ref.set(nextProvider, failedProvider);
-              const afterFailure = yield* registry.refreshInstance(instance.instanceId);
+              const afterFailure = yield* registry.refreshInstance(
+                trustedReadAuthority,
+                instance.instanceId,
+              );
               assert.deepStrictEqual(afterFailure[0]?.models, retainedModels);
               assert.deepStrictEqual(
                 (yield* readProviderStatusCache(filePath))?.models,
@@ -1720,7 +1724,10 @@ it.layer(
 
         yield* Effect.gen(function* () {
           const registry = yield* ProviderRegistry.ProviderRegistry;
-          yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
+          yield* registry.refreshWorkspaceSnapshot(trustedReadAuthority, {
+            instanceId,
+            cwd: "/workspace",
+          });
           assert.strictEqual((yield* registry.getProviders)[0]?.workspaceSnapshots, undefined);
           yield* Ref.set(returnPendingSnapshot, false);
           const workspaceUpdate = yield* registry.streamChanges.pipe(
@@ -1729,11 +1736,11 @@ it.layer(
           );
           yield* Effect.yieldNow;
           const firstRefresh = yield* registry
-            .refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" })
+            .refreshWorkspaceSnapshot(trustedReadAuthority, { instanceId, cwd: "/workspace" })
             .pipe(Effect.forkChild);
           yield* Deferred.await(probeStarted);
           const duplicateRefresh = yield* registry
-            .refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" })
+            .refreshWorkspaceSnapshot(trustedReadAuthority, { instanceId, cwd: "/workspace" })
             .pipe(Effect.forkChild);
           yield* Effect.yieldNow;
           assert.strictEqual(yield* Ref.get(snapshotCalls), 2);
@@ -1757,7 +1764,10 @@ it.layer(
             status: "error",
             slashCommandsPending: false,
           });
-          yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
+          yield* registry.refreshWorkspaceSnapshot(trustedReadAuthority, {
+            instanceId,
+            cwd: "/workspace",
+          });
           assert.strictEqual(yield* Ref.get(snapshotCalls), 3);
           assert.deepStrictEqual(
             (yield* registry.getProviders)[0]?.workspaceSnapshots?.[0]?.slashCommands,
@@ -1767,21 +1777,30 @@ it.layer(
             (yield* registry.getProviders)[0]?.workspaceSnapshots?.[0]?.slashCommandsPending,
             undefined,
           );
-          yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
+          yield* registry.refreshWorkspaceSnapshot(trustedReadAuthority, {
+            instanceId,
+            cwd: "/workspace",
+          });
           assert.strictEqual(yield* Ref.get(snapshotCalls), 3);
           // Nothing watches skill directories, so an expired scan is redone on use.
           yield* TestClock.adjust(PROVIDER_WORKSPACE_SNAPSHOT_TTL_MS - 1);
-          yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
+          yield* registry.refreshWorkspaceSnapshot(trustedReadAuthority, {
+            instanceId,
+            cwd: "/workspace",
+          });
           assert.strictEqual(yield* Ref.get(snapshotCalls), 3);
           yield* TestClock.adjust(1);
-          yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
+          yield* registry.refreshWorkspaceSnapshot(trustedReadAuthority, {
+            instanceId,
+            cwd: "/workspace",
+          });
           assert.strictEqual(yield* Ref.get(snapshotCalls), 4);
           const newSkills = [
             ...scopedProvider.skills,
             { name: "added", path: "/workspace/added/SKILL.md", enabled: true },
           ];
           yield* Ref.set(scopedResult, { ...scopedProvider, skills: newSkills });
-          yield* registry.refreshWorkspaceSnapshot({
+          yield* registry.refreshWorkspaceSnapshot(trustedReadAuthority, {
             instanceId,
             cwd: "/workspace",
             fresh: true,
@@ -1800,7 +1819,11 @@ it.layer(
           yield* Ref.set(scanGate, { started: slowStarted, release: releaseSlow });
           yield* Ref.set(scopedResult, scopedProvider);
           const slowScan = yield* registry
-            .refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace", fresh: true })
+            .refreshWorkspaceSnapshot(trustedReadAuthority, {
+              instanceId,
+              cwd: "/workspace",
+              fresh: true,
+            })
             .pipe(Effect.forkChild);
           yield* Deferred.await(slowStarted);
           const latestSkills = [
@@ -1808,7 +1831,7 @@ it.layer(
             { name: "latest", path: "/workspace/latest/SKILL.md", enabled: true },
           ];
           yield* Ref.set(scopedResult, { ...scopedProvider, skills: latestSkills });
-          yield* registry.refreshWorkspaceSnapshot({
+          yield* registry.refreshWorkspaceSnapshot(trustedReadAuthority, {
             instanceId,
             cwd: "/workspace",
             fresh: true,
@@ -1991,7 +2014,7 @@ it.layer(
             "error",
           );
 
-          const recoveredProviders = yield* registry.refresh();
+          const recoveredProviders = yield* registry.refresh(trustedReadAuthority);
           assert.deepStrictEqual(
             recoveredProviders.find((provider) => provider.instanceId === openCodeInstanceId)
               ?.models,
@@ -2003,7 +2026,7 @@ it.layer(
           );
 
           yield* Ref.set(catalogSnapshot, changedCatalogProvider);
-          const changedProviders = yield* registry.refresh();
+          const changedProviders = yield* registry.refresh(trustedReadAuthority);
           assert.deepStrictEqual(
             changedProviders.find((provider) => provider.instanceId === openCodeInstanceId)?.models,
             changedCatalogProvider.models,
@@ -2161,9 +2184,9 @@ it.layer(
 
         yield* Effect.gen(function* () {
           const registry = yield* ProviderRegistry.ProviderRegistry;
-          const first = yield* registry.refresh().pipe(Effect.forkChild);
+          const first = yield* registry.refresh(trustedReadAuthority).pipe(Effect.forkChild);
           yield* Deferred.await(probeStarted);
-          const second = yield* registry.refresh().pipe(Effect.forkChild);
+          const second = yield* registry.refresh(trustedReadAuthority).pipe(Effect.forkChild);
           yield* Effect.yieldNow;
           assert.strictEqual(yield* Ref.get(refreshCalls), 1);
           yield* Deferred.succeed(releaseProbe, undefined);
@@ -2171,7 +2194,7 @@ it.layer(
           expect(yield* Fiber.join(second)).toEqual([expect.objectContaining(provider)]);
           assert.strictEqual(yield* Ref.get(refreshCalls), 1);
 
-          yield* registry.refresh();
+          yield* registry.refresh(trustedReadAuthority);
           assert.strictEqual(yield* Ref.get(refreshCalls), 2);
         }).pipe(Effect.provide(runtimeServices));
       }),
@@ -2503,12 +2526,13 @@ it.layer(
           assert.deepStrictEqual(yield* registry.getProviders, [
             withBundledCompatibility(cachedProvider),
           ]);
-          assert.deepStrictEqual(yield* registry.refresh(codexDriver), [
+          assert.deepStrictEqual(yield* registry.refresh(trustedReadAuthority, codexDriver), [
             withBundledCompatibility(cachedProvider),
           ]);
-          assert.deepStrictEqual(yield* registry.refreshInstance(codexInstanceId), [
-            withBundledCompatibility(cachedProvider),
-          ]);
+          assert.deepStrictEqual(
+            yield* registry.refreshInstance(trustedReadAuthority, codexInstanceId),
+            [withBundledCompatibility(cachedProvider)],
+          );
         }).pipe(Effect.provide(runtimeServices));
       }),
     );

@@ -1,3 +1,7 @@
+import { authorizeExtraTool } from "../auth/ToolAuthorization.ts";
+import { type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
+import { EnvironmentAuthorizationError } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 /**
  * ProviderRegistry - Provider snapshot service.
  *
@@ -91,8 +95,9 @@ export class ProviderRegistry extends Context.Service<
      * @deprecated prefer `refreshInstance` for new call sites.
      */
     readonly refresh: (
+      authority: ThreadReadAuthority,
       provider?: ProviderDriverKind,
-    ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
+    ) => Effect.Effect<ReadonlyArray<ServerProvider>, EnvironmentAuthorizationError>;
 
     /**
      * Refresh the specific configured instance. Returns the updated snapshot
@@ -101,8 +106,9 @@ export class ProviderRegistry extends Context.Service<
      * behaviour so transport layers don't have to special-case unknowns.
      */
     readonly refreshInstance: (
+      authority: ThreadReadAuthority,
       instanceId: ProviderInstanceId,
-    ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
+    ) => Effect.Effect<ReadonlyArray<ServerProvider>, EnvironmentAuthorizationError>;
 
     /**
      * Fill the skills and slash commands snapshot for one cwd. A cwd that
@@ -110,11 +116,14 @@ export class ProviderRegistry extends Context.Service<
      * also refreshes the instance's machine snapshot and drops other
      * instances' snapshots for the cwd.
      */
-    readonly refreshWorkspaceSnapshot: (input: {
-      readonly instanceId: ProviderInstanceId;
-      readonly cwd: string;
-      readonly fresh?: boolean;
-    }) => Effect.Effect<ReadonlyArray<ServerProvider>>;
+    readonly refreshWorkspaceSnapshot: (
+      authority: ThreadReadAuthority,
+      input: {
+        readonly instanceId: ProviderInstanceId;
+        readonly cwd: string;
+        readonly fresh?: boolean;
+      },
+    ) => Effect.Effect<ReadonlyArray<ServerProvider>, EnvironmentAuthorizationError>;
 
     /**
      * Resolve the maintenance capabilities owned by one live provider instance.
@@ -695,7 +704,9 @@ export const layer = Layer.effect(
 
     const refreshOneSource = Effect.fn("refreshOneSource")(function* (
       providerSource: ProviderSnapshotSource,
+      authority: ThreadReadAuthority,
     ) {
+      yield* authorizeExtraTool(authority);
       return yield* providerSource.refresh.pipe(
         Effect.flatMap((nextProvider) =>
           correlateSnapshotWithSource(providerSource, nextProvider).pipe(
@@ -705,7 +716,10 @@ export const layer = Layer.effect(
       );
     });
 
-    type RefreshAllCompletion = Deferred.Deferred<ReadonlyArray<ServerProvider>>;
+    type RefreshAllCompletion = Deferred.Deferred<
+      ReadonlyArray<ServerProvider>,
+      EnvironmentAuthorizationError
+    >;
     const refreshAllInFlightRef = yield* Ref.make<Option.Option<RefreshAllCompletion>>(
       Option.none(),
     );
@@ -713,7 +727,8 @@ export const layer = Layer.effect(
     // Untargeted refreshes probe every live source, so any read-scoped client
     // can request them. Concurrent callers share one in-flight pass instead of
     // each starting their own set of provider processes.
-    const refreshAll = Effect.fn("refreshAll")(function* () {
+    const refreshAll = Effect.fn("refreshAll")(function* (authority: ThreadReadAuthority) {
+      yield* authorizeExtraTool(authority);
       const claimed = yield* Ref.modify(
         refreshAllInFlightRef,
         (
@@ -725,7 +740,10 @@ export const layer = Layer.effect(
           if (Option.isSome(inFlight)) {
             return [{ owner: false, completion: inFlight.value }, inFlight];
           }
-          const completion = Deferred.makeUnsafe<ReadonlyArray<ServerProvider>>();
+          const completion = Deferred.makeUnsafe<
+            ReadonlyArray<ServerProvider>,
+            EnvironmentAuthorizationError
+          >();
           return [{ owner: true, completion }, Option.some(completion)];
         },
       );
@@ -734,7 +752,7 @@ export const layer = Layer.effect(
         // other callers are already awaiting.
         yield* getLiveSources.pipe(
           Effect.flatMap((sources) =>
-            Effect.forEach(sources, (source) => refreshOneSource(source), {
+            Effect.forEach(sources, (source) => refreshOneSource(source, authority), {
               concurrency: "unbounded",
               discard: true,
             }),
@@ -751,9 +769,13 @@ export const layer = Layer.effect(
       return yield* Deferred.await(claimed.completion);
     });
 
-    const refresh = Effect.fn("refresh")(function* (provider?: ProviderDriverKind) {
+    const refresh = Effect.fn("refresh")(function* (
+      authority: ThreadReadAuthority,
+      provider?: ProviderDriverKind,
+    ) {
+      yield* authorizeExtraTool(authority);
       if (provider === undefined) {
-        return yield* refreshAll();
+        return yield* refreshAll(authority);
       }
       // Kind-scoped refreshes target the default instance for that driver.
       const defaultInstanceId = defaultInstanceIdForDriver(provider);
@@ -764,18 +786,20 @@ export const layer = Layer.effect(
       if (!providerSource) {
         return yield* Ref.get(providersRef);
       }
-      return yield* refreshOneSource(providerSource);
+      return yield* refreshOneSource(providerSource, authority);
     });
 
     const refreshInstance = Effect.fn("refreshInstance")(function* (
+      authority: ThreadReadAuthority,
       instanceId: ProviderInstanceId,
     ) {
+      yield* authorizeExtraTool(authority);
       const sources = yield* getLiveSources;
       const providerSource = sources.find((candidate) => candidate.instanceId === instanceId);
       if (!providerSource) {
         return yield* Ref.get(providersRef);
       }
-      return yield* refreshOneSource(providerSource);
+      return yield* refreshOneSource(providerSource, authority);
     });
 
     const getProviderMaintenanceCapabilitiesForInstance = Effect.fn(
@@ -1004,6 +1028,10 @@ export const layer = Layer.effect(
     const recoverRefreshFailure = Effect.fn("recoverRefreshFailure")(function* (
       cause: Cause.Cause<unknown>,
     ) {
+      const authorization = Cause.findErrorOption(cause).pipe(
+        Option.filter(Schema.is(EnvironmentAuthorizationError)),
+      );
+      if (Option.isSome(authorization)) return yield* authorization.value;
       if (Cause.hasInterruptsOnly(cause)) {
         return yield* Effect.interrupt;
       }
@@ -1028,11 +1056,15 @@ export const layer = Layer.effect(
         Effect.map(([, nextProviders]) => nextProviders),
       );
 
-    const refreshWorkspaceSnapshot = Effect.fn("refreshWorkspaceSnapshot")(function* (input: {
-      readonly instanceId: ProviderInstanceId;
-      readonly cwd: string;
-      readonly fresh?: boolean;
-    }) {
+    const refreshWorkspaceSnapshot = Effect.fn("refreshWorkspaceSnapshot")(function* (
+      authority: ThreadReadAuthority,
+      input: {
+        readonly instanceId: ProviderInstanceId;
+        readonly cwd: string;
+        readonly fresh?: boolean;
+      },
+    ) {
+      yield* authorizeExtraTool(authority);
       // Fresh scans drop other instances' snapshots for this cwd first, so a
       // composer on one of them scans again on next use, even when this
       // instance is gone or cannot be scanned.
@@ -1077,11 +1109,13 @@ export const layer = Layer.effect(
       if (!claimed && !input.fresh) return yield* Ref.get(providersRef);
       // Fresh scans also re-read the machine snapshot after invalidating caches.
       const refreshMachineSnapshot = input.fresh
-        ? (instance.invalidateCaches ?? Effect.void).pipe(
-            Effect.andThen(refreshInstance(input.instanceId)),
+        ? authorizeExtraTool(authority).pipe(
+            Effect.andThen(instance.invalidateCaches ?? Effect.void),
+            Effect.andThen(refreshInstance(authority, input.instanceId)),
           )
         : Effect.void;
       return yield* refreshMachineSnapshot.pipe(
+        Effect.andThen(authorizeExtraTool(authority)),
         Effect.andThen(instance.snapshotForCwd(input.cwd)),
         Effect.flatMap((scopedSnapshot) =>
           scopedSnapshot.status === "error" && scopedSnapshot.slashCommandsPending === undefined
@@ -1122,12 +1156,21 @@ export const layer = Layer.effect(
 
     return {
       getProviders: Ref.get(providersRef),
-      refresh: (provider?: ProviderDriverKind) =>
-        refresh(provider).pipe(Effect.catchCause(recoverRefreshFailure)),
-      refreshInstance: (instanceId: ProviderInstanceId) =>
-        refreshInstance(instanceId).pipe(Effect.catchCause(recoverRefreshFailure)),
-      refreshWorkspaceSnapshot: (input) =>
-        refreshWorkspaceSnapshot(input).pipe(Effect.catchCause(recoverRefreshFailure)),
+      refresh: (authority, provider?: ProviderDriverKind) =>
+        refresh(authority, provider).pipe(
+          Effect.catchCause(recoverRefreshFailure),
+          Effect.tap(() => authorizeExtraTool(authority)),
+        ),
+      refreshInstance: (authority, instanceId: ProviderInstanceId) =>
+        refreshInstance(authority, instanceId).pipe(
+          Effect.catchCause(recoverRefreshFailure),
+          Effect.tap(() => authorizeExtraTool(authority)),
+        ),
+      refreshWorkspaceSnapshot: (authority, input) =>
+        refreshWorkspaceSnapshot(authority, input).pipe(
+          Effect.catchCause(recoverRefreshFailure),
+          Effect.tap(() => authorizeExtraTool(authority)),
+        ),
       getProviderMaintenanceCapabilitiesForInstance,
       setProviderMaintenanceActionState,
       get streamChanges() {

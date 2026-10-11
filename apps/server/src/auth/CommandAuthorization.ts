@@ -1,3 +1,4 @@
+import { resourceRestricted, extraToolDenied } from "./ToolAuthorization.ts";
 import type { WorkspaceActionAdmission } from "./workspaceReadAccess.ts";
 import {
   AuthOrchestrationOperateScope,
@@ -737,6 +738,11 @@ export const authorizeCommand = Effect.fn("resourceAuthorization.command")(
     const mutationAuthority = authority as MutationAuthority;
     const grant = yield* currentMutationGrant(mutationAuthority);
     if (grant === undefined) return;
+    if (
+      resourceRestricted(grant) &&
+      (command.type.startsWith("delegated_task.") || command.type.startsWith("thread.pull-request"))
+    )
+      return yield* extraToolDenied(AuthOrchestrationOperateScope);
     if (command.type === "thread.create" && command.importedNativeThread !== undefined) {
       // An unregistered native session has no project owner. Restricted callers cannot claim it.
       if (grant.projects.mode !== "all" || grant.providers.mode !== "all")

@@ -1,3 +1,4 @@
+import { authorizeResourceTool } from "./ToolAuthorization.ts";
 import {
   AuthAccessTokenType,
   AuthAccessWriteScope,
@@ -1374,6 +1375,13 @@ export const make = Effect.gen(function* () {
     if (token === null) return Effect.fail(new ServerAuthMissingCredentialError({}));
     return sessions.verify(token).pipe(
       mapSessionVerificationErrors,
+      Effect.tap((session) =>
+        authorizeResourceTool(session.resourceGrant).pipe(
+          Effect.mapError(
+            (error) => new ServerAuthInvalidCredentialError({ diagnostic: error.message }),
+          ),
+        ),
+      ),
       Effect.flatMap((session) =>
         session.subject === MCP_CLIENT_SUBJECT && session.method === "bearer-access-token"
           ? Effect.succeed({
@@ -1438,6 +1446,13 @@ export const make = Effect.gen(function* () {
         ServerAuthScopeNotGrantedError: () =>
           Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "insufficient_scope" })),
       }),
+      Effect.tap((grant) =>
+        authorizeResourceTool(grant.resourceGrant, AuthAccessWriteScope).pipe(
+          Effect.mapError(
+            () => new ServerAuthMcpApprovalCodeError({ reason: "insufficient_scope" }),
+          ),
+        ),
+      ),
       Effect.flatMap((grant) =>
         grant.method !== "one-time-token" && grant.method !== "reusable-dev-token"
           ? Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "not_a_pairing_code" }))

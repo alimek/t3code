@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "./auth/ResourceAuthorization.ts";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Clock from "effect/Clock";
 import * as Random from "effect/Random";
@@ -516,7 +517,10 @@ const layerProviderInstallationRefresh = Layer.effectDiscard(
           Effect.flatMap((entries) =>
             Effect.forEach(
               entries.filter((instance) => instance.driverKind === state.driver),
-              (instance) => providers.refreshInstance(instance.instanceId),
+              (instance) =>
+                providers
+                  .refreshInstance(trustedReadAuthority, instance.instanceId)
+                  .pipe(Effect.orDie),
               { discard: true },
             ),
           ),

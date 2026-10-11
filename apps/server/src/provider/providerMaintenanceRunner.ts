@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import {
   defaultInstanceIdForDriver,
   ProviderDriverKind,
@@ -328,10 +329,13 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
       }),
       Effect.flatMap((instanceIds) =>
         instanceIds.length === 0
-          ? providerRegistry.refreshInstance(instanceId)
+          ? providerRegistry.refreshInstance(trustedReadAuthority, instanceId).pipe(Effect.orDie)
           : Effect.forEach(
               instanceIds,
-              (instanceId) => providerRegistry.refreshInstance(instanceId),
+              (instanceId) =>
+                providerRegistry
+                  .refreshInstance(trustedReadAuthority, instanceId)
+                  .pipe(Effect.orDie),
               {
                 concurrency: "unbounded",
                 discard: true,

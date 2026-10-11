@@ -1,3 +1,4 @@
+import { extraToolAuthority } from "../auth/ToolAuthorization.ts";
 import { AuthFilesystemReadScope, EnvironmentAuthorizationError } from "@t3tools/contracts";
 import * as WorkspaceReadAccess from "../auth/workspaceReadAccess.ts";
 import { trustedReadAuthority, type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
@@ -126,7 +127,7 @@ export const make = Effect.gen(function* () {
     if (grant === undefined || (grant.projects.mode === "all" && grant.providers.mode === "all"))
       yield* assertWorkspaceBoundCwd("ReviewService.getDiffPreview", input.cwd);
 
-    yield* access.admit(authority, input, AuthFilesystemReadScope);
+    yield* access.admit(extraToolAuthority(authority), input, AuthFilesystemReadScope);
     const handle = yield* vcsRegistry.detect({ cwd: input.cwd, requestedKind: "auto" });
     if (!handle) {
       return {
@@ -161,7 +162,7 @@ export const make = Effect.gen(function* () {
     if (grant === undefined || (grant.projects.mode === "all" && grant.providers.mode === "all"))
       yield* assertWorkspaceBoundCwd("ReviewService.getDiffFileContents", input.cwd);
 
-    yield* access.admit(authority, input, AuthFilesystemReadScope);
+    yield* access.admit(extraToolAuthority(authority), input, AuthFilesystemReadScope);
     const handle = yield* vcsRegistry.detect({ cwd: input.cwd, requestedKind: "auto" });
     if (handle?.kind !== "git") {
       return yield* new VcsUnsupportedOperationError({
@@ -177,9 +178,19 @@ export const make = Effect.gen(function* () {
 
   return ReviewService.of({
     getDiffPreview: (authority, input) =>
-      access.read(authority, input, getDiffPreview(authority, input), AuthFilesystemReadScope),
+      access.read(
+        extraToolAuthority(authority),
+        input,
+        getDiffPreview(authority, input),
+        AuthFilesystemReadScope,
+      ),
     getDiffFileContents: (authority, input) =>
-      access.read(authority, input, getDiffFileContents(authority, input), AuthFilesystemReadScope),
+      access.read(
+        extraToolAuthority(authority),
+        input,
+        getDiffFileContents(authority, input),
+        AuthFilesystemReadScope,
+      ),
   });
 });
 

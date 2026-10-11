@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../../../auth/ResourceAuthorization.ts";
 import { trustedMutationAuthority } from "../../../auth/CommandAuthorization.ts";
 import { MessageId, ThreadId, OrchestratorMcpFailure, ProjectId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -244,7 +245,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   t3_project_clone: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const repositories = yield* Repositories.SourceControlRepositoryService;
-      return yield* repositories.cloneRepository(input).pipe(
+      return yield* repositories.cloneRepository(trustedReadAuthority, input).pipe(
         Effect.mapError(
           (error) =>
             new OrchestratorMcpFailure({

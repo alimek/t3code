@@ -1,5 +1,8 @@
+import { authorizeExtraTool } from "../auth/ToolAuthorization.ts";
+import { trustedReadAuthority, type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
 import {
   requireUnrestrictedMutation,
+  trustedMutationAuthority,
   type MutationAuthority,
 } from "../auth/CommandAuthorization.ts";
 import type {
@@ -11,6 +14,7 @@ import type {
   SourceControlRepositoryInfo,
 } from "@t3tools/contracts";
 import {
+  AuthSourceControlWriteScope,
   OrchestrationDispatchCommandError,
   type EnvironmentAuthorizationError,
   PROJECT_CLONE_DETAIL_MAX_LENGTH,
@@ -78,9 +82,13 @@ export class ProjectCloneTracker extends Context.Service<
       | EnvironmentAuthorizationError
     >;
     /** Interrupts a running clone and deletes the partial checkout. */
-    readonly cancel: (projectId: ProjectId) => Effect.Effect<boolean>;
+    readonly cancel: (
+      authority: ThreadReadAuthority,
+      projectId: ProjectId,
+    ) => Effect.Effect<boolean, EnvironmentAuthorizationError>;
     /** Restarts a failed or cancelled clone into the same destination. */
     readonly retry: (
+      authority: ThreadReadAuthority,
       projectId: ProjectId,
     ) => Effect.Effect<boolean, SourceControlRepositoryError | EnvironmentAuthorizationError>;
     /**
@@ -123,6 +131,7 @@ function clampText(text: string, maxLength: number): string {
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 interface TrackedClone {
+  readonly authority: ThreadReadAuthority;
   readonly snapshot: ProjectCloneSnapshot;
   readonly fiber: Fiber.Fiber<unknown, unknown> | null;
   readonly hooks: ProjectCloneHooks;
@@ -247,6 +256,7 @@ export const make = Effect.gen(function* () {
   const runClone = (projectId: ProjectId, tracked: TrackedClone) =>
     repositories
       .cloneRepository(
+        tracked.authority,
         { remoteUrl: tracked.input.cloneUrl, destinationPath: tracked.input.destinationPath },
         { onProgress: (update) => progress(projectId, update), timeoutMs: null },
       )
@@ -284,7 +294,9 @@ export const make = Effect.gen(function* () {
   const start: ProjectCloneTracker["Service"]["start"] = Effect.fn("ProjectCloneTracker.start")(
     function* (authority, input, hooks) {
       yield* requireUnrestrictedMutation(authority);
-      const prepared = yield* repositories.prepareClone(input);
+      const readAuthority =
+        authority === trustedMutationAuthority ? trustedReadAuthority : authority;
+      const prepared = yield* repositories.prepareClone(readAuthority, input);
       const startedAt = yield* nowIso;
       const snapshot: ProjectCloneSnapshot = {
         projectId: input.projectId,
@@ -311,6 +323,7 @@ export const make = Effect.gen(function* () {
         if (conflict) return [false, current] as const;
         const next = new Map(current);
         next.set(input.projectId, {
+          authority: readAuthority,
           snapshot,
           fiber: null,
           hooks,
@@ -359,7 +372,7 @@ export const make = Effect.gen(function* () {
   const get: ProjectCloneTracker["Service"]["get"] = (projectId) =>
     Ref.get(clones).pipe(Effect.map((current) => current.get(projectId)?.snapshot ?? null));
 
-  const cancel: ProjectCloneTracker["Service"]["cancel"] = (projectId) =>
+  const cancel = (projectId: ProjectId) =>
     Effect.gen(function* () {
       const current = yield* Ref.get(clones);
       const tracked = current.get(projectId);
@@ -374,13 +387,15 @@ export const make = Effect.gen(function* () {
           if (after?.phase === "done") return;
           if (after?.phase === "running") yield* finish(projectId, "cancelled", null);
           // The partial checkout goes so a retry starts from an empty destination.
-          yield* repositories.discardClone(tracked.input.destinationPath).pipe(Effect.ignore);
+          yield* repositories
+            .discardClone(trustedReadAuthority, tracked.input.destinationPath)
+            .pipe(Effect.ignore);
         }),
       );
       return true;
     });
 
-  const retry: ProjectCloneTracker["Service"]["retry"] = (projectId) =>
+  const retry: ProjectCloneTracker["Service"]["retry"] = (authority, projectId) =>
     Effect.gen(function* () {
       const current = yield* Ref.get(clones);
       const tracked = current.get(projectId);
@@ -392,10 +407,11 @@ export const make = Effect.gen(function* () {
       }
       // A retry into leftover files would fail on the non-empty destination
       // with a less useful message, so a cleanup failure is the error here.
-      yield* repositories.discardClone(tracked.input.destinationPath);
+      yield* repositories.discardClone(authority, tracked.input.destinationPath);
       const startedAt = yield* nowIso;
       yield* modify(projectId, (entry) => ({
         ...entry,
+        authority,
         snapshot: {
           ...entry.snapshot,
           phase: "running",
@@ -421,7 +437,9 @@ export const make = Effect.gen(function* () {
       // is going away either way, but a complete checkout is the user's.
       const after = yield* get(projectId);
       if (after?.phase !== "done") {
-        yield* repositories.discardClone(tracked.input.destinationPath).pipe(Effect.ignore);
+        yield* repositories
+          .discardClone(trustedReadAuthority, tracked.input.destinationPath)
+          .pipe(Effect.ignore);
       }
       yield* clearRetention(projectId);
       yield* remove(projectId);
@@ -448,8 +466,18 @@ export const make = Effect.gen(function* () {
 
   return ProjectCloneTracker.of({
     start: (authority, input, hooks) => locked(start(authority, input, hooks)),
-    cancel: (projectId) => locked(cancel(projectId)),
-    retry: (projectId) => locked(retry(projectId)),
+    cancel: (authority, projectId) =>
+      locked(
+        authorizeExtraTool(authority, AuthSourceControlWriteScope).pipe(
+          Effect.andThen(cancel(projectId)),
+        ),
+      ),
+    retry: (authority, projectId) =>
+      locked(
+        authorizeExtraTool(authority, AuthSourceControlWriteScope).pipe(
+          Effect.andThen(retry(authority, projectId)),
+        ),
+      ),
     discard: (projectId) => locked(discard(projectId)),
     get,
     stream,

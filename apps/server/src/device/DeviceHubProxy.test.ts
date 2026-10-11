@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import {
+  AuthAllResourceGrant,
+  type AuthResourceGrant,
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
   AuthSessionId,
@@ -23,8 +25,10 @@ const fixture = (
   scopes: ReadonlyArray<AuthEnvironmentScope>,
   fail = false,
   authError?: EnvironmentAuth.ServerAuthCredentialError | EnvironmentAuth.ServerAuthInternalError,
+  resourceGrant?: AuthResourceGrant,
 ) => {
-  let finalized = 0;
+  let finalized = 0,
+    readiness = 0;
   const requests: string[] = [];
   const client = HttpClient.make((request, _url, signal) =>
     Effect.gen(function* () {
@@ -48,13 +52,17 @@ const fixture = (
                   subject: "test",
                   method: "bearer-access-token",
                   scopes,
+                  ...(resourceGrant === undefined ? {} : { resourceGrant }),
                 }),
         } as unknown as EnvironmentAuth.EnvironmentAuth["Service"]),
       ),
       Layer.provideMerge(
         Layer.succeed(DeviceService.DeviceService, {
           currentReadiness: () =>
-            Effect.succeed({ hostId: LOCAL_DEVICE_HOST_ID, hub: { origin: "http://hub.test" } }),
+            Effect.sync(() => {
+              readiness++;
+              return { hostId: LOCAL_DEVICE_HOST_ID, hub: { origin: "http://hub.test" } };
+            }),
         } as DeviceService.DeviceService["Service"]),
       ),
       Layer.provideMerge(Layer.succeed(HttpClient.HttpClient, client)),
@@ -70,7 +78,7 @@ const fixture = (
     { disableLogger: true },
   );
   disposers.push(dispose);
-  return { handler, requests, finalized: () => finalized };
+  return { handler, requests, finalized: () => finalized, readiness: () => readiness };
 };
 
 describe("device hub proxy", () => {
@@ -194,3 +202,38 @@ it.each(["/panel/2/stream.avcc", "/panel/1/webrtc/offer", "/panel/3/exec"])(
     expect(requests).toEqual([]);
   },
 );
+
+it.each(["GET", "HEAD", "POST"])(
+  "v1 denies restricted raw device %s before host/proxy effects",
+  async (method) => {
+    const f = fixture(
+      [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
+      false,
+      undefined,
+      { ...AuthAllResourceGrant, providers: { mode: "explicit", instances: [] } },
+    );
+    const response = await f.handler(
+      new Request(
+        `http://t3.test/api/device-hub/${method === "POST" ? "vendor/serve-emu/api/stream-settings" : "api/devices"}`,
+        { method },
+      ),
+    );
+    expect(response.status).toBe(403);
+    expect(f.readiness()).toBe(0);
+    expect(f.requests).toEqual([]);
+  },
+);
+it("v1 denies restricted raw device upgrades before host/socket effects", async () => {
+  const f = fixture([AuthOrchestrationReadScope, AuthOrchestrationOperateScope], false, undefined, {
+    ...AuthAllResourceGrant,
+    projects: { mode: "explicit", ids: [] },
+  });
+  const response = await f.handler(
+    new Request("http://t3.test/api/device-hub/api/devices/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+  );
+  expect(response.status).toBe(403);
+  expect(f.readiness()).toBe(0);
+  expect(f.requests).toEqual([]);
+});

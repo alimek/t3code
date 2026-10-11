@@ -1,3 +1,4 @@
+import { authorizeResourceTool } from "../auth/ToolAuthorization.ts";
 import {
   AuthOrchestrationReadScope,
   AuthSourceControlWriteScope,
@@ -428,6 +429,7 @@ const currentAccess = Effect.gen(function* () {
     return yield* denied();
   if (access.authority === trustedReadAuthority) return { ...access, grant: undefined };
   const current = yield* access.authority.current;
+  yield* authorizeResourceTool(current.resourceGrant, access.scope);
   if (!current.resourceGrant || !current.scopes.includes(access.scope))
     return yield* denied(access.scope);
   return { ...access, grant: current.resourceGrant };

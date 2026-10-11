@@ -1083,7 +1083,8 @@ const make = Effect.gen(function* () {
         (error) => error.code === "provider_unavailable",
         () =>
           providerRegistry
-            .refreshInstance(instanceId)
+            .refreshInstance(trustedReadAuthority, instanceId)
+            .pipe(Effect.orDie)
             .pipe(Effect.flatMap((providers) => resolveTarget({ ...input, providers }))),
       ),
     );

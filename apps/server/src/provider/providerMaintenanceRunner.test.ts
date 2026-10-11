@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { describe, it, assert } from "@effect/vitest";
 import {
   ProviderDriverKind,
@@ -627,8 +628,8 @@ describe("providerMaintenanceRunner", () => {
           ).pipe(
             Effect.tap(() => Effect.sync(() => assert.strictEqual(instanceId, personalInstanceId))),
           ),
-        refreshInstance: (instanceId) =>
-          registry.refreshInstance(instanceId).pipe(
+        refreshInstance: (_authority, instanceId) =>
+          registry.refreshInstance(trustedReadAuthority, instanceId).pipe(
             Effect.tap(() =>
               Effect.sync(() => {
                 refreshedInstanceIds.push(instanceId);

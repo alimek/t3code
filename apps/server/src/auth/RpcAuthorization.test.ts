@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "./ResourceAuthorization.ts";
 import {
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
@@ -238,7 +239,7 @@ describe("RPC scope middleware", () => {
             group.toLayerHandler(WS_METHODS.serverRetryResourceTelemetry, () =>
               Effect.sync(() => handled.push("retry")).pipe(Effect.andThen(Effect.never)),
             ),
-            RpcAuthorization.layer(scopes),
+            RpcAuthorization.layer(scopes, trustedReadAuthority),
           ),
         ),
       );
@@ -276,6 +277,7 @@ it.effect("rechecks authority before every RPC on an existing connection", () =>
           ),
           RpcAuthorization.layer(
             [AuthOrchestrationReadScope],
+            trustedReadAuthority,
             Ref.get(allowed).pipe(
               Effect.map((grant) => (grant ? [AuthOrchestrationReadScope] : [])),
             ),
@@ -319,7 +321,7 @@ describe("settings mutation authorization", () => {
                 return DEFAULT_SERVER_SETTINGS;
               }),
             ),
-            RpcAuthorization.layer([AuthProvidersManageScope]),
+            RpcAuthorization.layer([AuthProvidersManageScope], trustedReadAuthority),
           ),
         ),
       );
@@ -347,7 +349,7 @@ describe("settings mutation authorization", () => {
                 return DEFAULT_SERVER_SETTINGS;
               }),
             ),
-            RpcAuthorization.layer([AuthSettingsWriteScope]),
+            RpcAuthorization.layer([AuthSettingsWriteScope], trustedReadAuthority),
           ),
         ),
       );
@@ -383,7 +385,7 @@ it.effect("requires task permission before attaching a prepared worktree to a th
               handled = true;
             }).pipe(Effect.andThen(Effect.never)),
           ),
-          RpcAuthorization.layer([AuthSourceControlWriteScope]),
+          RpcAuthorization.layer([AuthSourceControlWriteScope], trustedReadAuthority),
         ),
       ),
     );
@@ -419,7 +421,7 @@ it.effect("separates host file URLs from readable attachment URLs", () =>
               return { relativeUrl: "/api/assets/file", expiresAt: 1 };
             }),
           ),
-          RpcAuthorization.layer([AuthOrchestrationReadScope]),
+          RpcAuthorization.layer([AuthOrchestrationReadScope], trustedReadAuthority),
         ),
       ),
     );

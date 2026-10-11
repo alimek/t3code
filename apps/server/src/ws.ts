@@ -1,3 +1,5 @@
+import { providerCatalog, restrictedServerConfig } from "./provider/ProviderCatalog.ts";
+import { authorizeExtraTool, resourceRestricted } from "./auth/ToolAuthorization.ts";
 import {
   type WorkspaceActionAdmission,
   recoverWorkspaceError,
@@ -1873,7 +1875,7 @@ const layerWsRpc = (
           baseUrl: input.baseUrl,
           ...(input.headers === undefined ? {} : { headers: input.headers }),
         });
-        yield* providerRegistry.refreshInstance(input.instanceId);
+        yield* providerRegistry.refreshInstance(readAuthority, input.instanceId);
         return { configured: true } as const;
       });
 
@@ -1909,7 +1911,7 @@ const layerWsRpc = (
           cwd: project.workspaceRoot,
           providerId: input.providerId,
         });
-        yield* providerRegistry.refreshInstance(input.instanceId);
+        yield* providerRegistry.refreshInstance(readAuthority, input.instanceId);
         return { disabled: true } as const;
       });
       const loadAuthAccessSnapshot = () =>
@@ -1927,6 +1929,17 @@ const layerWsRpc = (
 
       const loadServerConfig = (options: { readonly usageLimitsCommand: boolean }) =>
         Effect.gen(function* () {
+          const current = yield* readAuthority.current;
+          if (resourceRestricted(current.resourceGrant)) {
+            const environment = yield* serverEnvironment.getDescriptor;
+            const auth = yield* serverAuth.getDescriptor();
+            return restrictedServerConfig(
+              environment,
+              auth,
+              yield* providerCatalog(readAuthority, yield* providerRegistry.getProviders),
+            );
+          }
+          yield* authorizeExtraTool(readAuthority);
           const keybindingsConfig = yield* keybindings.loadConfigState;
           const currentProviders = yield* providerRegistry.getProviders;
           const providers = options.usageLimitsCommand
@@ -1943,6 +1956,7 @@ const layerWsRpc = (
             resolveFileManagerRevealKindForConfig(externalLauncher.resolveFileManagerRevealKind()),
           );
 
+          yield* authorizeExtraTool(readAuthority);
           return {
             environment,
             auth,
@@ -2412,16 +2426,26 @@ const layerWsRpc = (
                   );
                   yield* manager.logout(config.cwd);
                 }
-                yield* providerRegistry.refreshInstance(input.instanceId);
+                yield* providerRegistry.refreshInstance(readAuthority, input.instanceId);
                 return { loggedOut: true } as const;
               }),
             ),
           ),
         [WS_METHODS.serverRefreshProviders]: (input) =>
           Effect.gen(function* () {
+            const current = yield* readAuthority.current;
+            if (resourceRestricted(current.resourceGrant))
+              return {
+                providers: yield* providerCatalog(
+                  readAuthority,
+                  yield* providerRegistry.getProviders,
+                ),
+              };
+            yield* authorizeExtraTool(readAuthority);
             // Only explicit catalog refreshes bypass T3's caches. Workspace
             // discovery and background status checks retain their timers.
             if (input.refreshModels) {
+              yield* authorizeExtraTool(readAuthority);
               yield* modelManifest.forceRefresh;
               const instances = yield* providerInstances.listInstances;
               yield* Effect.forEach(
@@ -2431,7 +2455,9 @@ const layerWsRpc = (
                 ),
                 (instance) =>
                   Effect.gen(function* () {
+                    yield* authorizeExtraTool(readAuthority);
                     yield* instance.invalidateCaches ?? Effect.void;
+                    yield* authorizeExtraTool(readAuthority);
                     const maintenance = yield* instance.snapshot.resolveMaintenance({
                       fresh: true,
                     });
@@ -2446,17 +2472,19 @@ const layerWsRpc = (
             // not forked: the RPC scope closes on return and would
             // interrupt a fork before the hub answered.
             if (input.instanceId === undefined) {
+              yield* authorizeExtraTool(readAuthority);
               yield* usageLimitSources.refresh;
             }
+            yield* authorizeExtraTool(readAuthority);
             let providers = yield* input.cwd !== undefined && input.instanceId !== undefined
-              ? providerRegistry.refreshWorkspaceSnapshot({
+              ? providerRegistry.refreshWorkspaceSnapshot(readAuthority, {
                   instanceId: input.instanceId,
                   cwd: input.cwd,
                   fresh: input.fresh === true,
                 })
               : input.instanceId !== undefined
-                ? providerRegistry.refreshInstance(input.instanceId)
-                : providerRegistry.refresh();
+                ? providerRegistry.refreshInstance(readAuthority, input.instanceId)
+                : providerRegistry.refresh(readAuthority);
             if (input.refreshModels) {
               const instances = yield* providerInstances.listInstances;
               for (const instance of instances) {
@@ -2471,6 +2499,7 @@ const layerWsRpc = (
                   )
                 )
                   continue;
+                yield* authorizeExtraTool(readAuthority);
                 yield* instance.refreshModels().pipe(
                   Effect.mapError(
                     (error) =>
@@ -2481,9 +2510,14 @@ const layerWsRpc = (
                       }),
                   ),
                 );
-                providers = yield* providerRegistry.refreshInstance(instance.instanceId);
+                yield* authorizeExtraTool(readAuthority);
+                providers = yield* providerRegistry.refreshInstance(
+                  readAuthority,
+                  instance.instanceId,
+                );
               }
             }
+            yield* authorizeExtraTool(readAuthority);
             return { providers };
           }),
         [WS_METHODS.mcpAppsCallTool]: (input) => mcpAppRequests.callTool(input),
@@ -2825,9 +2859,9 @@ const layerWsRpc = (
             AuthSourceControlWriteScope,
           ),
         [WS_METHODS.sourceControlLookupRepository]: (input) =>
-          sourceControlRepositories.lookupRepository(input),
+          sourceControlRepositories.lookupRepository(readAuthority, input),
         [WS_METHODS.sourceControlCloneRepository]: (input) =>
-          sourceControlRepositories.cloneRepository(input),
+          sourceControlRepositories.cloneRepository(readAuthority, input),
         [WS_METHODS.projectCloneStart]: (input) =>
           projectCloneTracker.start(mutationAuthority, input, {
             createProject: (project) =>
@@ -2883,9 +2917,13 @@ const layerWsRpc = (
               ),
             ),
         [WS_METHODS.projectCloneCancel]: (input) =>
-          projectCloneTracker.cancel(input.projectId).pipe(Effect.map((applied) => ({ applied }))),
+          projectCloneTracker
+            .cancel(readAuthority, input.projectId)
+            .pipe(Effect.map((applied) => ({ applied }))),
         [WS_METHODS.projectCloneRetry]: (input) =>
-          projectCloneTracker.retry(input.projectId).pipe(Effect.map((applied) => ({ applied }))),
+          projectCloneTracker
+            .retry(readAuthority, input.projectId)
+            .pipe(Effect.map((applied) => ({ applied }))),
         [WS_METHODS.subscribeProjectClones]: () =>
           Stream.unwrap(
             collectionAuthority.pipe(
@@ -3241,6 +3279,26 @@ const layerWsRpc = (
             Effect.gen(function* () {
               const usageLimitsCommand = input.usageLimitsCommand === true;
               const config = yield* loadServerConfig({ usageLimitsCommand });
+              if (resourceRestricted((yield* readAuthority.current).resourceGrant))
+                return Stream.concat(
+                  Stream.fromEffect(
+                    providerCatalog(readAuthority, config.providers).pipe(
+                      Effect.map((providers) => ({
+                        version: 1 as const,
+                        type: "snapshot" as const,
+                        config: restrictedServerConfig(config.environment, config.auth, providers),
+                      })),
+                    ),
+                  ),
+                  providerRegistry.streamChanges.pipe(
+                    Stream.mapEffect((providers) => providerCatalog(readAuthority, providers)),
+                    Stream.map((providers) => ({
+                      version: 1 as const,
+                      type: "providerStatuses" as const,
+                      payload: { providers },
+                    })),
+                  ),
+                );
               const keybindingsUpdates = keybindings.streamChanges.pipe(
                 Stream.map((event) => ({
                   version: 1 as const,
@@ -3335,7 +3393,7 @@ const layerWsRpc = (
               return Stream.concat(
                 rpcInitialItems([{ version: 1 as const, type: "snapshot" as const, config }]),
                 withLateEditorConfig(config, liveUpdates, externalLauncher),
-              );
+              ).pipe(Stream.tap(() => authorizeExtraTool(readAuthority)));
             }),
           ),
         [WS_METHODS.subscribeServerLifecycle]: (_input) =>
@@ -3469,6 +3527,15 @@ export const layer = Layer.unwrap(
                     Layer.merge(
                       RpcAuthorization.layer(
                         session.scopes,
+                        {
+                          current: sessions
+                            .getAuthority(session.sessionId, session)
+                            .pipe(
+                              Effect.mapError(() =>
+                                rpcAuthorizationError(AuthOrchestrationReadScope),
+                              ),
+                            ),
+                        },
                         sessions.getAuthority(session.sessionId, session).pipe(
                           Effect.map((authority) => authority.scopes),
                           Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationReadScope)),

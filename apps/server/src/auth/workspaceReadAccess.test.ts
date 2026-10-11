@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
+  AuthAllResourceGrant,
   AuthFilesystemReadScope,
   AuthOrchestrationReadScope,
   type AuthEnvironmentScope,
@@ -197,6 +198,9 @@ it.effect(
           >
         > = [
           f.workflow.isRepository(f.authority, cwd),
+          f.workflow.invalidateStatus(f.authority, cwd),
+          f.workflow.invalidateLocalStatus(f.authority, cwd),
+          f.workflow.invalidateRemoteStatus(f.authority, cwd),
           f.workflow.hasCommit(f.authority, { ...input, refName: "HEAD" }),
           f.workflow.status(f.authority, input),
           f.workflow.localStatus(f.authority, input),
@@ -325,7 +329,7 @@ it.effect("malformed raw roots and hidden thread bodies cannot supply workspace 
     const f = yield* fixture;
     const access = yield* Access.make;
     yield* f.sql`UPDATE orchestration_v2_projection_threads SET payload_json = 'invalid json' WHERE thread_id = ${activeB}`;
-    yield* f.workflow.localStatus(f.authority, { cwd: f.a });
+    yield* denied(f.workflow.localStatus(f.authority, { cwd: f.a }));
     for (const root of ["relative/path", "/", `${f.a}/../a`, `${f.a}\0bad`]) {
       yield* f.sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectA}`;
       yield* denied(access.admit(f.authority, { cwd: f.worktree, threadId: activeA }));
@@ -387,53 +391,41 @@ it.effect(
     }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect(
-  "setup and VCS streams re-admit each emission and deny hidden subscriptions before poller creation",
-  () =>
-    Effect.gen(function* () {
-      const f = yield* fixture;
-      yield* f.tracker.begin({
-        threadId: activeA,
-        branch: null,
-        baseRef: null,
-        stages: ["agent"],
-        fiber: null,
-      });
-      const setupFirst = yield* Deferred.make<void>();
-      const vcsFirst = yield* Deferred.make<void>();
-      let setups = 0,
-        statuses = 0;
-      const setupReader = yield* denied(
-        f.tracker.stream(f.authority, activeA).pipe(
-          Stream.tap(() =>
-            Effect.sync(() => {
-              setups++;
-            }).pipe(Effect.andThen(Deferred.succeed(setupFirst, undefined))),
-          ),
-          Stream.runDrain,
+it.effect("v1 keeps restricted setup history but denies VCS streams before poller creation", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    yield* f.tracker.begin({
+      threadId: activeA,
+      branch: null,
+      baseRef: null,
+      stages: ["agent"],
+      fiber: null,
+    });
+    const setupFirst = yield* Deferred.make<void>();
+    let setups = 0;
+    const setupReader = yield* denied(
+      f.tracker.stream(f.authority, activeA).pipe(
+        Stream.tap(() =>
+          Effect.sync(() => {
+            setups++;
+          }).pipe(Effect.andThen(Deferred.succeed(setupFirst, undefined))),
         ),
-      ).pipe(Effect.forkScoped);
-      const vcsReader = yield* denied(
-        f.broadcaster.streamStatus(f.authority, { cwd: f.a, includeRemote: false }).pipe(
-          Stream.tap(() =>
-            Effect.sync(() => {
-              statuses++;
-            }).pipe(Effect.andThen(Deferred.succeed(vcsFirst, undefined))),
-          ),
-          Stream.runDrain,
-        ),
-      ).pipe(Effect.forkScoped);
-      yield* Deferred.await(setupFirst);
-      yield* Deferred.await(vcsFirst);
-      f.set(grantNone);
-      yield* f.tracker.stageStatus(activeA, "agent", "running");
-      yield* f.broadcaster.refreshStatus(trustedReadAuthority, f.a);
-      yield* Fiber.join(setupReader);
-      yield* Fiber.join(vcsReader);
-      expect(setups).toBe(1);
-      expect(statuses).toBe(1);
-      expect(f.calls.filter((call) => call === "policy")).toEqual([]);
-    }).pipe(Effect.provide(testLayer)),
+        Stream.runDrain,
+      ),
+    ).pipe(Effect.forkScoped);
+    yield* denied(
+      f.broadcaster
+        .streamStatus(f.authority, { cwd: f.a, includeRemote: false })
+        .pipe(Stream.runDrain),
+    );
+    yield* Deferred.await(setupFirst);
+    f.set(grantNone);
+    yield* f.tracker.stageStatus(activeA, "agent", "running");
+    yield* f.broadcaster.refreshStatus(trustedReadAuthority, f.a);
+    yield* Fiber.join(setupReader);
+    expect(setups).toBe(1);
+    expect(f.calls.filter((call) => call === "policy")).toEqual([]);
+  }).pipe(Effect.provide(testLayer)),
 );
 
 it.effect("ancestor repository fallback is denied before actual Git routing", () =>
@@ -447,7 +439,7 @@ it.effect("ancestor repository fallback is denied before actual Git routing", ()
     expect(f.calls).toEqual([]);
     // A's own repository marker prevents discovery from falling into the ancestor.
     yield* f.fs.makeDirectory(`${f.a}/.git`);
-    f.set();
+    f.set(AuthAllResourceGrant);
     yield* f.workflow.localStatus(f.authority, { cwd: f.child });
     expect(f.calls).toEqual([`detect:${f.child}`]);
   }).pipe(Effect.provide(testLayer)),
@@ -485,6 +477,7 @@ it.effect(
       const workflow = yield* GitWorkflow.make.pipe(
         Effect.provide(Layer.mergeAll(routing, driver, Layer.mock(GitManager.GitManager)({}))),
       );
+      f.set(AuthAllResourceGrant);
       const reader = yield* denied(workflow.listLocalBranchNames(f.authority, f.a)).pipe(
         Effect.forkScoped,
       );
@@ -493,7 +486,7 @@ it.effect(
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(reader);
       expect(gitReads).toBe(0);
-      f.set();
+      f.set(AuthAllResourceGrant);
       expect(yield* workflow.listLocalBranchNames(f.authority, f.child)).toEqual(["main"]);
       const review = yield* Review.make.pipe(
         Effect.provide(
@@ -505,7 +498,7 @@ it.effect(
           ),
         ),
       );
-      f.set(grantA, [AuthFilesystemReadScope]);
+      f.set(AuthAllResourceGrant, [AuthFilesystemReadScope]);
       expect(
         yield* review.getDiffFileContents(f.authority, {
           cwd: f.worktree,
@@ -562,6 +555,7 @@ it.effect(
         }),
       );
       expect(f.calls).toEqual([]);
+      f.set(AuthAllResourceGrant, [AuthFilesystemReadScope]);
       expect(
         (yield* handlers[WS_METHODS.reviewGetDiffPreview]({ cwd: f.worktree })).sources,
       ).toEqual([]);

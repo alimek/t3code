@@ -1,6 +1,10 @@
+import { authorizeExtraTool } from "../auth/ToolAuthorization.ts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { trustedMutationAuthority, type MutationAuthority } from "../auth/CommandAuthorization.ts";
 import { describe, expect, it } from "@effect/vitest";
 import {
+  AuthSourceControlWriteScope,
+  AuthResourceGrant,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthAllResourceGrant,
@@ -52,7 +56,7 @@ it.effect("filters clone snapshot and live collection paths and remote metadata"
         Effect.forkChild,
       );
       yield* Deferred.await(ready);
-      yield* tracker.cancel(projectB);
+      yield* tracker.cancel(trustedReadAuthority, projectB);
       const snapshots = yield* Fiber.join(fiber);
       expect(snapshots.map((clones) => clones.map((clone) => clone.projectId))).toEqual([
         [projectA],
@@ -96,7 +100,7 @@ function makeHarness(options?: {
   const layer = ProjectCloneTracker.layer.pipe(
     Layer.provide(
       Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
-        prepareClone: (input) =>
+        prepareClone: (_authority, input) =>
           Effect.sync(() => {
             prepared.push(input.destinationPath);
             return {
@@ -108,13 +112,14 @@ function makeHarness(options?: {
           }),
         cloneRepository:
           options?.clone ??
-          ((input) =>
+          ((_authority, input) =>
             Effect.succeed({
               cwd: input.destinationPath,
               remoteUrl: input.remoteUrl ?? "",
               repository: null,
             })),
-        discardClone: (destination) => Effect.sync(() => void discarded.push(destination)),
+        discardClone: (_authority, destination) =>
+          Effect.sync(() => void discarded.push(destination)),
       }),
     ),
   );
@@ -125,7 +130,7 @@ describe("ProjectCloneTracker", () => {
   it.effect("creates the project first and reports the clone through the stream", () => {
     const release = Deferred.makeUnsafe<void>();
     const harness = makeHarness({
-      clone: (input, options) =>
+      clone: (_authority, input, options) =>
         Effect.gen(function* () {
           yield* (
             options?.onProgress?.({ stage: "receiving", percent: 40, detail: "1 MiB" }) ??
@@ -168,7 +173,7 @@ describe("ProjectCloneTracker", () => {
   it.effect("keeps a failed clone with git's own explanation and retries it", () => {
     let attempts = 0;
     const harness = makeHarness({
-      clone: (input) =>
+      clone: (_authority, input) =>
         Effect.suspend(() => {
           attempts += 1;
           return attempts === 1
@@ -193,7 +198,7 @@ describe("ProjectCloneTracker", () => {
       const failed = yield* tracker.get(projectId);
       expect(failed).toMatchObject({ phase: "failed", error: "fatal: repository not found" });
 
-      expect(yield* tracker.retry(projectId)).toBe(true);
+      expect(yield* tracker.retry(trustedReadAuthority, projectId)).toBe(true);
       // The partial checkout is cleared so git sees an empty destination.
       expect(harness.discarded).toEqual(["/workspace/t3code"]);
       yield* Effect.yieldNow;
@@ -209,12 +214,12 @@ describe("ProjectCloneTracker", () => {
       yield* tracker.start(trustedMutationAuthority, startInput, harness.hooks);
       yield* Effect.yieldNow;
 
-      expect(yield* tracker.cancel(projectId)).toBe(true);
+      expect(yield* tracker.cancel(trustedReadAuthority, projectId)).toBe(true);
       expect((yield* tracker.get(projectId))?.phase).toBe("cancelled");
       expect(harness.discarded).toEqual(["/workspace/t3code"]);
       // Nothing left to cancel; retry is what brings it back.
-      expect(yield* tracker.cancel(projectId)).toBe(false);
-      expect(yield* tracker.retry(projectId)).toBe(true);
+      expect(yield* tracker.cancel(trustedReadAuthority, projectId)).toBe(false);
+      expect(yield* tracker.retry(trustedReadAuthority, projectId)).toBe(true);
     }).pipe(Effect.provide(harness.layer));
   });
 
@@ -231,7 +236,7 @@ describe("ProjectCloneTracker", () => {
       yield* tracker.start(trustedMutationAuthority, startInput, hooks);
       yield* Effect.yieldNow;
       expect((yield* tracker.get(projectId))?.phase).toBe("done");
-      expect(yield* tracker.cancel(projectId)).toBe(false);
+      expect(yield* tracker.cancel(trustedReadAuthority, projectId)).toBe(false);
       expect(harness.discarded).toEqual([]);
       yield* Deferred.succeed(gate, undefined);
     }).pipe(Effect.provide(harness.layer));
@@ -240,7 +245,7 @@ describe("ProjectCloneTracker", () => {
   it.effect("hands git the credential-bearing URL while snapshots carry the redacted one", () => {
     const cloneUrls: Array<string> = [];
     const harness = makeHarness({
-      clone: (input) =>
+      clone: (_authority, input) =>
         Effect.sync(() => {
           cloneUrls.push(input.remoteUrl ?? "");
           return { cwd: input.destinationPath, remoteUrl: "", repository: null };
@@ -249,14 +254,14 @@ describe("ProjectCloneTracker", () => {
     const layer = ProjectCloneTracker.layer.pipe(
       Layer.provide(
         Layer.mock(SourceControlRepositoryService.SourceControlRepositoryService)({
-          prepareClone: (input) =>
+          prepareClone: (_authority, input) =>
             Effect.succeed({
               destinationPath: input.destinationPath,
               remoteUrl: "https://github.com/octocat/t3code.git",
               cloneUrl: "https://user:s3cret@github.com/octocat/t3code.git",
               repository: null,
             }),
-          cloneRepository: (input) =>
+          cloneRepository: (_authority, input) =>
             Effect.sync(() => {
               cloneUrls.push(input.remoteUrl ?? "");
               return { cwd: input.destinationPath, remoteUrl: "", repository: null };
@@ -384,4 +389,56 @@ it.effect(
       expect(yield* tracker.get(projectId)).toBeNull();
     }).pipe(Effect.provide(harness.layer), Effect.scoped);
   },
+);
+
+it.effect(
+  "v1 clone carries current authority into detached work and denies restricted retry/cancel",
+  () =>
+    Effect.gen(function* () {
+      const reached = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const completed = yield* Deferred.make<void>();
+      let grant: AuthResourceGrant = AuthAllResourceGrant;
+      let effects = 0;
+      const authority: MutationAuthority = {
+        current: Effect.sync(() => ({
+          resourceGrant: grant,
+          scopes: [AuthSourceControlWriteScope, AuthOrchestrationOperateScope],
+        })),
+      };
+      const harness = makeHarness({
+        clone: (current, input) =>
+          Deferred.succeed(reached, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+            Effect.andThen(authorizeExtraTool(current, AuthSourceControlWriteScope)),
+            Effect.andThen(
+              Effect.sync(() => {
+                effects++;
+                return {
+                  cwd: input.destinationPath,
+                  remoteUrl: input.remoteUrl ?? "",
+                  repository: null,
+                };
+              }),
+            ),
+            Effect.ensuring(Deferred.succeed(completed, undefined)),
+          ),
+      });
+      yield* Effect.gen(function* () {
+        const tracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+        yield* tracker.start(authority, startInput, harness.hooks);
+        yield* Deferred.await(reached);
+        grant = grantA;
+        yield* Deferred.succeed(release, undefined);
+        yield* Deferred.await(completed);
+        expect(effects).toBe(0);
+        expect(yield* tracker.retry(authority, projectId).pipe(Effect.flip)).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+        });
+        expect(yield* tracker.cancel(authority, projectId).pipe(Effect.flip)).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+        });
+        expect(harness.discarded).toEqual([]);
+      }).pipe(Effect.provide(harness.layer));
+    }).pipe(Effect.scoped),
 );

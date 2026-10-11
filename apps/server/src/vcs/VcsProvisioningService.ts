@@ -1,3 +1,4 @@
+import { extraToolAuthority } from "../auth/ToolAuthorization.ts";
 import { EnvironmentAuthorizationError, AuthSourceControlWriteScope } from "@t3tools/contracts";
 import type { ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as WorkspaceReadAccess from "../auth/workspaceReadAccess.ts";
@@ -59,7 +60,7 @@ export const make = Effect.gen(function* () {
   return VcsProvisioningService.of({
     initRepository: (authority, input, afterSuccess) =>
       access.run(
-        authority,
+        extraToolAuthority(authority),
         input,
         initRepository(authority, input),
         AuthSourceControlWriteScope,

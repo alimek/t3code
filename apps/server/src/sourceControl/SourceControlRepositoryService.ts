@@ -1,5 +1,10 @@
+import { authorizeExtraTool, extraToolAuthority } from "../auth/ToolAuthorization.ts";
 import { recoverWorkspaceError } from "../auth/workspaceReadAccess.ts";
-import { EnvironmentAuthorizationError, AuthSourceControlWriteScope } from "@t3tools/contracts";
+import {
+  EnvironmentAuthorizationError,
+  AuthSourceControlWriteScope,
+  AuthOrchestrationReadScope,
+} from "@t3tools/contracts";
 import type { ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as WorkspaceReadAccess from "../auth/workspaceReadAccess.ts";
 import * as Context from "effect/Context";
@@ -43,6 +48,7 @@ export class SourceControlRepositoryService extends Context.Service<
   SourceControlRepositoryService,
   {
     readonly lookupRepository: (
+      authority: ThreadReadAuthority,
       input: SourceControlRepositoryLookupInput,
     ) => Effect.Effect<
       SourceControlRepositoryInfo,
@@ -54,12 +60,14 @@ export class SourceControlRepositoryService extends Context.Service<
      * Lets a caller create the project first and clone afterwards.
      */
     readonly prepareClone: (
+      authority: ThreadReadAuthority,
       input: SourceControlCloneRepositoryInput,
     ) => Effect.Effect<
       SourceControlPreparedClone,
       SourceControlRepositoryError | EnvironmentAuthorizationError
     >;
     readonly cloneRepository: (
+      authority: ThreadReadAuthority,
       input: SourceControlCloneRepositoryInput,
       options?: SourceControlCloneOptions,
     ) => Effect.Effect<
@@ -68,6 +76,7 @@ export class SourceControlRepositoryService extends Context.Service<
     >;
     /** Removes a partial or failed clone so the destination is empty again. */
     readonly discardClone: (
+      authority: ThreadReadAuthority,
       destinationPath: string,
     ) => Effect.Effect<void, SourceControlRepositoryError | EnvironmentAuthorizationError>;
     readonly publishRepository: (
@@ -209,13 +218,16 @@ export const make = Effect.gen(function* () {
   };
 
   const lookupRepository = Effect.fn("SourceControlRepositoryService.lookupRepository")(function* (
+    authority: ThreadReadAuthority,
     input: SourceControlRepositoryLookupInput,
+    scope = AuthOrchestrationReadScope,
   ) {
     const providerKind = yield* ensureConcreteProvider({
       operation: "lookupRepository",
       provider: input.provider,
     });
     const provider = yield* providers.get(providerKind);
+    yield* authorizeExtraTool(authority, scope);
     const urls = yield* provider.getRepositoryCloneUrls({
       cwd: input.cwd ?? config.cwd,
       repository: input.repository.trim(),
@@ -239,7 +251,8 @@ export const make = Effect.gen(function* () {
   );
 
   const prepareDestination = Effect.fn("SourceControlRepositoryService.prepareDestination")(
-    function* (destinationPath: string) {
+    function* (authority: ThreadReadAuthority, destinationPath: string) {
+      yield* authorizeExtraTool(authority, AuthSourceControlWriteScope);
       const normalizedDestination = yield* normalizeDestinationPath(destinationPath);
       if (yield* fileSystem.exists(normalizedDestination)) {
         const entries = yield* fileSystem
@@ -263,6 +276,7 @@ export const make = Effect.gen(function* () {
           });
         }
       } else {
+        yield* authorizeExtraTool(authority, AuthSourceControlWriteScope);
         yield* fileSystem.makeDirectory(path.dirname(normalizedDestination), { recursive: true });
       }
 
@@ -275,19 +289,24 @@ export const make = Effect.gen(function* () {
   );
 
   const prepareClone = Effect.fn("SourceControlRepositoryService.prepareClone")(function* (
+    authority: ThreadReadAuthority,
     input: SourceControlCloneRepositoryInput,
   ) {
-    const preparedDestination = yield* prepareDestination(input.destinationPath);
+    const preparedDestination = yield* prepareDestination(authority, input.destinationPath);
     let repository: SourceControlRepositoryInfo | null = null;
     let remoteUrl = input.remoteUrl?.trim() ?? null;
     let provider: SourceControlProviderKind = input.provider ?? "unknown";
 
     if (input.provider && input.repository) {
-      repository = yield* lookupRepository({
-        provider: input.provider,
-        repository: input.repository,
-        cwd: preparedDestination.parentPath,
-      });
+      repository = yield* lookupRepository(
+        authority,
+        {
+          provider: input.provider,
+          repository: input.repository,
+          cwd: preparedDestination.parentPath,
+        },
+        AuthSourceControlWriteScope,
+      );
       remoteUrl = selectRemoteUrl(repository, input.protocol);
       provider = input.provider;
     }
@@ -309,10 +328,11 @@ export const make = Effect.gen(function* () {
   });
 
   const cloneRepository = Effect.fn("SourceControlRepositoryService.cloneRepository")(function* (
+    authority: ThreadReadAuthority,
     input: SourceControlCloneRepositoryInput,
     options?: SourceControlCloneOptions,
   ) {
-    const prepared = yield* prepareClone(input);
+    const prepared = yield* prepareClone(authority, input);
     const onProgress = options?.onProgress;
     // Git interleaves progress redraws with its real messages on stderr. The
     // last non-progress lines are what explain a failure ("Repository not
@@ -329,6 +349,7 @@ export const make = Effect.gen(function* () {
         if (stderrTail.length > 4) stderrTail.shift();
       });
     };
+    yield* authorizeExtraTool(authority, AuthSourceControlWriteScope);
     yield* git
       .execute({
         operation: "SourceControlRepositoryService.cloneRepository",
@@ -373,6 +394,7 @@ export const make = Effect.gen(function* () {
   });
 
   const discardClone = Effect.fn("SourceControlRepositoryService.discardClone")(function* (
+    authority: ThreadReadAuthority,
     destinationPath: string,
   ) {
     const normalized = yield* normalizeDestinationPath(destinationPath);
@@ -386,14 +408,15 @@ export const make = Effect.gen(function* () {
         (cause) => cause.reason._tag === "NotFound",
         () => Effect.succeed<ReadonlyArray<string>>([]),
       ),
-      Effect.mapError(
-        (cause) =>
-          new SourceControlRepositoryError({
-            operation: "discardClone",
-            provider: "unknown",
-            detail: "The clone destination could not be inspected.",
-            cause,
-          }),
+      Effect.mapError((cause) =>
+        isEnvironmentAuthorizationError(cause)
+          ? cause
+          : new SourceControlRepositoryError({
+              operation: "discardClone",
+              provider: "unknown",
+              detail: "The clone destination could not be inspected.",
+              cause,
+            }),
       ),
     );
     if (entries.length > 0 && !entries.includes(".git")) {
@@ -406,17 +429,24 @@ export const make = Effect.gen(function* () {
     // The directory itself is the project's workspace root and must stay;
     // only git's partial contents go. An interrupted git may still be closing
     // files, so removal retries briefly.
-    yield* fileSystem.remove(normalized, { recursive: true, force: true }).pipe(
+    yield* authorizeExtraTool(authority, AuthSourceControlWriteScope).pipe(
+      Effect.andThen(fileSystem.remove(normalized, { recursive: true, force: true })),
+      Effect.andThen(authorizeExtraTool(authority, AuthSourceControlWriteScope)),
       Effect.andThen(fileSystem.makeDirectory(normalized, { recursive: true })),
-      Effect.retry({ schedule: Schedule.spaced("200 millis"), times: 5 }),
-      Effect.mapError(
-        (cause) =>
-          new SourceControlRepositoryError({
-            operation: "discardClone",
-            provider: "unknown",
-            detail: "The partial clone could not be removed.",
-            cause,
-          }),
+      Effect.retry({
+        schedule: Schedule.spaced("200 millis"),
+        times: 5,
+        while: (error) => !isEnvironmentAuthorizationError(error),
+      }),
+      Effect.mapError((cause) =>
+        isEnvironmentAuthorizationError(cause)
+          ? cause
+          : new SourceControlRepositoryError({
+              operation: "discardClone",
+              provider: "unknown",
+              detail: "The partial clone could not be removed.",
+              cause,
+            }),
       ),
     );
   });
@@ -482,19 +512,29 @@ export const make = Effect.gen(function* () {
   );
 
   return SourceControlRepositoryService.of({
-    lookupRepository: (input) =>
-      lookupRepository(input).pipe(mapRepositoryError("lookupRepository", input.provider)),
-    prepareClone: (input) =>
-      prepareClone(input).pipe(mapRepositoryError("cloneRepository", input.provider ?? "unknown")),
-    cloneRepository: (input, options) =>
-      cloneRepository(input, options).pipe(
+    lookupRepository: (authority, input) =>
+      authorizeExtraTool(authority, AuthOrchestrationReadScope).pipe(
+        Effect.andThen(lookupRepository(authority, input)),
+        mapRepositoryError("lookupRepository", input.provider),
+      ),
+    prepareClone: (authority, input) =>
+      authorizeExtraTool(authority, AuthSourceControlWriteScope).pipe(
+        Effect.andThen(prepareClone(authority, input)),
         mapRepositoryError("cloneRepository", input.provider ?? "unknown"),
       ),
-    discardClone: (destinationPath) =>
-      discardClone(destinationPath).pipe(mapRepositoryError("discardClone", "unknown")),
+    cloneRepository: (authority, input, options) =>
+      authorizeExtraTool(authority, AuthSourceControlWriteScope).pipe(
+        Effect.andThen(cloneRepository(authority, input, options)),
+        mapRepositoryError("cloneRepository", input.provider ?? "unknown"),
+      ),
+    discardClone: (authority, destinationPath) =>
+      authorizeExtraTool(authority, AuthSourceControlWriteScope).pipe(
+        Effect.andThen(discardClone(authority, destinationPath)),
+        mapRepositoryError("discardClone", "unknown"),
+      ),
     publishRepository: (authority, input, afterSuccess) =>
       access.run(
-        authority,
+        extraToolAuthority(authority),
         input,
         publishRepository(input).pipe(mapRepositoryError("publishRepository", input.provider)),
         AuthSourceControlWriteScope,

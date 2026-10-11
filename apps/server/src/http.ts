@@ -1,3 +1,4 @@
+import { authorizeResourceTool } from "./auth/ToolAuthorization.ts";
 import * as Mime from "effect/http/Mime";
 import {
   AuthOrchestrationOperateScope,
@@ -291,6 +292,11 @@ const authenticateRawRouteWithScope = (
       Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
         failEnvironmentInternal("internal_error", error),
       ),
+    );
+    yield* authorizeResourceTool(session.resourceGrant, scope).pipe(
+      Effect.catchTags({
+        EnvironmentAuthorizationError: () => failEnvironmentScopeRequired(scope),
+      }),
     );
     if (!session.scopes.includes(scope)) {
       return yield* failEnvironmentScopeRequired(scope);

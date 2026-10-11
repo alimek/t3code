@@ -1,8 +1,8 @@
-import { collectionStoreLayer } from "../orchestration-v2/projectCollectionTestFixtures.ts";
+import { collectionStoreLayer, grantA } from "../orchestration-v2/projectCollectionTestFixtures.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -116,7 +116,7 @@ it.effect("looks up repositories through the requested provider without search",
 
   return Effect.gen(function* () {
     const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
-    const result = yield* service.lookupRepository({
+    const result = yield* service.lookupRepository(trustedReadAuthority, {
       provider: "github",
       repository: "octocat/t3code",
       cwd: "/workspace",
@@ -142,7 +142,7 @@ it.effect("preserves provider failures without deriving the repository message f
   return Effect.gen(function* () {
     const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
     const error = yield* Effect.flip(
-      service.lookupRepository({
+      service.lookupRepository(trustedReadAuthority, {
         provider: "github",
         repository: "octocat/t3code",
         cwd: "/workspace",
@@ -185,7 +185,7 @@ it.effect(
           cwd: "/workspace",
         };
         for (const operation of [
-          service.lookupRepository(input).pipe(Effect.asVoid),
+          service.lookupRepository(trustedReadAuthority, input).pipe(Effect.asVoid),
           service
             .publishRepository(trustedReadAuthority, { ...input, visibility: "private" })
             .pipe(Effect.asVoid),
@@ -231,7 +231,10 @@ it.effect("keeps a plain Bitbucket locator lookalike out of the repository messa
   return Effect.gen(function* () {
     const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
     const error = yield* Effect.flip(
-      service.lookupRepository({ provider: "bitbucket", repository: "t3code" }),
+      service.lookupRepository(trustedReadAuthority, {
+        provider: "bitbucket",
+        repository: "t3code",
+      }),
     );
     if (error._tag === "EnvironmentAuthorizationError") throw error;
 
@@ -257,7 +260,7 @@ it.effect("keeps arbitrary Bitbucket request failures out of the repository mess
     yield* Effect.gen(function* () {
       const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
       const error = yield* Effect.flip(
-        service.lookupRepository({
+        service.lookupRepository(trustedReadAuthority, {
           provider: "bitbucket",
           repository: "pingdotgg/t3code",
           cwd: "/workspace",
@@ -284,7 +287,7 @@ it.effect("clones a looked-up repository into the requested destination", () =>
 
     yield* Effect.gen(function* () {
       const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
-      const result = yield* service.cloneRepository({
+      const result = yield* service.cloneRepository(trustedReadAuthority, {
         provider: "github",
         repository: "octocat/t3code",
         destinationPath,
@@ -334,7 +337,7 @@ it.effect.each(["--bare", "source.git"])(
       const destinationPath = path.join(parent, "checkout");
       yield* Effect.gen(function* () {
         const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
-        const result = yield* service.cloneRepository({
+        const result = yield* service.cloneRepository(trustedReadAuthority, {
           remoteUrl: repositoryName,
           destinationPath,
         });
@@ -377,6 +380,7 @@ it.effect("reports clone progress from git's stderr and keeps its error text on 
       const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
       return yield* Effect.flip(
         service.cloneRepository(
+          trustedReadAuthority,
           { remoteUrl: CLONE_URLS.sshUrl, destinationPath },
           { onProgress: (line) => Effect.sync(() => void progress.push(line)) },
         ),
@@ -426,7 +430,7 @@ it.effect("strips embedded credentials from the remote URL it reports", () =>
     const cloneArgs: Array<ReadonlyArray<string>> = [];
     const result = yield* Effect.gen(function* () {
       const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
-      return yield* service.prepareClone({
+      return yield* service.prepareClone(trustedReadAuthority, {
         remoteUrl: "https://user:s3cret@github.com/octocat/t3code.git",
         destinationPath,
       });
@@ -467,15 +471,17 @@ it.effect("discards only a directory git wrote to", () =>
 
     yield* Effect.gen(function* () {
       const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
-      yield* service.discardClone(partial);
-      const error = yield* Effect.flip(service.discardClone(foreign));
+      yield* service.discardClone(trustedReadAuthority, partial);
+      const error = yield* Effect.flip(service.discardClone(trustedReadAuthority, foreign));
       if (error._tag === "EnvironmentAuthorizationError") throw error;
       assert.include(error.detail, "not from the clone");
-      const replacedError = yield* Effect.flip(service.discardClone(replaced));
+      const replacedError = yield* Effect.flip(
+        service.discardClone(trustedReadAuthority, replaced),
+      );
       if (replacedError._tag === "EnvironmentAuthorizationError") throw replacedError;
       assert.include(replacedError.detail, "could not be inspected");
       // A destination that never got created is nothing to discard.
-      yield* service.discardClone(path.join(parent, "missing"));
+      yield* service.discardClone(trustedReadAuthority, path.join(parent, "missing"));
     }).pipe(Effect.provide(layer({})));
 
     // The partial clone is emptied but its directory (the workspace root) stays.
@@ -492,12 +498,12 @@ it.effect("redacts query tokens and userinfo containing '@' from reported URLs",
     const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-source-control-redact2-" });
     yield* Effect.gen(function* () {
       const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
-      const query = yield* service.prepareClone({
+      const query = yield* service.prepareClone(trustedReadAuthority, {
         remoteUrl: "https://github.com/octocat/t3code.git?access_token=s3cret",
         destinationPath: path.join(parent, "a"),
       });
       assert.equal(query.remoteUrl, "https://github.com/octocat/t3code.git");
-      const nested = yield* service.prepareClone({
+      const nested = yield* service.prepareClone(trustedReadAuthority, {
         remoteUrl: "https://user:pa@rt@github.com/octocat/t3code.git",
         destinationPath: path.join(parent, "b"),
       });
@@ -517,7 +523,7 @@ it.effect("preserves destination probe failures instead of treating them as miss
   return Effect.gen(function* () {
     const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
     const error = yield* Effect.flip(
-      service.cloneRepository({
+      service.cloneRepository(trustedReadAuthority, {
         remoteUrl: CLONE_URLS.sshUrl,
         destinationPath: "/restricted/t3code",
       }),
@@ -709,3 +715,39 @@ it.effect("publish succeeds with status remote_added when the local repo has no 
     ),
   );
 });
+
+it.effect(
+  "v1 clone/lookup service denies admitted project grants before API, process or filesystem effects",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      const authority = {
+        current: Effect.succeed({
+          resourceGrant: grantA,
+          scopes: ["orchestration:read", "source-control:write"] as const,
+        }),
+      };
+      for (const operation of [
+        service.lookupRepository(authority, { provider: "github", repository: "acme/repo" }),
+        service.prepareClone(authority, {
+          remoteUrl: "https://host/repo",
+          destinationPath: "/host-path",
+        }),
+        service.cloneRepository(authority, {
+          remoteUrl: "https://host/repo",
+          destinationPath: "/host-path",
+        }),
+        service.discardClone(authority, "/host-path"),
+      ])
+        expect(yield* operation.pipe(Effect.flip)).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+        });
+    }).pipe(
+      Effect.provide(
+        layer({
+          provider: makeProvider({ getRepositoryCloneUrls: () => Effect.die("must not call API") }),
+          git: { execute: () => Effect.die("must not spawn") },
+        }),
+      ),
+    ),
+);

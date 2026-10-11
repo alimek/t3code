@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { assert, describe, it } from "@effect/vitest";
 import {
   AuthEnvironmentMaintainScope,
@@ -38,7 +39,7 @@ const groupOf = <const Tags extends ReadonlyArray<WsRpcMethod>>(...tags: Tags) =
 
 /** The middleware ws.ts installs for a connection with `scopes`. */
 const connectionMiddleware = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
-  Layer.merge(RpcAuthorization.layer(scopes), rpcInstrumentationLayer);
+  Layer.merge(RpcAuthorization.layer(scopes, trustedReadAuthority), rpcInstrumentationLayer);
 const readOnlyConnection = connectionMiddleware([AuthOrchestrationReadScope]);
 const taskId = ScheduledTaskId.make("scheduled-task:instrumented");
 const rpcSpanDefaults = { "rpc.transport": "websocket", "rpc.system": "effect-rpc" };

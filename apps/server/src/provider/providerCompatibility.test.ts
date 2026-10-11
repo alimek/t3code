@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -368,7 +369,10 @@ it.effect("a remote policy refresh preserves a newer health result on the regist
         "broken",
       );
       yield* Ref.set(health, provider);
-      const latestHealth = yield* registry.refreshInstance(provider.instanceId);
+      const latestHealth = yield* registry.refreshInstance(
+        trustedReadAuthority,
+        provider.instanceId,
+      );
       assert.strictEqual(latestHealth[0]?.message, "Authentication failed");
       const supported = yield* Stream.toPull(
         registry.streamChanges.pipe(

@@ -1,3 +1,5 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as FileSystem from "effect/FileSystem";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it, vi } from "@effect/vitest";
@@ -257,3 +259,31 @@ it.effect("restricted diffs reject a stored cwd outside registered roots before 
     ),
   );
 });
+
+it.effect("v1 admitted restricted turn checkpoint diffs keep internal Git available", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-v1-checkpoint-" });
+    const projection = makeProjection();
+    const diffCheckpoints = vi.fn(() => Effect.succeed("admitted turn diff"));
+    const query = yield* CheckpointDiffQuery.CheckpointDiffQuery.pipe(
+      Effect.provide(
+        layerFor({
+          projection: Effect.succeed({
+            ...projection,
+            checkpointScopes: projection.checkpointScopes.map((scope) => ({ ...scope, cwd: root })),
+          }),
+          roots: [root],
+          diffCheckpoints,
+        }),
+      ),
+    );
+    const result = yield* query.getTurnDiff(currentAuthority, {
+      threadId,
+      fromTurnCount: 0,
+      toTurnCount: 2,
+    });
+    assert.equal(result.diff, "admitted turn diff");
+    assert.equal(diffCheckpoints.mock.calls.length, 1);
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);

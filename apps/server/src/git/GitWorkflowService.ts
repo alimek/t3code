@@ -1,3 +1,4 @@
+import { authorizeExtraTool, extraToolAuthority } from "../auth/ToolAuthorization.ts";
 import {
   AuthSourceControlWriteScope,
   AuthOrchestrationReadScope,
@@ -380,7 +381,7 @@ export const make = Effect.gen(function* () {
   return GitWorkflowService.of({
     isRepository: (authority, cwd) =>
       access.read(
-        authority,
+        extraToolAuthority(authority),
         { cwd },
         registry.detect({ cwd }).pipe(
           Effect.tap((handle) =>
@@ -403,11 +404,11 @@ export const make = Effect.gen(function* () {
       ),
     hasCommit: (authority, input) =>
       access.read(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGitCommand("GitWorkflowService.hasCommit", input.cwd).pipe(
           Effect.tap((handle) => access.repository(authority, input, handle.repository.rootPath)),
-          Effect.andThen(access.admit(authority, input)),
+          Effect.andThen(access.admit(extraToolAuthority(authority), input)),
           Effect.andThen(
             git.execute({
               operation: "GitWorkflowService.hasCommit",
@@ -421,12 +422,12 @@ export const make = Effect.gen(function* () {
       ),
     status: (authority, input, scope) =>
       access.read(
-        authority,
+        extraToolAuthority(authority),
         input,
         detectGitRepositoryForStatus("GitWorkflowService.status", input.cwd, authority, scope).pipe(
           Effect.flatMap((isGitRepository) =>
             isGitRepository
-              ? gitManager.status(authority, input, scope)
+              ? gitManager.status(extraToolAuthority(authority), input, scope)
               : Effect.succeed(nonRepositoryStatus()),
           ),
         ),
@@ -434,7 +435,7 @@ export const make = Effect.gen(function* () {
       ),
     localStatus: (authority, input, scope) =>
       access.read(
-        authority,
+        extraToolAuthority(authority),
         input,
         detectGitRepositoryForStatus(
           "GitWorkflowService.localStatus",
@@ -444,7 +445,7 @@ export const make = Effect.gen(function* () {
         ).pipe(
           Effect.flatMap((isGitRepository) =>
             isGitRepository
-              ? gitManager.localStatus(authority, input, scope)
+              ? gitManager.localStatus(extraToolAuthority(authority), input, scope)
               : Effect.succeed(nonRepositoryLocalStatus()),
           ),
         ),
@@ -452,7 +453,7 @@ export const make = Effect.gen(function* () {
       ),
     remoteStatus: (authority, input, options, scope) =>
       access.read(
-        authority,
+        extraToolAuthority(authority),
         input,
         detectGitRepositoryForStatus(
           "GitWorkflowService.remoteStatus",
@@ -462,18 +463,29 @@ export const make = Effect.gen(function* () {
         ).pipe(
           Effect.flatMap((isGitRepository) =>
             isGitRepository
-              ? gitManager.remoteStatus(authority, input, options, scope)
+              ? gitManager.remoteStatus(extraToolAuthority(authority), input, options, scope)
               : Effect.succeed(null),
           ),
         ),
         scope,
       ),
-    invalidateLocalStatus: gitManager.invalidateLocalStatus,
-    invalidateRemoteStatus: gitManager.invalidateRemoteStatus,
-    invalidateStatus: gitManager.invalidateStatus,
+    invalidateLocalStatus: (authority, cwd, scope = AuthOrchestrationReadScope) =>
+      authorizeExtraTool(authority, scope).pipe(
+        Effect.andThen(gitManager.invalidateLocalStatus(extraToolAuthority(authority), cwd, scope)),
+      ),
+    invalidateRemoteStatus: (authority, cwd, scope = AuthOrchestrationReadScope) =>
+      authorizeExtraTool(authority, scope).pipe(
+        Effect.andThen(
+          gitManager.invalidateRemoteStatus(extraToolAuthority(authority), cwd, scope),
+        ),
+      ),
+    invalidateStatus: (authority, cwd, scope = AuthOrchestrationReadScope) =>
+      authorizeExtraTool(authority, scope).pipe(
+        Effect.andThen(gitManager.invalidateStatus(extraToolAuthority(authority), cwd, scope)),
+      ),
     pullCurrentBranch: (authority, cwd, afterSuccess) =>
       access.run(
-        authority,
+        extraToolAuthority(authority),
         { cwd },
         ensureGitCommand("GitWorkflowService.pullCurrentBranch", cwd).pipe(
           Effect.tap((handle) =>
@@ -492,7 +504,7 @@ export const make = Effect.gen(function* () {
       ),
     runStackedAction: (authority, input, options) =>
       access.run(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGit("GitWorkflowService.runStackedAction", input.cwd).pipe(
           Effect.tap((handle) =>
@@ -503,22 +515,24 @@ export const make = Effect.gen(function* () {
               AuthSourceControlWriteScope,
             ),
           ),
-          Effect.andThen(gitManager.runStackedAction(authority, input, options)),
+          Effect.andThen(
+            gitManager.runStackedAction(extraToolAuthority(authority), input, options),
+          ),
         ),
         AuthSourceControlWriteScope,
       ),
     resolvePullRequest: (authority, input) =>
       access.read(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGit("GitWorkflowService.resolvePullRequest", input.cwd).pipe(
           Effect.tap((handle) => access.repository(authority, input, handle.repository.rootPath)),
-          Effect.andThen(gitManager.resolvePullRequest(authority, input)),
+          Effect.andThen(gitManager.resolvePullRequest(extraToolAuthority(authority), input)),
         ),
       ),
     preparePullRequestThread: (authority, input, afterSuccess) =>
       access.runWorktree(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGit("GitWorkflowService.preparePullRequestThread", input.cwd).pipe(
           Effect.tap((handle) =>
@@ -529,7 +543,7 @@ export const make = Effect.gen(function* () {
               AuthSourceControlWriteScope,
             ),
           ),
-          Effect.andThen(gitManager.preparePullRequestThread(authority, input)),
+          Effect.andThen(gitManager.preparePullRequestThread(extraToolAuthority(authority), input)),
           Effect.tap((result) =>
             result.worktreePath === null
               ? Effect.void
@@ -546,19 +560,21 @@ export const make = Effect.gen(function* () {
       ),
     listRefs: (authority, input) =>
       access.read(
-        authority,
+        extraToolAuthority(authority),
         input,
         detectGitRepositoryForCommand("GitWorkflowService.listRefs", input.cwd, authority).pipe(
           Effect.flatMap((isGitRepository) =>
             isGitRepository
-              ? access.admit(authority, input).pipe(Effect.andThen(git.listRefs(input)))
+              ? access
+                  .admit(extraToolAuthority(authority), input)
+                  .pipe(Effect.andThen(git.listRefs(input)))
               : Effect.succeed(nonRepositoryListRefs()),
           ),
         ),
       ),
     createWorktree: (authority, input, options, afterSuccess) =>
       access.runWorktree(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGitCommand("GitWorkflowService.createWorktree", input.cwd).pipe(
           Effect.tap((handle) =>
@@ -569,24 +585,24 @@ export const make = Effect.gen(function* () {
               AuthSourceControlWriteScope,
             ),
           ),
-          Effect.andThen(gitManager.createWorktree(authority, input, options)),
+          Effect.andThen(gitManager.createWorktree(extraToolAuthority(authority), input, options)),
           Effect.tap((result) => WorkspaceReadAccess.beforeWorkspaceEffect(result.worktree.path)),
         ),
         { destination: input.path, afterSuccess },
       ),
     listLocalBranchNames: (authority, cwd) =>
       access.read(
-        authority,
+        extraToolAuthority(authority),
         { cwd },
         ensureGitCommand("GitWorkflowService.listLocalBranchNames", cwd).pipe(
           Effect.tap((handle) => access.repository(authority, { cwd }, handle.repository.rootPath)),
-          Effect.andThen(access.admit(authority, { cwd })),
+          Effect.andThen(access.admit(extraToolAuthority(authority), { cwd })),
           Effect.andThen(git.listLocalBranchNames(cwd)),
         ),
       ),
     fetchRemote: (authority, input, afterSuccess) =>
       access.run(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGitCommand("GitWorkflowService.fetchRemote", input.cwd).pipe(
           Effect.tap((handle) =>
@@ -605,37 +621,37 @@ export const make = Effect.gen(function* () {
       ),
     remoteExists: (authority, input) =>
       access.read(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGitCommand("GitWorkflowService.remoteExists", input.cwd).pipe(
           Effect.tap((handle) => access.repository(authority, input, handle.repository.rootPath)),
-          Effect.andThen(access.admit(authority, input)),
+          Effect.andThen(access.admit(extraToolAuthority(authority), input)),
           Effect.andThen(git.remoteExists(input)),
         ),
       ),
     remoteBranchExists: (authority, input) =>
       access.read(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGitCommand("GitWorkflowService.remoteBranchExists", input.cwd).pipe(
           Effect.tap((handle) => access.repository(authority, input, handle.repository.rootPath)),
-          Effect.andThen(access.admit(authority, input)),
+          Effect.andThen(access.admit(extraToolAuthority(authority), input)),
           Effect.andThen(git.remoteBranchExists(input)),
         ),
       ),
     resolveRemoteTrackingCommit: (authority, input) =>
       access.read(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGitCommand("GitWorkflowService.resolveRemoteTrackingCommit", input.cwd).pipe(
           Effect.tap((handle) => access.repository(authority, input, handle.repository.rootPath)),
-          Effect.andThen(access.admit(authority, input)),
+          Effect.andThen(access.admit(extraToolAuthority(authority), input)),
           Effect.andThen(git.resolveRemoteTrackingCommit(input)),
         ),
       ),
     removeWorktree: (authority, input, afterSuccess) =>
       access.runWorktree(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(
           Effect.tap((handle) =>
@@ -652,7 +668,7 @@ export const make = Effect.gen(function* () {
       ),
     pruneWorktrees: (authority, input) =>
       access.runWorktree(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGitCommand("GitWorkflowService.pruneWorktrees", input.cwd).pipe(
           Effect.tap((handle) =>
@@ -668,7 +684,7 @@ export const make = Effect.gen(function* () {
       ),
     deleteLocalBranch: (authority, input, afterSuccess) =>
       access.run(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGitCommand("GitWorkflowService.deleteLocalBranch", input.cwd).pipe(
           Effect.tap((handle) =>
@@ -687,7 +703,7 @@ export const make = Effect.gen(function* () {
       ),
     createRef: (authority, input, afterSuccess) =>
       access.run(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGitCommand("GitWorkflowService.createRef", input.cwd).pipe(
           Effect.tap((handle) =>
@@ -706,7 +722,7 @@ export const make = Effect.gen(function* () {
       ),
     switchRef: (authority, input, afterSuccess) =>
       access.run(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGitCommand("GitWorkflowService.switchRef", input.cwd).pipe(
           Effect.tap((handle) =>
@@ -725,7 +741,7 @@ export const make = Effect.gen(function* () {
       ),
     renameBranch: (authority, input, afterSuccess) =>
       access.run(
-        authority,
+        extraToolAuthority(authority),
         input,
         ensureGit("GitWorkflowService.renameBranch", input.cwd).pipe(
           Effect.tap((handle) =>

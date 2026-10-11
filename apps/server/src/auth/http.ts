@@ -1,5 +1,10 @@
+import { authorizeResourceTool } from "./ToolAuthorization.ts";
 import {
   authScopeRequiredResponse,
+  AuthOrchestrationReadScope,
+  AuthOrchestrationOperateScope,
+  AuthFilesystemReadScope,
+  AuthFilesystemWriteScope,
   AuthAccessReadScope,
   AuthAccessWriteScope,
   AuthStandardClientScopes,
@@ -179,6 +184,11 @@ export const authenticateMediaRequest = (requiredScope: AuthEnvironmentScope) =>
         }),
       ),
     );
+    yield* authorizeResourceTool(session.resourceGrant, requiredScope).pipe(
+      Effect.catchTags({
+        EnvironmentAuthorizationError: () => failEnvironmentScopeRequired(requiredScope),
+      }),
+    );
     if (!session.scopes.includes(requiredScope)) {
       return yield* failEnvironmentScopeRequired(requiredScope);
     }
@@ -220,6 +230,18 @@ export const requireEnvironmentScope = Effect.fn("environment.auth.requireScope"
   scope: AuthEnvironmentScope,
 ) {
   const session = yield* EnvironmentAuthenticatedPrincipal;
+  const basicScopes: ReadonlyArray<AuthEnvironmentScope> = [
+    AuthOrchestrationReadScope,
+    AuthOrchestrationOperateScope,
+    AuthFilesystemReadScope,
+    AuthFilesystemWriteScope,
+  ];
+  if (!basicScopes.includes(scope))
+    yield* authorizeResourceTool(session.resourceGrant, scope).pipe(
+      Effect.catchTags({
+        EnvironmentAuthorizationError: () => failEnvironmentScopeRequired(scope),
+      }),
+    );
   if (!session.scopes.has(scope)) {
     return yield* failEnvironmentScopeRequired(scope);
   }

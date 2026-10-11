@@ -1,3 +1,13 @@
+import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform";
+import * as Etag from "effect/http/Etag";
+import { EnvironmentHttpApi, AuthSessionId } from "@t3tools/contracts";
+import * as HttpApi from "effect/http-api/HttpApi";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as Http from "./http.ts";
+import * as AuthHttp from "../auth/http.ts";
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as WorkspaceAccess from "../auth/workspaceReadAccess.ts";
 import * as FileSystem from "effect/FileSystem";
@@ -5,6 +15,7 @@ import * as Context from "effect/Context";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import { trustedReadAuthority, type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
 import {
+  AuthAllResourceGrant,
   AuthOrchestrationReadScope,
   AuthSourceControlWriteScope,
   type AuthResourceGrant,
@@ -15,6 +26,7 @@ import * as KeyValueStore from "effect/persistence/KeyValueStore";
 import { assert, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -73,7 +85,7 @@ const testAuthority = (
 });
 
 it.effect(
-  "filters PR collection discovery, request narrowing and cached counts by project grant",
+  "v1 denies PR collection discovery and cached counts before effects; owner retains both projects",
   () =>
     Effect.gen(function* () {
       const a = project({
@@ -120,48 +132,31 @@ it.effect(
           }),
         ],
       });
-      const restricted = yield* service.list(testAuthority(grantA), { state: "open" });
-      assert.deepEqual(
-        restricted.entries.map((entry) => entry.projectId),
-        [projectA],
-      );
-      assert.isTrue(resolved.every((root) => root === "/a"));
-      assert.deepEqual(queried, ["/a"]);
-      assert.deepEqual(
-        (yield* service.list(testAuthority(grantA), { state: "open", projectIds: [projectB] }))
-          .entries,
-        [],
-      );
-      assert.deepEqual(
-        (yield* service.list(testAuthority(grantA), { state: "open", projectIds: [projectB] }))
-          .entries,
-        [],
-      );
-      assert.deepEqual(
-        (yield* service.list(testAuthority(grantNone), { state: "open" })).entries,
-        [],
-      );
-      assert.isTrue(resolved.every((root) => root === "/a"));
+      for (const grant of [
+        grantA,
+        grantNone,
+        {
+          ...grantA,
+          projects: { mode: "all" as const },
+          providers: { mode: "explicit" as const, instances: [] },
+        },
+      ]) {
+        yield* assertDenied(service.list(testAuthority(grant), { state: "open" }));
+        yield* assertDenied(service.listStats(testAuthority(grant), { refs: [] }));
+      }
+      assert.deepEqual(resolved, []);
+      assert.deepEqual(queried, []);
+      assert.deepEqual(counted, []);
       const owner = yield* service.list(trustedReadAuthority, { state: "open" });
       assert.equal(owner.entries.length, 2);
-      assert.deepEqual(
-        (yield* service.list(testAuthority(grantA), { state: "open" })).entries.map(
-          (entry) => entry.projectId,
-        ),
-        [projectA],
-      );
       const refs = [
         { projectId: projectA, repository: "acme/a", number: 1 },
         { projectId: projectB, repository: "acme/b", number: 1 },
       ];
-      assert.equal((yield* service.listStats(trustedReadAuthority, { refs })).stats.length, 2);
-      assert.deepEqual(
-        (yield* service.listStats(testAuthority(grantA), { refs })).stats.map(
-          (stat) => stat.projectId,
-        ),
-        [projectA],
+      assert.equal(
+        (yield* service.listStats(testAuthority(AuthAllResourceGrant), { refs })).stats.length,
+        2,
       );
-      assert.deepEqual((yield* service.listStats(testAuthority(grantNone), { refs })).stats, []);
       assert.deepEqual(counted.toSorted(), ["acme/a", "acme/b"]);
     }),
 );
@@ -7797,11 +7792,12 @@ it.effect(
       assert.isFalse(effects.includes("cache"));
       assert.isFalse(effects.includes("api"));
       assert.isFalse(effects.includes("identity:/b"));
-      assert.equal((yield* service.summary(authority, ref)).title, "Change request 1");
-      // Model/provider execution selectors do not restrict visible historical reads.
-      yield* service.summary(
-        testAuthority({ ...grantA, providers: { mode: "explicit", instances: [] } }),
-        ref,
+      yield* assertDenied(service.summary(authority, ref));
+      yield* assertDenied(
+        service.summary(
+          testAuthority({ ...grantA, providers: { mode: "explicit", instances: [] } }),
+          ref,
+        ),
       );
     }),
 );
@@ -7866,11 +7862,11 @@ it.effect.each(["summary", "listStats"] as const)(
       const fiber = yield* Effect.forkChild(
         assertDenied(
           method === "listStats"
-            ? service.listStats(testAuthority(grantA), { refs: [ref] })
+            ? service.listStats(testAuthority(AuthAllResourceGrant), { refs: [ref] })
             : service.withRoutingCredential(
-                testAuthority(grantA),
+                testAuthority(AuthAllResourceGrant),
                 ref,
-                service.summary(testAuthority(grantA), ref),
+                service.summary(testAuthority(AuthAllResourceGrant), ref),
               ),
         ),
       );
@@ -7888,7 +7884,7 @@ it.effect(
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
-      let grant = grantA;
+      let grant: AuthResourceGrant = AuthAllResourceGrant;
       const authority: ThreadReadAuthority = {
         current: Effect.sync(() => ({
           scopes: [AuthOrchestrationReadScope],
@@ -7933,7 +7929,7 @@ it.effect(
       yield* assertDenied(service.invalidate(authority, { reference: ref }));
       assert.equal(reads, 1);
       assert.equal(invalidations, 0);
-      grant = grantA;
+      grant = AuthAllResourceGrant;
       const fiber = yield* Effect.forkChild(
         assertDenied(service.summary(authority, { ...ref, allowStale: false })),
       );
@@ -7941,7 +7937,7 @@ it.effect(
       grant = grantNone;
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(fiber);
-      grant = grantA;
+      grant = AuthAllResourceGrant;
       // The denied result never replaced the admitted held payload.
       yield* service.summary(authority, ref);
       assert.equal(reads, 2);
@@ -8011,9 +8007,14 @@ it.effect(
         }),
         service.setLabels(authority, { ...ref, labels: ["bug"], applied: true }),
       ];
-      for (const write of writes(testAuthority(grantA))) yield* assertDenied(write);
+      for (const write of writes(testAuthority(AuthAllResourceGrant))) yield* assertDenied(write);
       assert.deepEqual(sent, []);
       for (const write of writes(testAuthority(grantA, [AuthSourceControlWriteScope])))
+        yield* assertDenied(write);
+      assert.deepEqual(sent, []);
+      for (const write of writes(
+        testAuthority(AuthAllResourceGrant, [AuthSourceControlWriteScope]),
+      ))
         yield* write;
       assert.deepEqual(sent, [
         "setFilesViewed",
@@ -8097,12 +8098,12 @@ it.effect(
         ...grantA,
         projects: { mode: "explicit" as const, ids: [projectA, projectB] },
       };
-      yield* service.diff(testAuthority(both), ref);
-      assert.deepEqual(routed, ["/b:acme/b"]);
+      yield* assertDenied(service.diff(testAuthority(both), ref));
+      assert.deepEqual(routed, []);
       const owner = testAuthority({ ...grantA, projects: { mode: "all" } });
       yield* service.diff(owner, { ...ref, repository: "acme/hosted" });
       yield* service.diff(trustedReadAuthority, { ...ref, repository: "acme/trusted" });
-      assert.deepEqual(routed, ["/b:acme/b", "/a:acme/hosted", "/a:acme/trusted"]);
+      assert.deepEqual(routed, ["/a:acme/hosted", "/a:acme/trusted"]);
     }),
 );
 
@@ -8173,8 +8174,15 @@ it.effect(
       grant = grantA;
       yield* assertDenied(service.subscribeMerges(authority));
       yield* assertDenied(Stream.runHead(service.subscribeRefreshes(authority)));
+      yield* assertDenied(
+        service.refreshAfterTurn(
+          testAuthority(grantA, [AuthSourceControlWriteScope]),
+          projectA,
+          AuthSourceControlWriteScope,
+        ),
+      );
       yield* service.refreshAfterTurn(
-        testAuthority(grantA, [AuthSourceControlWriteScope]),
+        testAuthority(AuthAllResourceGrant, [AuthSourceControlWriteScope]),
         projectA,
         AuthSourceControlWriteScope,
       );
@@ -8202,10 +8210,7 @@ it.effect.each(
       const started = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       let database!: SqlClient.SqlClient;
-      let resourceGrant: AuthResourceGrant = {
-        ...grantA,
-        projects: { mode: "explicit", ids: [projectA, projectB] },
-      };
+      let resourceGrant: AuthResourceGrant = AuthAllResourceGrant;
       let scopes: ReadonlyArray<import("@t3tools/contracts").AuthEnvironmentScope> = [
         AuthOrchestrationReadScope,
       ];
@@ -8287,7 +8292,7 @@ it.effect(
       const started = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       const drained = yield* Deferred.make<void>();
-      let grant = grantA,
+      let grant: AuthResourceGrant = AuthAllResourceGrant,
         reads = 0,
         effects = 0;
       const authority: ThreadReadAuthority = {
@@ -8350,10 +8355,7 @@ it.effect.each(["list", "listStats"] as const)(
         canonicalCalls = 0,
         held = false,
         effects = 0;
-      const grant: AuthResourceGrant = {
-        ...grantA,
-        projects: { mode: "explicit", ids: [projectA, projectB] },
-      };
+      const grant: AuthResourceGrant = AuthAllResourceGrant;
       const effect = Deferred.succeed(started, undefined).pipe(
         Effect.andThen(Deferred.await(enter)),
         Effect.andThen(WorkspaceAccess.beforeCurrentWorkspaceEffect),
@@ -8507,7 +8509,7 @@ it.effect.each(["summary", "diff", "detail stats", "detail summary", "detail"] a
           }),
         ],
       }).pipe(Effect.provideService(Clock.Clock, heldClock));
-      const authority = testAuthority(grantA);
+      const authority = testAuthority(AuthAllResourceGrant);
       const ref = { projectId: projectA, host: "github.com", repository: "acme/a", number: 1 };
       const read =
         method === "summary"
@@ -8593,7 +8595,7 @@ it.effect(
           }),
         ],
       });
-      const authority = testAuthority(grantA);
+      const authority = testAuthority(AuthAllResourceGrant);
       const ref = {
         projectId: projectA,
         host: "github.com",
@@ -8621,4 +8623,87 @@ it.effect(
       yield* service.summary(trustedReadAuthority, ref);
       assert.ok(effects.some((effect) => effect.startsWith("set:pr-v2")));
     }).pipe(Effect.provide(KeyValueStore.layerMemory)),
+);
+
+class ToolTestApi extends HttpApi.make("environment").add(EnvironmentHttpApi.groups.pullRequests) {}
+
+it.effect("v1 raw HTTP PR diffs deny guessed IDs and current cuts before hosting API effects", () =>
+  Effect.gen(function* () {
+    let effects = 0;
+    let grant: AuthResourceGrant = AuthAllResourceGrant;
+    const service = yield* makeService({
+      projects: [
+        project({ id: projectA, title: "allowed", workspaceRoot: "/a", repository: "acme/a" }),
+      ],
+      providers: [
+        fakeProvider("github", {
+          getDiff: () =>
+            Effect.sync(() => {
+              effects++;
+              return { patch: "patch", truncated: false, nextCursor: null };
+            }),
+        }),
+      ],
+    });
+    const principal = {
+      sessionId: AuthSessionId.make("http-tool-test"),
+      scopes: [AuthOrchestrationReadScope],
+      subject: "browser",
+      method: "browser-session-cookie" as const,
+      resourceGrant: AuthAllResourceGrant,
+    };
+    const handler = yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        HttpRouter.toWebHandler(
+          HttpApiBuilder.layer(ToolTestApi).pipe(
+            Layer.provide(Http.layer),
+            Layer.provide(AuthHttp.layerAuthenticatedAuth),
+            Layer.provide(Layer.succeed(PullRequestService.PullRequestService, service)),
+            Layer.provide(
+              Layer.mock(EnvironmentAuth.EnvironmentAuth, {
+                authenticateHttpRequest: () => Effect.succeed(principal),
+              }),
+            ),
+            Layer.provide(
+              Layer.mock(SessionStore.SessionStore, {
+                cookieName: "test",
+                legacyCookieName: undefined,
+                getAuthority: () =>
+                  DateTime.now.pipe(
+                    Effect.map((expiresAt) => ({
+                      ...principal,
+                      resourceGrant: grant,
+                      deviceId: principal.sessionId,
+                      authorityRevision: 0,
+                      expiresAt,
+                    })),
+                  ),
+              }),
+            ),
+            Layer.provide(NodeHttpPlatform.layer.pipe(Layer.provideMerge(NodeServices.layer))),
+            Layer.provide(Etag.layerWeak),
+          ),
+          { disableLogger: true },
+        ),
+      ),
+      ({ dispose }) => Effect.promise(dispose),
+    );
+    const request = (id: ProjectId) =>
+      Effect.promise(() =>
+        handler.handler(
+          new Request("http://t3.test/api/pull-requests/diff", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ projectId: id, repository: "acme/a", number: 1 }),
+          }),
+          Context.empty(),
+        ),
+      );
+    assert.equal((yield* request(projectA)).status, 200);
+    assert.equal(effects, 1);
+    grant = grantA;
+    assert.equal((yield* request(projectA)).status, 403);
+    assert.equal((yield* request(projectB)).status, 403);
+    assert.equal(effects, 1);
+  }).pipe(Effect.scoped),
 );

@@ -1,3 +1,5 @@
+import * as SqlClient from "effect/sql/SqlClient";
+import { grantA } from "../orchestration-v2/projectCollectionTestFixtures.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   AuthAdministrativeScopes,
@@ -24,6 +26,7 @@ import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import * as McpOAuth from "./McpOAuth.ts";
 import * as McpOAuthHttp from "./mcpOAuthHttp.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
+import * as SessionStore from "./SessionStore.ts";
 import * as AuthHttp from "./http.ts";
 
 class AuthTestApi extends HttpApi.make("environment")
@@ -32,16 +35,54 @@ class AuthTestApi extends HttpApi.make("environment")
 
 const layerConfig = ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-oauth-test-" });
 const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
-  Layer.provide(Sqlite.layerMemory),
+  Layer.provideMerge(Sqlite.layerMemory),
   Layer.provideMerge(ServerSecretStore.layer),
   Layer.provideMerge(ServerEnvironment.layerIdentity),
   Layer.provide(layerConfig),
 );
+// Exercise runtime denial independently of the unchanged pre-activation credential gate.
+// Known, verified credentials keep their identity and reload current authority from the same SQL DB.
+const layerActivatedAuth = Layer.effect(EnvironmentAuth.EnvironmentAuth, EnvironmentAuth.make).pipe(
+  Layer.provideMerge(
+    Layer.effect(
+      SessionStore.SessionStore,
+      Effect.gen(function* () {
+        const sessions = yield* SessionStore.SessionStore;
+        const verified = new Map<string, SessionStore.VerifiedSession>();
+        return {
+          ...sessions,
+          verify: (token: string) => {
+            const prior = verified.get(token);
+            return prior
+              ? sessions
+                  .getAuthority(prior.sessionId)
+                  .pipe(Effect.map((current) => ({ ...prior, ...current })))
+              : sessions.verify(token).pipe(
+                  Effect.tap((session) =>
+                    Effect.sync(() => {
+                      verified.set(token, session);
+                    }),
+                  ),
+                );
+          },
+        };
+      }),
+    ).pipe(Layer.provideMerge(layerEnvironmentAuth)),
+  ),
+  Layer.provide(layerConfig),
+);
 // Each router gets its own database; the capture hands that router's EnvironmentAuth to its test.
-const makeLayerRoutes = (capture: (auth: EnvironmentAuth.EnvironmentAuth["Service"]) => void) =>
+const makeLayerRoutes = (
+  capture: (auth: EnvironmentAuth.EnvironmentAuth["Service"], sql: SqlClient.SqlClient) => void,
+  activated = false,
+) =>
   Layer.mergeAll(
     Layer.effectDiscard(
-      EnvironmentAuth.EnvironmentAuth.pipe(Effect.tap((auth) => Effect.sync(() => capture(auth)))),
+      Effect.gen(function* () {
+        const auth = yield* EnvironmentAuth.EnvironmentAuth;
+        const sql = yield* SqlClient.SqlClient;
+        capture(auth, sql);
+      }),
     ),
     HttpApiBuilder.layer(AuthTestApi).pipe(
       Layer.provide(AuthHttp.layer),
@@ -49,7 +90,7 @@ const makeLayerRoutes = (capture: (auth: EnvironmentAuth.EnvironmentAuth["Servic
       Layer.provide(AuthHttp.layerAuthenticatedAuth),
     ),
   ).pipe(
-    Layer.provideMerge(layerEnvironmentAuth),
+    Layer.provideMerge(activated ? layerActivatedAuth : layerEnvironmentAuth),
     Layer.provide(layerConfig),
     Layer.provideMerge(
       HttpPlatform.layer.pipe(
@@ -82,15 +123,22 @@ const form = (body: Record<string, string>) => ({
 type Handler = (request: Request) => Effect.Effect<Response>;
 
 const withRoutes = <A, E>(
-  use: (handler: Handler, auth: EnvironmentAuth.EnvironmentAuth["Service"]) => Effect.Effect<A, E>,
+  use: (
+    handler: Handler,
+    auth: EnvironmentAuth.EnvironmentAuth["Service"],
+    sql: SqlClient.SqlClient,
+  ) => Effect.Effect<A, E>,
+  activated = false,
 ) =>
   Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
     const context = Context.make(Crypto.Crypto, crypto);
     let routerAuth: EnvironmentAuth.EnvironmentAuth["Service"] | undefined;
-    const layerRoutes = makeLayerRoutes((auth) => {
+    let routerSql!: SqlClient.SqlClient;
+    const layerRoutes = makeLayerRoutes((auth, sql) => {
       routerAuth = auth;
-    });
+      routerSql = sql;
+    }, activated);
     return yield* Effect.acquireUseRelease(
       Effect.sync(() => HttpRouter.toWebHandler(layerRoutes, { disableLogger: true })),
       (web) =>
@@ -98,7 +146,7 @@ const withRoutes = <A, E>(
           const handler: Handler = (request) => Effect.promise(() => web.handler(request, context));
           // The router builds its layer on first request; a metadata read warms it.
           yield* handler(at("/.well-known/oauth-authorization-server"));
-          return yield* use(handler, routerAuth!);
+          return yield* use(handler, routerAuth!, routerSql);
         }),
       (web) => Effect.promise(() => web.dispose()),
     );
@@ -572,3 +620,60 @@ it("matches loopback redirects on everything but the port, and https redirects e
   expect(matches("https://bot.example/cb", "https://bot.example/cb?x=1")).toBe(false);
   expect(matches("https://bot.example/cb", "https://evil.example/cb")).toBe(false);
 });
+
+it.live(
+  "v1 rejects current restricted OAuth approval and public MCP credentials without minting authority",
+  () =>
+    withRoutes(
+      (handler, auth, sql) =>
+        Effect.gen(function* () {
+          const clientId = yield* registeredClientId(handler);
+          const params = authorizeParams(clientId);
+          const pairing = yield* auth.issuePairingCredential({
+            scopes: [...AuthAdministrativeScopes],
+          });
+          const response = yield* handler(
+            at("/api/auth/browser-session", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: encodeJson({ credential: pairing.credential }),
+            }),
+          );
+          const cookie = response.headers.get("set-cookie")!.split(";", 1)[0]!;
+          const before = yield* handler(postJson("/oauth/mcp/approval", params, cookie)).pipe(
+            Effect.flatMap(json<{ csrfToken?: string }>),
+          );
+          expect(before.csrfToken).toEqual(expect.any(String));
+          const external = yield* auth.issueMcpClientSession({
+            access: "read-only",
+            label: "external",
+            client: { deviceType: "bot" },
+          });
+          const externalRequest = {
+            headers: { authorization: `Bearer ${external.token}` },
+          } as unknown as HttpServerRequest.HttpServerRequest;
+          yield* auth.authenticateMcpClient(externalRequest);
+          yield* sql`UPDATE auth_sessions SET resource_grant = ${JSON.stringify(grantA)}`;
+          const after = yield* handler(postJson("/oauth/mcp/approval", params, cookie)).pipe(
+            Effect.flatMap(json<{ csrfToken?: string }>),
+          );
+          expect(after.csrfToken).toBeUndefined();
+          const rejected = yield* decide(
+            handler,
+            params,
+            { _tag: "browser-session", access: "read-only", csrfToken: before.csrfToken! },
+            cookie,
+          );
+          expect(rejected.status).toBe(400);
+          expect(rejected.redirectTo).toBeUndefined();
+          const rows = yield* sql<{
+            count: number;
+          }>`SELECT COUNT(*) AS count FROM auth_sessions WHERE subject = 'mcp-client'`;
+          expect(rows[0]?.count).toBe(1);
+          expect(
+            yield* auth.authenticateMcpClient(externalRequest).pipe(Effect.flip),
+          ).toMatchObject({ _tag: "ServerAuthInvalidCredentialError" });
+        }),
+      true,
+    ),
+);

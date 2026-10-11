@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import {
   AntigravitySettings,
   CodexSettings,
@@ -152,7 +153,8 @@ export const makeProviderInstallation = Effect.fn("makeProviderInstallation")(fu
     const allInstances = yield* instances.listInstances;
     yield* Effect.forEach(
       allInstances.filter((instance) => instance.driverKind === driver),
-      (instance) => providers.refreshInstance(instance.instanceId),
+      (instance) =>
+        providers.refreshInstance(trustedReadAuthority, instance.instanceId).pipe(Effect.orDie),
       { discard: true },
     );
     return yield* installation.state;

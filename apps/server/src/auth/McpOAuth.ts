@@ -1,3 +1,4 @@
+import { authorizeResourceTool } from "./ToolAuthorization.ts";
 import {
   AuthAccessWriteScope,
   type AuthMcpApprovalDecision,
@@ -395,6 +396,7 @@ const make = Effect.gen(function* () {
     authorization,
   ) =>
     environmentAuth.authenticateBrowserSession(request).pipe(
+      Effect.tap((session) => authorizeResourceTool(session.resourceGrant, AuthAccessWriteScope)),
       Effect.map((session) =>
         // Approving manages access, and a session may only hand out scopes it holds.
         session.scopes.includes(AuthAccessWriteScope) &&

@@ -4,9 +4,10 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   AuthOrchestrationOperateScope,
+  AuthAllResourceGrant,
+  type AuthResourceGrant,
   AuthOrchestrationReadScope,
   AuthSessionId,
-  AuthAllResourceGrant,
   EnvironmentId,
   PREVIEW_STREAM_HOST_SETUP_CLOSE_CODE,
   PreviewStreamHostSetup,
@@ -37,6 +38,7 @@ const platformLayer = NodeHttpPlatform.layer.pipe(Layer.provideMerge(NodeService
 const makeAuth = (
   scopes: ReadonlyArray<AuthEnvironmentScope>,
   error?: EnvironmentAuth.ServerAuthCredentialError,
+  resourceGrant?: AuthResourceGrant,
 ) => {
   const requests: string[] = [];
   const layer = Layer.mock(EnvironmentAuth.EnvironmentAuth, {
@@ -49,6 +51,7 @@ const makeAuth = (
             subject: "stream-test",
             method: "bearer-access-token",
             scopes,
+            ...(resourceGrant === undefined ? {} : { resourceGrant }),
           });
     },
   }).pipe(
@@ -170,12 +173,22 @@ it.effect.each([
 );
 
 it.effect.each([
-  { scopes: [], error: undefined, status: 403 },
+  { scopes: [], error: undefined, resourceGrant: undefined, status: 403 },
+  {
+    scopes: [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
+    error: undefined,
+    resourceGrant: { ...AuthAllResourceGrant, projects: { mode: "explicit" as const, ids: [] } },
+    status: 403,
+  },
   { scopes: [AuthOrchestrationOperateScope], error: undefined, status: 403 },
   { scopes: [], error: new EnvironmentAuth.ServerAuthMissingCredentialError({}), status: 401 },
 ])("rejects unauthorized stream connections before attaching a viewer (%s)", (testCase) =>
   Effect.gen(function* () {
-    const auth = makeAuth(testCase.scopes, testCase.error);
+    const auth = makeAuth(
+      testCase.scopes,
+      testCase.error,
+      "resourceGrant" in testCase ? testCase.resourceGrant : undefined,
+    );
     let attachments = 0;
     const browser = ServerBrowser.ServerBrowser.of({
       clearProfile: () => Effect.void,
@@ -229,7 +242,11 @@ it.effect("serves a tab's download only to an authorized session", () =>
       answerFileChooser: () => Effect.succeed(false),
       attachViewer: () => Effect.die("unused"),
     });
-    const serve = (scopes: ReadonlyArray<AuthEnvironmentScope>, url: string) =>
+    const serve = (
+      scopes: ReadonlyArray<AuthEnvironmentScope>,
+      url: string,
+      resourceGrant?: AuthResourceGrant,
+    ) =>
       Effect.gen(function* () {
         const handler = yield* Effect.acquireRelease(
           Effect.sync(() =>
@@ -237,7 +254,7 @@ it.effect("serves a tab's download only to an authorized session", () =>
               routeLayer.pipe(
                 Layer.provide(Layer.succeed(ServerBrowser.ServerBrowser, browser)),
                 Layer.provide(platformLayer),
-                Layer.provideMerge(makeAuth(scopes, undefined).layer),
+                Layer.provideMerge(makeAuth(scopes, undefined, resourceGrant).layer),
               ),
               { disableLogger: true },
             ),
@@ -249,6 +266,13 @@ it.effect("serves a tab's download only to an authorized session", () =>
     const base = "http://t3.test/api/preview-stream/download?threadId=thread&tabId=tab";
     const denied = yield* serve([], `${base}&id=download-1`);
     expect(denied.status).toBe(403);
+    expect(requests).toEqual([]);
+    expect(
+      (yield* serve([AuthOrchestrationReadScope], `${base}&id=download-1`, {
+        ...AuthAllResourceGrant,
+        projects: { mode: "explicit", ids: [] },
+      })).status,
+    ).toBe(403);
     expect(requests).toEqual([]);
     const response = yield* serve([AuthOrchestrationReadScope], `${base}&id=download-1`);
     expect(response.status).toBe(200);
@@ -277,7 +301,11 @@ it.effect("passes uploaded files to the page's open picker and needs operate sco
         }),
       attachViewer: () => Effect.die("unused"),
     });
-    const upload = (scopes: ReadonlyArray<AuthEnvironmentScope>, chooser: string) =>
+    const upload = (
+      scopes: ReadonlyArray<AuthEnvironmentScope>,
+      chooser: string,
+      resourceGrant?: AuthResourceGrant,
+    ) =>
       Effect.gen(function* () {
         const handler = yield* Effect.acquireRelease(
           Effect.sync(() =>
@@ -285,7 +313,7 @@ it.effect("passes uploaded files to the page's open picker and needs operate sco
               routeLayer.pipe(
                 Layer.provide(Layer.succeed(ServerBrowser.ServerBrowser, browser)),
                 Layer.provide(platformLayer),
-                Layer.provideMerge(makeAuth(scopes, undefined).layer),
+                Layer.provideMerge(makeAuth(scopes, undefined, resourceGrant).layer),
               ),
               { disableLogger: true },
             ),
@@ -304,6 +332,13 @@ it.effect("passes uploaded files to the page's open picker and needs operate sco
         );
       });
     expect((yield* upload([AuthOrchestrationReadScope], "chooser-1")).status).toBe(403);
+    expect(answers).toEqual([]);
+    expect(
+      (yield* upload([AuthOrchestrationOperateScope], "chooser-1", {
+        ...AuthAllResourceGrant,
+        providers: { mode: "explicit", instances: [] },
+      })).status,
+    ).toBe(403);
     expect(answers).toEqual([]);
     expect((yield* upload([AuthOrchestrationOperateScope], "chooser-1")).status).toBe(204);
     expect(answers).toEqual([
