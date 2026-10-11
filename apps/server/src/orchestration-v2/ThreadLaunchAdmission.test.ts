@@ -1058,3 +1058,185 @@ it.effect.each(["grant", "scope", "root", "foreign-root"] as const)(
       }
     }).pipe(Effect.provide(layerTest)),
 );
+
+it.effect(
+  "restricted child launch with pending initial upload persists its workspace and attachment",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* makeFixture;
+      const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-intake-child-" });
+      const child = `${root}/child`;
+      yield* f.fs.makeDirectory(child);
+      yield* f.sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectA}`;
+      const input = {
+        ...launchInput("intake-child"),
+        workspaceStrategy: { type: "existing_worktree" as const, worktreePath: child },
+        initialMessage: { text: "uploaded", attachments: [f.pending] },
+      };
+      const copy = f.copyFile.getMockImplementation()!;
+      f.copyFile.mockImplementation((...args) =>
+        Effect.gen(function* () {
+          assert.isTrue(Option.isNone(yield* Effect.serviceOption(f.sql.transactionService)));
+          yield* f.sql`SELECT 1`.pipe(Effect.orDie);
+          return yield* copy(...args);
+        }),
+      );
+      const result = yield* Intake.launchThread(authority, input).pipe(
+        Effect.provide(f.intakeLayer),
+      );
+      yield* Deferred.await(f.setupStarted);
+      assert.equal(result.threadId, input.threadId);
+      assert.equal(f.copyFile.mock.calls.length, 1);
+      assert.equal((yield* f.threads.getThreadShell(result.threadId))?.worktreePath, child);
+      assert.lengthOf(result.projection.messages, 1);
+      const attachment = result.projection.messages[0]!.attachments[0]!;
+      assert.notEqual(attachment.id, f.pending.id);
+      assert.equal(result.projection.messages[0]!.text, "uploaded");
+      const [pendingPath, persistedPath] = f.copyFile.mock.calls[0]!;
+      assert.deepEqual(Array.from(yield* f.fs.readFile(persistedPath)), [1]);
+      assert.isTrue(yield* f.fs.exists(pendingPath));
+      const replay = yield* Intake.launchThread(authority, input).pipe(
+        Effect.provide(f.intakeLayer),
+      );
+      assert.isTrue(replay.resumed);
+      assert.deepEqual(replay.projection.messages[0]!.attachments, [attachment]);
+      assert.equal(replay.projection.thread.worktreePath, child);
+      assert.equal(f.runSetup.mock.calls.length, 1);
+      assert.equal(f.copyFile.mock.calls.length, 2);
+      assert.isTrue(yield* f.fs.exists(persistedPath));
+      assert.isFalse(yield* f.fs.exists(f.copyFile.mock.calls[1]![1]));
+      assert.isTrue(yield* f.fs.exists(pendingPath));
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("canonical child admission still denies hidden initial sources before pending copy", () =>
+  Effect.gen(function* () {
+    const f = yield* makeFixture;
+    const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-intake-source-" });
+    const child = `${root}/child`;
+    yield* f.fs.makeDirectory(child);
+    yield* f.sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectA}`;
+    yield* denied(
+      Intake.launchThread(authority, {
+        ...launchInput("intake-hidden-source"),
+        workspaceStrategy: { type: "existing_worktree", worktreePath: child },
+        initialMessage: { text: "hidden", attachments: [f.pending], context: contextB },
+      }).pipe(Effect.provide(f.intakeLayer)),
+    );
+    f.noEffects();
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each(["grant", "scope", "root", "source", "receipt"] as const)(
+  "pending child launch rechecks %s after stat immediately before copying",
+  (cut) =>
+    Effect.gen(function* () {
+      const f = yield* makeFixture;
+      const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-intake-claim-cut-" });
+      const child = `${root}/child`;
+      yield* f.fs.makeDirectory(child);
+      yield* f.sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectA}`;
+      const current = yield* Ref.make({
+        scopes: [AuthOrchestrationOperateScope],
+        resourceGrant: grantA,
+      });
+      const caller: MutationAuthority = { current: Ref.get(current) };
+      const reached = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      const stat = f.stat.getMockImplementation()!;
+      f.stat.mockImplementation((...args) =>
+        stat(...args).pipe(
+          Effect.tap(() => Deferred.succeed(reached, undefined)),
+          Effect.tap(() => Deferred.await(resume)),
+        ),
+      );
+      const input = {
+        ...launchInput(`intake-claim-cut:${cut}`),
+        workspaceStrategy: { type: "existing_worktree" as const, worktreePath: child },
+        initialMessage: { text: "uploaded", attachments: [f.pending], senderThreadId: activeA },
+      };
+      const pending = yield* Intake.launchThread(caller, input).pipe(
+        Effect.provide(f.intakeLayer),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(reached);
+      if (cut === "grant")
+        yield* Ref.set(current, {
+          scopes: [AuthOrchestrationOperateScope],
+          resourceGrant: grantNone,
+        });
+      if (cut === "scope") yield* Ref.set(current, { scopes: [], resourceGrant: grantA });
+      if (cut === "root")
+        yield* f.sql`UPDATE projection_projects SET workspace_root = '/retargeted' WHERE project_id = ${projectA}`;
+      if (cut === "source")
+        yield* f.sql`UPDATE orchestration_v2_projection_threads SET project_id = ${projectB}, payload_json = json_set(payload_json, '$.projectId', ${projectB}) WHERE thread_id = ${activeA}`;
+      if (cut === "receipt")
+        yield* f.receipts.upsert({
+          commandId: input.commandId,
+          threadId: activeB,
+          commandType: "thread.create",
+          status: "accepted",
+          error: null,
+          acceptedAt: now,
+          resultSequence: 0,
+        });
+      yield* Deferred.succeed(resume, undefined);
+      yield* denied(Fiber.join(pending));
+      assert.equal(f.copyFile.mock.calls.length, 0);
+      assert.equal(f.folder.mock.calls.length, 0);
+      assert.equal(f.runSetup.mock.calls.length, 0);
+      assert.deepEqual(f.imported, []);
+      assert.isNull(yield* f.threads.getThreadShell(input.threadId!));
+      assert.lengthOf(
+        yield* f.sql`SELECT sequence FROM orchestration_events WHERE command_id = ${input.commandId}`,
+        0,
+      );
+      assert.isTrue(yield* f.fs.exists(f.stat.mock.calls[0]![0]));
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect(
+  "pending child launch cleans an unaccepted copy after a grant cut and remains retryable",
+  () =>
+    Effect.gen(function* () {
+      const f = yield* makeFixture;
+      const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-intake-copy-cut-" });
+      const child = `${root}/child`;
+      yield* f.fs.makeDirectory(child);
+      yield* f.sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectA}`;
+      const current = yield* Ref.make(grantA);
+      const caller: MutationAuthority = {
+        current: Ref.get(current).pipe(
+          Effect.map((resourceGrant) => ({
+            scopes: [AuthOrchestrationOperateScope],
+            resourceGrant,
+          })),
+        ),
+      };
+      const copy = f.copyFile.getMockImplementation()!;
+      f.copyFile.mockImplementation((...args) =>
+        copy(...args).pipe(Effect.tap(() => Ref.set(current, grantNone))),
+      );
+      const input = {
+        ...launchInput("intake-copy-cut"),
+        workspaceStrategy: { type: "existing_worktree" as const, worktreePath: child },
+        initialMessage: { text: "uploaded", attachments: [f.pending] },
+      };
+      yield* denied(Intake.launchThread(caller, input).pipe(Effect.provide(f.intakeLayer)));
+      assert.equal(f.copyFile.mock.calls.length, 1);
+      const [pendingPath, claimedPath] = f.copyFile.mock.calls[0]!;
+      assert.isFalse(yield* f.fs.exists(claimedPath));
+      assert.isTrue(yield* f.fs.exists(pendingPath));
+      assert.isNull(yield* f.threads.getThreadShell(input.threadId!));
+      assert.isTrue(Option.isNone(yield* f.receipts.getByCommandId(input.commandId)));
+      assert.equal(f.runSetup.mock.calls.length, 0);
+      f.copyFile.mockImplementation(copy);
+      yield* Ref.set(current, grantA);
+      const retried = yield* Intake.launchThread(caller, input).pipe(Effect.provide(f.intakeLayer));
+      yield* Deferred.await(f.setupStarted);
+      assert.equal(retried.projection.thread.worktreePath, child);
+      assert.lengthOf(retried.projection.messages[0]!.attachments, 1);
+      assert.isTrue(yield* f.fs.exists(f.copyFile.mock.calls[1]![1]));
+      assert.isTrue(yield* f.fs.exists(pendingPath));
+    }).pipe(Effect.provide(layerTest)),
+);

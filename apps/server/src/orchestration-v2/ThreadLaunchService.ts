@@ -211,7 +211,13 @@ export class ThreadLaunchService extends Context.Service<
     readonly admit: (
       authority: MutationAuthority,
       input: ThreadLaunchInput,
-    ) => Effect.Effect<ThreadLaunchInput & { readonly threadId: ThreadId }, ThreadLaunchError>;
+    ) => Effect.Effect<
+      {
+        readonly authority: MutationAuthority;
+        readonly input: ThreadLaunchInput & { readonly threadId: ThreadId };
+      },
+      ThreadLaunchError
+    >;
     readonly launch: (
       authority: MutationAuthority,
       input: ThreadLaunchInput,
@@ -370,19 +376,24 @@ const make = Effect.gen(function* () {
         input.reuseExistingThread === true ? undefined : { threadId, projectId: input.projectId },
       );
     }
-    if (input.workspaceStrategy.type === "existing_worktree")
-      yield* admitRegisteredCommandWorkspace(
-        sql,
-        authority,
-        {
-          commandId: input.commandId,
-          threadId,
-          projectId: input.projectId,
-          allowCreate: input.reuseExistingThread !== true,
-        },
-        input.workspaceStrategy.worktreePath,
-      );
-    return { ...input, threadId, ...(initialMessage === undefined ? {} : { initialMessage }) };
+    const admittedAuthority =
+      input.workspaceStrategy.type === "existing_worktree"
+        ? yield* admitRegisteredCommandWorkspace(
+            sql,
+            authority,
+            {
+              commandId: input.commandId,
+              threadId,
+              projectId: input.projectId,
+              allowCreate: input.reuseExistingThread !== true,
+            },
+            input.workspaceStrategy.worktreePath,
+          )
+        : authority;
+    return {
+      authority: admittedAuthority,
+      input: { ...input, threadId, ...(initialMessage === undefined ? {} : { initialMessage }) },
+    } as const;
   });
 
   const readReceipt = (
@@ -880,7 +891,7 @@ const make = Effect.gen(function* () {
 
   const launch: ThreadLaunchService["Service"]["launch"] = Effect.fn("ThreadLaunchService.launch")(
     function* (authority, input) {
-      const admitted = yield* admitLaunch(authority, input).pipe(
+      const { input: admitted } = yield* admitLaunch(authority, input).pipe(
         Effect.mapError(mapError(input, "read-receipt")),
       );
       yield* ProjectCloneTracker.rejectCommandsDuringClone(cloneTracker, {

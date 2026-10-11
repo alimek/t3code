@@ -219,9 +219,9 @@ export const launchThread = Effect.fn("ThreadMessageIntake.launchThread")(functi
       message: "Uploaded attachments need a thread id at launch.",
     });
   }
-  const admitted = yield* launches.admit(authority, input);
+  const { input: admitted, authority: claimAuthority } = yield* launches.admit(authority, input);
   const message = admitted.initialMessage!;
-  const claimed = yield* AttachmentClaims.claimPendingAttachments(authority, {
+  const claimed = yield* AttachmentClaims.claimPendingAttachments(claimAuthority, {
     threadId: admitted.threadId,
     command: ThreadLaunch.initialMessageCommand(input, admitted.threadId, {
       ...message,
