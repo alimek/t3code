@@ -200,13 +200,15 @@ export const make = Effect.gen(function* () {
   const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
 
   const fail = (operation: string) => (error: GitHubPullRequestApi.GitHubPullRequestApiError) =>
-    new PullRequestProviderError({
-      provider: "github",
-      operation,
-      ...gitHubProviderFailure(error),
-      detail: error.message,
-      cause: error,
-    });
+    error._tag === "EnvironmentAuthorizationError"
+      ? error
+      : new PullRequestProviderError({
+          provider: "github",
+          operation,
+          ...gitHubProviderFailure(error),
+          detail: error.message,
+          cause: error,
+        });
 
   const readChecks = (input: ProviderRepositoryRef & { readonly number: number }) =>
     cli.getPullRequestDetail(input).pipe(

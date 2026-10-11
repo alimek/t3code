@@ -1,3 +1,4 @@
+import { EnvironmentAuthorizationError } from "./auth.ts";
 import * as Context from "effect/Context";
 import type * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
@@ -680,6 +681,7 @@ class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").a
     error: [
       PullRequestUnavailableError,
       PullRequestOperationError,
+      EnvironmentAuthorizationError.annotate({ httpApiStatus: 403 }),
       EnvironmentAuthInvalidError,
       EnvironmentScopeRequiredError,
       EnvironmentInternalError,

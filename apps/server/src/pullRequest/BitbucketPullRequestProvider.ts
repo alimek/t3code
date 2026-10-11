@@ -121,15 +121,17 @@ export const make = Effect.gen(function* () {
 
   const fail =
     (operation: string) => (error: BitbucketPullRequestApi.BitbucketPullRequestApiError) =>
-      new PullRequestProviderError({
-        provider: "bitbucket",
-        operation,
-        ...bitbucketProviderFailure(error),
-        // Every Bitbucket failure states its own fact; this names the operation around it, so
-        // the two do not stack into "failed in x: failed in y: ...".
-        detail: error._tag === "EnvironmentAuthorizationError" ? error.message : error.detail,
-        cause: error,
-      });
+      error._tag === "EnvironmentAuthorizationError"
+        ? error
+        : new PullRequestProviderError({
+            provider: "bitbucket",
+            operation,
+            ...bitbucketProviderFailure(error),
+            // Every Bitbucket failure states its own fact; this names the operation around it, so
+            // the two do not stack into "failed in x: failed in y: ...".
+            detail: error.detail,
+            cause: error,
+          });
 
   const recoverRead = <A>(
     read: Effect.Effect<A, BitbucketPullRequestApi.BitbucketPullRequestApiError>,

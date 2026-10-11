@@ -207,6 +207,7 @@ it.effect("reports a failed stack read against its own operation", () =>
       readStack({ cwd: "/w", repository: "acme/web", host: "github.com", number: 7 }),
     );
 
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
     expect(error.operation).toBe("getChangeRequestStack");
     expect(error.reason).toBe("failed");
   }),
@@ -656,6 +657,7 @@ it.effect("propagates workflow discovery rate limits", () =>
       })
       .pipe(Effect.flip);
 
+    if (error._tag === "EnvironmentAuthorizationError") throw error;
     expect(error.operation).toBe("getChangeRequest");
     expect(error.reason).toBe("rate-limited");
   }).pipe(

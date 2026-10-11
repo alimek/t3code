@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../../auth/ResourceAuthorization.ts";
 import { assert, it } from "@effect/vitest";
 import { EventId, ThreadId } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -268,7 +269,7 @@ it.layer(layerTest)("LegacyV1ThreadImporter", (it) => {
       );
       assert.equal(shellProjection.thread.pullRequests?.[0]?.snapshot?.title, "Second PR");
       assert.deepStrictEqual(
-        (yield* listLinkedPullRequestThreads({
+        (yield* listLinkedPullRequestThreads(trustedReadAuthority, {
           host: "github.com",
           repository: "pingdotgg/t3code",
           number: 9002,

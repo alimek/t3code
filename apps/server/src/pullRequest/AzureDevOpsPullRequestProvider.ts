@@ -156,13 +156,15 @@ export const make = Effect.gen(function* () {
 
   const fail =
     (operation: string) => (error: AzureDevOpsPullRequestCli.AzureDevOpsPullRequestCliError) =>
-      new PullRequestProviderError({
-        provider: "azure-devops",
-        operation,
-        ...azureDevOpsProviderFailure(error),
-        detail: error._tag === "EnvironmentAuthorizationError" ? error.message : error.detail,
-        cause: error,
-      });
+      error._tag === "EnvironmentAuthorizationError"
+        ? error
+        : new PullRequestProviderError({
+            provider: "azure-devops",
+            operation,
+            ...azureDevOpsProviderFailure(error),
+            detail: error.detail,
+            cause: error,
+          });
 
   /** Refuses what the capabilities already say this host cannot do. */
   const unsupported = (operation: string) =>

@@ -110,13 +110,15 @@ export const make = Effect.gen(function* () {
   const cli = yield* GitLabPullRequestCli.GitLabPullRequestCli;
 
   const fail = (operation: string) => (error: GitLabPullRequestCli.GitLabPullRequestCliError) =>
-    new PullRequestProviderError({
-      provider: "gitlab",
-      operation,
-      ...gitLabProviderFailure(error),
-      detail: error._tag === "EnvironmentAuthorizationError" ? error.message : error.detail,
-      cause: error,
-    });
+    error._tag === "EnvironmentAuthorizationError"
+      ? error
+      : new PullRequestProviderError({
+          provider: "gitlab",
+          operation,
+          ...gitLabProviderFailure(error),
+          detail: error.detail,
+          cause: error,
+        });
 
   const provider: PullRequestProviderApi = {
     kind: "gitlab",

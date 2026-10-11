@@ -445,7 +445,10 @@ it.effect(
         .setReaction({ ...input, subjectId: "review:9", content: "heart", reacted: true })
         .pipe(Effect.result);
       assert.strictEqual(missing._tag, "Failure");
-      if (missing._tag === "Failure") assert.include(missing.failure.detail, "comment ID");
+      if (missing._tag === "Failure") {
+        if (missing.failure._tag === "EnvironmentAuthorizationError") throw missing.failure;
+        assert.include(missing.failure.detail, "comment ID");
+      }
       assert.strictEqual(writes.length, 4);
       responses["repos/maria/project/pulls/2/reviews/8/comments"] = Array.from(
         { length: 501 },

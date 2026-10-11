@@ -229,9 +229,13 @@ export const make = Effect.gen(function* () {
                 thread.worktreePath === null &&
                 thread.branchPullRequest != null
               ) {
-                const previous = yield* pullRequests.summary(thread.branchPullRequest, {
-                  recoverTransientFailure: false,
-                });
+                const previous = yield* pullRequests.summary(
+                  trustedReadAuthority,
+                  thread.branchPullRequest,
+                  {
+                    recoverTransientFailure: false,
+                  },
+                );
                 if (previous.state === "merged" || previous.state === "closed") {
                   branchPullRequest = thread.branchPullRequest;
                 }
@@ -245,9 +249,13 @@ export const make = Effect.gen(function* () {
                 detectedReference !== null &&
                 !samePullRequest(thread.linkedPullRequest, detectedReference)
               ) {
-                const linked = yield* pullRequests.summary(thread.linkedPullRequest, {
-                  recoverTransientFailure: false,
-                });
+                const linked = yield* pullRequests.summary(
+                  trustedReadAuthority,
+                  thread.linkedPullRequest,
+                  {
+                    recoverTransientFailure: false,
+                  },
+                );
                 if (linked.state === "merged" || linked.state === "closed") {
                   replacement = detectedReference;
                 }

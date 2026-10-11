@@ -75,17 +75,16 @@ export const make = Effect.gen(function* () {
     });
   const request = (input: ForgejoCli.ForgejoApiInput) =>
     cli.api(input).pipe(
-      Effect.mapError(
-        (error) =>
-          new PullRequestProviderError({
-            provider: "forgejo",
-            operation: input.path,
-            detail: error._tag === "EnvironmentAuthorizationError" ? error.message : error.detail,
-            cause: error,
-            reason:
-              error._tag === "EnvironmentAuthorizationError"
-                ? "failed"
-                : error.reason === "missing-cli"
+      Effect.mapError((error) =>
+        error._tag === "EnvironmentAuthorizationError"
+          ? error
+          : new PullRequestProviderError({
+              provider: "forgejo",
+              operation: input.path,
+              detail: error.detail,
+              cause: error,
+              reason:
+                error.reason === "missing-cli"
                   ? "missing-tool"
                   : error.reason === "authentication"
                     ? "unauthenticated"
@@ -94,7 +93,7 @@ export const make = Effect.gen(function* () {
                       : error.reason === "not-found"
                         ? "not-found"
                         : "failed",
-          }),
+            }),
       ),
     );
   const read = Effect.fn("ForgejoPullRequestProvider.read")(function* <A>(

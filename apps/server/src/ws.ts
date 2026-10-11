@@ -42,6 +42,7 @@ import {
   type AuthAccessStreamEvent,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  AuthSourceControlWriteScope,
   EnvironmentAuthInvalidError,
   EnvironmentInternalError,
   type AuthEnvironmentScope,
@@ -246,7 +247,6 @@ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as TraceDiagnostics from "./diagnostics/TraceDiagnostics.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
-import { listLinkedPullRequestThreads } from "./pullRequest/linkedThreads.ts";
 import { pullRequestSyncKey } from "./pullRequest/pullRequestSyncKey.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as PullRequestSyncReactor from "./orchestration-v2/PullRequestSyncReactor.ts";
@@ -1429,7 +1429,6 @@ const layerWsRpc = (
   ServerWsRpcGroup.toLayer(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
-      const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const intakeContext = yield* Effect.context<
         | SqlClient.SqlClient
@@ -1474,15 +1473,6 @@ const layerWsRpc = (
           Effect.orDie,
           Effect.map((id) => CommandId.make(`server:${tag}:${id}`)),
         );
-      const resolvePullRequestSyncKey = (reference: PullRequestRef) =>
-        reference.host !== undefined && reference.repository.includes("/")
-          ? Effect.succeed(pullRequestSyncKey(reference))
-          : projectService.getShell(reference.projectId).pipe(
-              Effect.map((project) =>
-                pullRequestSyncKey(reference, Option.getOrUndefined(project)?.repositoryIdentity),
-              ),
-              Effect.orElseSucceed(() => null),
-            );
       const usage = yield* UsageService.UsageService;
       const usageLimitSources = yield* UsageLimitSources.UsageLimitSources;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
@@ -1553,7 +1543,6 @@ const layerWsRpc = (
       );
       const sourceControlRepositories =
         yield* SourceControlRepositoryService.SourceControlRepositoryService;
-      const withPullRequestViewer = pullRequests.withRoutingCredential;
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
       const sessions = yield* SessionStore.SessionStore;
       const collectionAuthority = sessions.getAuthority(currentSession.sessionId, currentSession);
@@ -1562,6 +1551,18 @@ const layerWsRpc = (
           Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationReadScope)),
         ),
       };
+      const withPullRequestViewer = <A, E, R>(
+        input: PullRequestRef,
+        operation: Effect.Effect<A, E, R>,
+        scope: AuthEnvironmentScope = AuthOrchestrationReadScope,
+      ) => pullRequests.withRoutingCredential(readAuthority, input, operation, scope);
+      const resolvePullRequestSyncKey = (
+        reference: PullRequestRef,
+        scope: AuthEnvironmentScope = AuthOrchestrationReadScope,
+      ) =>
+        pullRequests
+          .resolveReference(readAuthority, reference, scope)
+          .pipe(Effect.map((ref) => pullRequestSyncKey(ref)));
       const mutationAuthority: MutationAuthority = {
         current: collectionAuthority.pipe(
           Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationOperateScope)),
@@ -2704,60 +2705,45 @@ const layerWsRpc = (
                 Effect.forkScoped,
               ),
           ),
-        [WS_METHODS.pullRequestsList]: (input) =>
-          collectionAuthority.pipe(
-            Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationReadScope)),
-            Effect.flatMap((authority) => pullRequests.list(input, authority.resourceGrant)),
-          ),
-        [WS_METHODS.pullRequestsListStats]: (input) =>
-          collectionAuthority.pipe(
-            Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationReadScope)),
-            Effect.flatMap((authority) => pullRequests.listStats(input, authority.resourceGrant)),
-          ),
-        [WS_METHODS.pullRequestsRoutingIdentity]: (input) => pullRequests.routingIdentity(input),
-        [WS_METHODS.pullRequestsRouting]: (input) => pullRequests.routing(input),
+        [WS_METHODS.pullRequestsList]: (input) => pullRequests.list(readAuthority, input),
+        [WS_METHODS.pullRequestsListStats]: (input) => pullRequests.listStats(readAuthority, input),
+        [WS_METHODS.pullRequestsRoutingIdentity]: (input) =>
+          pullRequests.routingIdentity(readAuthority, input),
+        [WS_METHODS.pullRequestsRouting]: (input) => pullRequests.routing(readAuthority, input),
         [WS_METHODS.pullRequestsSummary]: (input) =>
-          withPullRequestViewer(input, pullRequests.summary(input)),
+          withPullRequestViewer(input, pullRequests.summary(readAuthority, input)),
         [WS_METHODS.pullRequestsStack]: (input) =>
-          withPullRequestViewer(input, pullRequests.stack(input)),
+          withPullRequestViewer(input, pullRequests.stack(readAuthority, input)),
         [WS_METHODS.pullRequestsLinkedThreads]: (input) =>
-          collectionAuthority.pipe(
-            Effect.mapError(() => rpcAuthorizationError(AuthOrchestrationReadScope)),
-            Effect.flatMap((authority) =>
-              !resourceGrantAllowsProject(authority.resourceGrant, input.projectId)
-                ? Effect.succeed({ threads: [] })
-                : resolvePullRequestSyncKey(input).pipe(
-                    Effect.flatMap((key) =>
-                      key === null
-                        ? Effect.succeed({ threads: [] })
-                        : listLinkedPullRequestThreads(
-                            key,
-                            projectCollectionOptions(authority.resourceGrant),
-                          ).pipe(Effect.provideService(SqlClient.SqlClient, sql)),
-                    ),
-                  ),
-            ),
-          ),
+          pullRequests.linkedThreads(readAuthority, input),
         [WS_METHODS.pullRequestsDetail]: (input) =>
-          withPullRequestViewer(input, pullRequests.detail(input)),
+          withPullRequestViewer(input, pullRequests.detail(readAuthority, input)),
         [WS_METHODS.pullRequestsPreview]: (input) =>
-          withPullRequestViewer(input, pullRequests.preview(input)),
+          withPullRequestViewer(input, pullRequests.preview(readAuthority, input)),
         [WS_METHODS.pullRequestsChecks]: (input) =>
-          withPullRequestViewer(input, pullRequests.checks(input)),
+          withPullRequestViewer(input, pullRequests.checks(readAuthority, input)),
         [WS_METHODS.pullRequestsActivity]: (input) =>
-          withPullRequestViewer(input, pullRequests.activity(input)),
+          withPullRequestViewer(input, pullRequests.activity(readAuthority, input)),
         [WS_METHODS.pullRequestsThreadComments]: (input) =>
-          withPullRequestViewer(input, pullRequests.threadComments(input)),
+          withPullRequestViewer(input, pullRequests.threadComments(readAuthority, input)),
         [WS_METHODS.pullRequestsDiffFileContents]: (input) =>
-          withPullRequestViewer(input, pullRequests.diffFileContents(input)),
+          withPullRequestViewer(input, pullRequests.diffFileContents(readAuthority, input)),
         [WS_METHODS.pullRequestsFilesViewed]: (input) =>
-          withPullRequestViewer(input, pullRequests.filesViewed(input)),
+          withPullRequestViewer(input, pullRequests.filesViewed(readAuthority, input)),
         [WS_METHODS.pullRequestsSetFilesViewed]: (input) =>
-          withPullRequestViewer(input, pullRequests.setFilesViewed(input)),
+          withPullRequestViewer(
+            input,
+            pullRequests.setFilesViewed(readAuthority, input),
+            AuthSourceControlWriteScope,
+          ),
         [WS_METHODS.pullRequestsRunAction]: (input) =>
-          withPullRequestViewer(input, pullRequests.runAction(input)).pipe(
+          withPullRequestViewer(
+            input,
+            pullRequests.runAction(readAuthority, input),
+            AuthSourceControlWriteScope,
+          ).pipe(
             Effect.tap(() =>
-              resolvePullRequestSyncKey(input).pipe(
+              resolvePullRequestSyncKey(input, AuthSourceControlWriteScope).pipe(
                 Effect.flatMap((key) =>
                   key === null ? Effect.void : pullRequestSync.requestSync(key),
                 ),
@@ -2765,21 +2751,49 @@ const layerWsRpc = (
             ),
           ),
         [WS_METHODS.pullRequestsUpdate]: (input) =>
-          withPullRequestViewer(input, pullRequests.update(input)),
+          withPullRequestViewer(
+            input,
+            pullRequests.update(readAuthority, input),
+            AuthSourceControlWriteScope,
+          ),
         [WS_METHODS.pullRequestsComment]: (input) =>
-          withPullRequestViewer(input, pullRequests.comment(input)),
+          withPullRequestViewer(
+            input,
+            pullRequests.comment(readAuthority, input),
+            AuthSourceControlWriteScope,
+          ),
         [WS_METHODS.pullRequestsUpdateComment]: (input) =>
-          withPullRequestViewer(input, pullRequests.updateComment(input)),
+          withPullRequestViewer(
+            input,
+            pullRequests.updateComment(readAuthority, input),
+            AuthSourceControlWriteScope,
+          ),
         [WS_METHODS.pullRequestsSubmitReview]: (input) =>
-          withPullRequestViewer(input, pullRequests.submitReview(input)),
+          withPullRequestViewer(
+            input,
+            pullRequests.submitReview(readAuthority, input),
+            AuthSourceControlWriteScope,
+          ),
         [WS_METHODS.pullRequestsReplyToThread]: (input) =>
-          withPullRequestViewer(input, pullRequests.replyToThread(input)),
+          withPullRequestViewer(
+            input,
+            pullRequests.replyToThread(readAuthority, input),
+            AuthSourceControlWriteScope,
+          ),
         [WS_METHODS.pullRequestsSetThreadResolution]: (input) =>
-          withPullRequestViewer(input, pullRequests.setThreadResolution(input)),
+          withPullRequestViewer(
+            input,
+            pullRequests.setThreadResolution(readAuthority, input),
+            AuthSourceControlWriteScope,
+          ),
         [WS_METHODS.pullRequestsSetReaction]: (input) =>
-          withPullRequestViewer(input, pullRequests.setReaction(input)),
+          withPullRequestViewer(
+            input,
+            pullRequests.setReaction(readAuthority, input),
+            AuthSourceControlWriteScope,
+          ),
         [WS_METHODS.pullRequestsInvalidate]: (input) =>
-          pullRequests.invalidate(input, { notifyReaders: true }).pipe(
+          pullRequests.invalidate(readAuthority, input, { notifyReaders: true }).pipe(
             // A reader asking for fresh host state also wants the thread badges it feeds to
             // catch up, including a merged link the sweep would otherwise never revisit.
             Effect.andThen(
@@ -2792,15 +2806,24 @@ const layerWsRpc = (
                   ),
             ),
           ),
-        [WS_METHODS.pullRequestsSubscribeRefreshes]: () => pullRequests.subscribeRefreshes,
+        [WS_METHODS.pullRequestsSubscribeRefreshes]: () =>
+          pullRequests.subscribeRefreshes(readAuthority),
         [WS_METHODS.pullRequestsReviewerCandidates]: (input) =>
-          withPullRequestViewer(input, pullRequests.reviewerCandidates(input)),
+          withPullRequestViewer(input, pullRequests.reviewerCandidates(readAuthority, input)),
         [WS_METHODS.pullRequestsRequestReviewers]: (input) =>
-          withPullRequestViewer(input, pullRequests.requestReviewers(input)),
+          withPullRequestViewer(
+            input,
+            pullRequests.requestReviewers(readAuthority, input),
+            AuthSourceControlWriteScope,
+          ),
         [WS_METHODS.pullRequestsLabelCandidates]: (input) =>
-          withPullRequestViewer(input, pullRequests.labelCandidates(input)),
+          withPullRequestViewer(input, pullRequests.labelCandidates(readAuthority, input)),
         [WS_METHODS.pullRequestsSetLabels]: (input) =>
-          withPullRequestViewer(input, pullRequests.setLabels(input)),
+          withPullRequestViewer(
+            input,
+            pullRequests.setLabels(readAuthority, input),
+            AuthSourceControlWriteScope,
+          ),
         [WS_METHODS.sourceControlLookupRepository]: (input) =>
           sourceControlRepositories.lookupRepository(input),
         [WS_METHODS.sourceControlCloneRepository]: (input) =>

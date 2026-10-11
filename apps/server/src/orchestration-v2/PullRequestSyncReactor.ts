@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import { siblingPullRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import {
@@ -286,8 +287,11 @@ export const make = Effect.gen(function* () {
         number: first.link.number,
       };
       const generation = requested.get(key);
-      if (generation !== undefined) yield* pullRequests.invalidate({ reference: ref });
-      const summary = yield* pullRequests.summary(ref, { recoverTransientFailure: false });
+      if (generation !== undefined)
+        yield* pullRequests.invalidate(trustedReadAuthority, { reference: ref });
+      const summary = yield* pullRequests.summary(trustedReadAuthority, ref, {
+        recoverTransientFailure: false,
+      });
       const fields = snapshotFieldsOf(summary);
       const needsStack =
         generation !== undefined ||
@@ -307,7 +311,7 @@ export const make = Effect.gen(function* () {
         ? null
         : knownUnstacked
           ? { stack: null }
-          : yield* pullRequests.stack(ref, { includeDetails: false }).pipe(
+          : yield* pullRequests.stack(trustedReadAuthority, ref, { includeDetails: false }).pipe(
               Effect.map((stack) => ({
                 stack: stack === null ? null : ({ kind: "native", ...stack } as const),
               })),
@@ -430,7 +434,7 @@ export const make = Effect.gen(function* () {
     // A client reading a pull request, or its branch status, can see it merge or close before
     // the next sweep does.
     const stateChanges = Stream.merge(
-      yield* pullRequests.subscribeStateChanges,
+      yield* pullRequests.subscribeStateChanges(trustedReadAuthority).pipe(Effect.orDie),
       yield* git.subscribePullRequestStateChanges,
     );
     yield* forkParked(

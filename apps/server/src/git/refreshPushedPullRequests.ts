@@ -36,7 +36,11 @@ export const refreshPushedPullRequests = Effect.fn("refreshPushedPullRequests")(
         (admission.projectId === undefined || admission.projectId === thread.projectId)
       ) {
         yield* admission.beforeEffect(input.cwd);
-        yield* pullRequests.refreshAfterTurn(thread.projectId);
+        yield* pullRequests.refreshAfterTurn(
+          admission.authority,
+          thread.projectId,
+          admission.scope,
+        );
         return;
       }
     }
@@ -45,7 +49,7 @@ export const refreshPushedPullRequests = Effect.fn("refreshPushedPullRequests")(
       (admission.projectId === undefined || admission.projectId === input.projectId)
     ) {
       yield* admission.beforeEffect(input.cwd);
-      yield* pullRequests.refreshAfterTurn(input.projectId);
+      yield* pullRequests.refreshAfterTurn(admission.authority, input.projectId, admission.scope);
       return;
     }
     yield* admission.beforeEffect(input.cwd);
@@ -59,7 +63,11 @@ export const refreshPushedPullRequests = Effect.fn("refreshPushedPullRequests")(
       (project) =>
         admission
           .beforeEffect(input.cwd)
-          .pipe(Effect.andThen(pullRequests.refreshAfterTurn(project.id))),
+          .pipe(
+            Effect.andThen(
+              pullRequests.refreshAfterTurn(admission.authority, project.id, admission.scope),
+            ),
+          ),
       { discard: true },
     );
   },

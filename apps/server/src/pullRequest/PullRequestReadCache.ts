@@ -2,7 +2,11 @@ import * as Cache from "effect/Cache";
 import * as Clock from "effect/Clock";
 import * as Equal from "effect/Equal";
 import * as Hash from "effect/Hash";
-import { PullRequestOperationError, PullRequestUnavailableError } from "@t3tools/contracts";
+import {
+  EnvironmentAuthorizationError,
+  PullRequestOperationError,
+  PullRequestUnavailableError,
+} from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Hex from "effect/encoding/Hex";
 import * as Context from "effect/Context";
@@ -35,7 +39,10 @@ const ENTRY_FILE_NAME = new RegExp(`^${STORE_ID}[0-9a-f]{64}$`);
  * for clock changes. Pruning a live entry would cost one refetch.
  */
 export const ENTRY_FILE_MAX_AGE = Duration.days(1);
-type ReadError = PullRequestOperationError | PullRequestUnavailableError;
+type ReadError =
+  | PullRequestOperationError
+  | PullRequestUnavailableError
+  | EnvironmentAuthorizationError;
 const revisionCodec = Schema.fromJsonString(
   Schema.Record(
     Schema.String,
@@ -51,7 +58,11 @@ class Read extends Persistable.Class<{
     expiresAt: Schema.Finite,
     revision: Schema.optionalKey(Schema.String),
   }),
-  error: Schema.Union([PullRequestOperationError, PullRequestUnavailableError]),
+  error: Schema.Union([
+    PullRequestOperationError,
+    PullRequestUnavailableError,
+    EnvironmentAuthorizationError,
+  ]),
 }) {
   matchesRevision(revision: string | undefined): boolean {
     const stored = revision?.split(":") ?? [];

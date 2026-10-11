@@ -540,6 +540,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
       Effect.andThen(options.branchPullRequest?.(authority, input) ?? Effect.succeed(null)),
     );
   const pullRequestSummary: PullRequestService.PullRequestService["Service"]["summary"] = (
+    authority,
     input,
     readOptions,
   ) =>
@@ -550,7 +551,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
         readOptions?.recoverTransientFailure,
       ]);
       return yield* (
-        options.pullRequestSummary?.(input, readOptions) ??
+        options.pullRequestSummary?.(authority, input, readOptions) ??
           Effect.succeed(
             makePullRequestSummary({
               ...input,
@@ -627,9 +628,10 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
     }),
     Layer.mock(PullRequestService.PullRequestService)({
       summary: pullRequestSummary,
-      subscribeMerges: PubSub.subscribe(mergedPullRequests).pipe(
-        Effect.map((subscription) => Stream.fromSubscription(subscription)),
-      ),
+      subscribeMerges: () =>
+        PubSub.subscribe(mergedPullRequests).pipe(
+          Effect.map((subscription) => Stream.fromSubscription(subscription)),
+        ),
     }),
     Layer.succeed(ServerSettings.ServerSettingsService, serverSettings),
     Layer.succeed(ServerActivation.ServerActivation, Deferred.await(activation)),
@@ -798,7 +800,7 @@ describe("ThreadSettlementServiceV2 worker", () => {
             sidebarAutoSettleOnMerge: true,
           },
           branchPullRequest: () => Effect.succeed(makeBranchPullRequest("open")),
-          pullRequestSummary: (input) =>
+          pullRequestSummary: (_authority, input) =>
             Effect.succeed({
               ...makePullRequestSummary({ ...input, state: "merged" }),
               mergedAt: "2026-08-27T00:00:00.000Z",
@@ -942,7 +944,7 @@ describe("ThreadSettlementServiceV2 worker", () => {
               },
             }),
           ]),
-          pullRequestSummary: (input) =>
+          pullRequestSummary: (_authority, input) =>
             Ref.updateAndGet(lookupCount, (count) => count + 1).pipe(
               // The initial sweep looks up both linked threads; the merge
               // sweep only looks up the unrelated one, since the merged

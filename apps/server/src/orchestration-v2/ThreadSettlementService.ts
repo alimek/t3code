@@ -472,6 +472,7 @@ export const make = Effect.gen(function* () {
               mergedAt: mergedPullRequest.mergedAt,
             } satisfies SettlementPullRequest)
           : yield* pullRequests.summary(
+              trustedReadAuthority,
               {
                 projectId: reference.projectId,
                 repository: reference.repository,
@@ -625,7 +626,9 @@ export const make = Effect.gen(function* () {
     "ThreadSettlementServiceV2.start",
   )(function* () {
     const settingsChanges = yield* settingsService.subscribeChanges;
-    const mergedPullRequests = yield* pullRequests.subscribeMerges;
+    const mergedPullRequests = yield* pullRequests
+      .subscribeMerges(trustedReadAuthority)
+      .pipe(Effect.orDie);
     const events = orchestrator.streamDomainEvents;
     const initialSettings = yield* settingsService.getSettings.pipe(Effect.orDie);
     let lastSettlementSettings = autoSettlementSettingsKey(initialSettings);
@@ -645,7 +648,9 @@ export const make = Effect.gen(function* () {
         return worker.enqueue(undefined);
       }),
     );
-    yield* forkParked(Stream.runForEach(mergedPullRequests, (event) => runSweep(event)));
+    yield* forkParked(
+      Stream.runForEach(mergedPullRequests.pipe(Stream.orDie), (event) => runSweep(event)),
+    );
     yield* forkParked(
       Stream.runForEach(events, processEvent).pipe(
         Effect.catchCause((cause) =>

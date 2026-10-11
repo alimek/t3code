@@ -1040,6 +1040,7 @@ layer("AzureDevOpsPullRequestCli.layer", (it) => {
         provider.getDiff({ cwd: "/w", repository: "web", host: "dev.azure.com", number: 42 }),
       );
 
+      if (error._tag === "EnvironmentAuthorizationError") throw error;
       assert.strictEqual(error.reason, "rate-limited");
     }),
   );

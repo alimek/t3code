@@ -1,4 +1,8 @@
+import { trustedReadAuthority, type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
+import { AuthOrchestrationReadScope } from "@t3tools/contracts";
 import { assert, expect, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -8,6 +12,8 @@ import { listLinkedPullRequestThreads } from "./linkedThreads.ts";
 import {
   collectionStoreLayer,
   makeCollectionFixture,
+  grantA,
+  grantNone,
   projectA,
   projectB,
   activeA,
@@ -38,14 +44,31 @@ it.effect("filters active, archived and legacy linked thread references in SQL",
     // Exercise the modern array and the legacy single-link branch together.
     yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = json_set(payload_json, '$.pullRequests', json('[{"host":"github.com","repository":"acme/shared","number":7,"url":"https://github.com/acme/shared/pull/7","source":"manual"}]')) WHERE thread_id IN (${activeA}, ${activeB})`;
     const key = { host: "github.com", repository: "acme/shared", number: 7 };
-    const restricted = yield* listLinkedPullRequestThreads(key, { projectIds: [projectA] });
+    const restricted = yield* listLinkedPullRequestThreads(
+      { current: Effect.succeed({ scopes: [AuthOrchestrationReadScope], resourceGrant: grantA }) },
+      key,
+    );
     assert.deepEqual(
       restricted.threads.map((thread) => thread.id).toSorted(),
       [activeA, archiveA].toSorted(),
     );
     assert.notInclude(JSON.stringify(restricted), "b-secret");
-    assert.deepEqual((yield* listLinkedPullRequestThreads(key, { projectIds: [] })).threads, []);
-    assert.equal((yield* listLinkedPullRequestThreads(key)).threads.length, 4);
+    assert.deepEqual(
+      (yield* listLinkedPullRequestThreads(
+        {
+          current: Effect.succeed({
+            scopes: [AuthOrchestrationReadScope],
+            resourceGrant: grantNone,
+          }),
+        },
+        key,
+      )).threads,
+      [],
+    );
+    assert.equal(
+      (yield* listLinkedPullRequestThreads(trustedReadAuthority, key)).threads.length,
+      4,
+    );
   }).pipe(Effect.provide(collectionStoreLayer), Effect.scoped),
 );
 
@@ -183,27 +206,27 @@ it.effect(
       `;
 
       expect(
-        (yield* listLinkedPullRequestThreads({
+        (yield* listLinkedPullRequestThreads(trustedReadAuthority, {
           host: "forge.example:3000",
           repository: "acme/web",
           number: 7,
         })).threads.map((thread) => thread.id),
       ).toEqual(["forgejo-old"]);
       expect(
-        (yield* listLinkedPullRequestThreads({
+        (yield* listLinkedPullRequestThreads(trustedReadAuthority, {
           host: "forge.example:4000",
           repository: "acme/web",
           number: 7,
         })).threads.map((thread) => thread.id),
       ).toEqual(["forgejo-other-port"]);
       expect(
-        (yield* listLinkedPullRequestThreads({
+        (yield* listLinkedPullRequestThreads(trustedReadAuthority, {
           host: "org.visualstudio.com",
           repository: "project/_git/web",
           number: 7,
         })).threads.map((thread) => thread.id),
       ).toEqual(["azure"]);
-      const result = yield* listLinkedPullRequestThreads({
+      const result = yield* listLinkedPullRequestThreads(trustedReadAuthority, {
         host: "GitHub.Com",
         repository: "ACME/WEB",
         number: 7,
@@ -216,7 +239,7 @@ it.effect(
         ],
       });
       assert.deepStrictEqual(
-        yield* listLinkedPullRequestThreads({
+        yield* listLinkedPullRequestThreads(trustedReadAuthority, {
           host: "github.com",
           repository: "acme/web",
           number: 99,
@@ -224,4 +247,39 @@ it.effect(
         { threads: [] },
       );
     }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
+);
+
+it.effect(
+  "excludes malformed hidden metadata and cuts actual thread owners after a suspended current check",
+  () =>
+    Effect.gen(function* () {
+      const fixture = yield* makeCollectionFixture;
+      const sql = yield* SqlClient.SqlClient;
+      const key = { host: "github.com", repository: "acme/shared", number: 7 };
+      yield* fixture.updateThread("thread.metadata-updated", activeA, {
+        linkedPullRequest: {
+          projectId: projectA,
+          ...key,
+          url: "https://github.com/acme/shared/pull/7",
+        },
+      });
+      yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = 'malformed hidden JSON' WHERE project_id = ${projectB}`;
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let checks = 0;
+      const authority: ThreadReadAuthority = {
+        current: Effect.gen(function* () {
+          if (++checks === 2) {
+            yield* Deferred.succeed(started, undefined);
+            yield* Deferred.await(release);
+          }
+          return { scopes: [AuthOrchestrationReadScope], resourceGrant: grantA };
+        }),
+      };
+      const fiber = yield* Effect.forkChild(listLinkedPullRequestThreads(authority, key));
+      yield* Deferred.await(started);
+      yield* sql`UPDATE orchestration_v2_projection_threads SET project_id = ${projectB} WHERE thread_id = ${activeA}`;
+      yield* Deferred.succeed(release, undefined);
+      assert.deepEqual((yield* Fiber.join(fiber)).threads, []);
+    }).pipe(Effect.provide(collectionStoreLayer), Effect.scoped),
 );

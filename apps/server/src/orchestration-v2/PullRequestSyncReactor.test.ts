@@ -186,6 +186,7 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
   const stateChanges = yield* Queue.unbounded<ThreadPullRequestKey>();
 
   const summary: PullRequestService.PullRequestService["Service"]["summary"] = (
+    _authority,
     input,
     readOptions,
   ) =>
@@ -195,7 +196,11 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
       return yield* options.summary?.(input) ?? Effect.succeed(makeSummary(input));
     });
 
-  const stack: PullRequestService.PullRequestService["Service"]["stack"] = (input, readOptions) =>
+  const stack: PullRequestService.PullRequestService["Service"]["stack"] = (
+    _authority,
+    input,
+    readOptions,
+  ) =>
     Effect.gen(function* () {
       assert.strictEqual(readOptions?.includeDetails, false);
       yield* Ref.update(stackCalls, (calls) => [...calls, input]);
@@ -221,7 +226,7 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
       summary,
       stack,
       invalidate: options.invalidate ?? (() => Effect.void),
-      subscribeStateChanges: Effect.succeed(Stream.fromQueue(stateChanges)),
+      subscribeStateChanges: () => Effect.succeed(Stream.fromQueue(stateChanges)),
     }),
     Layer.mock(GitManager.GitManager)({
       subscribePullRequestStateChanges: Effect.succeed(Stream.empty),
@@ -597,7 +602,7 @@ describe("PullRequestSyncReactor", () => {
               pullRequests: [makeLink(42, { state: "closed" })],
             }),
           ]),
-          invalidate: ({ reference }) =>
+          invalidate: (_authority, { reference }) =>
             reference?.projectId === makeProject().id && reference.host === "github.com"
               ? Ref.set(stale, false)
               : Effect.void,
@@ -678,7 +683,7 @@ describe("PullRequestSyncReactor", () => {
                 makeSummary(input, current === "merged" ? { state: current, mergedAt: NOW } : {}),
               ),
             ),
-          invalidate: ({ reference }) =>
+          invalidate: (_authority, { reference }) =>
             Ref.update(invalidated, (numbers) => [...numbers, reference?.number ?? -1]),
         });
 
@@ -1126,7 +1131,7 @@ describe("PullRequestSyncReactor", () => {
                 makeSummary(input, current === "merged" ? { state: current, mergedAt: NOW } : {}),
               ),
             ),
-          invalidate: ({ reference }) =>
+          invalidate: (_authority, { reference }) =>
             Ref.update(invalidated, (numbers) => [...numbers, reference?.number ?? -1]),
         });
 

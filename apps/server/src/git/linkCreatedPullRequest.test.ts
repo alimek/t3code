@@ -251,7 +251,7 @@ it.effect(
           listShells: () => Effect.succeed([project]),
         }),
         Layer.mock(PullRequestService.PullRequestService)({
-          refreshAfterTurn: (id) =>
+          refreshAfterTurn: (_authority, id) =>
             Effect.sync(() => {
               refreshed.push(id);
             }),

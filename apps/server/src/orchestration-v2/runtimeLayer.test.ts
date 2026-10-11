@@ -3066,7 +3066,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
                         ],
                   commits: [],
                 }),
-              threadComments: (input) => {
+              threadComments: (_authority, input) => {
                 pagesRead += 1;
                 assert.equal(input.threadId, "review-thread");
                 if (input.cursor === "after-10") {

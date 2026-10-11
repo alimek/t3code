@@ -96,7 +96,8 @@ export const layerObserver = Layer.effect(
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const pullRequests = yield* PullRequestService.PullRequestService;
     return {
-      refreshAfterTurn: pullRequests.refreshAfterTurn,
+      refreshAfterTurn: (projectId) =>
+        pullRequests.refreshAfterTurn(trustedReadAuthority, projectId).pipe(Effect.orDie),
       refresh: ({ cwd, threadId, runId }) =>
         Effect.gen(function* () {
           const [, local] = yield* Effect.all(

@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type {
+  EnvironmentAuthorizationError,
   PullRequestStackMembership,
   PullRequestAction,
   PullRequestStackHead,
@@ -68,6 +69,8 @@ export class PullRequestProviderError extends Schema.TaggedError<PullRequestProv
     return `${this.provider} failed in ${this.operation}: ${this.detail}`;
   }
 }
+
+export type ProviderError = PullRequestProviderError | EnvironmentAuthorizationError;
 
 /**
  * `status` moves with the state, mergeability, head, or checks, which the detail read reports;
@@ -335,14 +338,11 @@ export interface PullRequestProviderApi {
       readonly viewer: string;
       readonly credentialFingerprint: string;
     }) => Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E | PullRequestProviderError, R>;
+  ) => Effect.Effect<A, E | ProviderError, R>;
   readonly getRoutingIdentity?: (input: {
     readonly cwd: string;
     readonly host: string;
-  }) => Effect.Effect<
-    { readonly accountId: string; readonly viewer: string },
-    PullRequestProviderError
-  >;
+  }) => Effect.Effect<{ readonly accountId: string; readonly viewer: string }, ProviderError>;
   readonly kind: SourceControlProviderKind;
   readonly capabilities: PullRequestCapabilities;
 
@@ -350,7 +350,7 @@ export interface PullRequestProviderApi {
   readonly getViewer: (input: {
     readonly cwd: string;
     readonly host?: string;
-  }) => Effect.Effect<string, PullRequestProviderError>;
+  }) => Effect.Effect<string, ProviderError>;
 
   readonly listChangeRequests: (
     input: ProviderRepositoryRef & {
@@ -377,7 +377,7 @@ export interface PullRequestProviderApi {
        */
       readonly filters?: PullRequestListFilters | undefined;
     },
-  ) => Effect.Effect<ProviderChangeRequestPage, PullRequestProviderError>;
+  ) => Effect.Effect<ProviderChangeRequestPage, ProviderError>;
 
   /**
    * The same listing for a whole host in one request, for a host that has a search across
@@ -405,7 +405,7 @@ export interface PullRequestProviderApi {
     readonly query?: string | undefined;
     readonly cursor?: ProviderListCursor | undefined;
     readonly filters?: PullRequestListFilters | undefined;
-  }) => Effect.Effect<ProviderBatchedChangeRequestPage, PullRequestProviderError>;
+  }) => Effect.Effect<ProviderBatchedChangeRequestPage, ProviderError>;
 
   /**
    * The line counts for rows a listing has already handed over. Only implemented by a provider
@@ -419,23 +419,20 @@ export interface PullRequestProviderApi {
       readonly repository: string;
       readonly number: number;
     }>;
-  }) => Effect.Effect<ReadonlyArray<ProviderChangeRequestStat>, PullRequestProviderError>;
+  }) => Effect.Effect<ReadonlyArray<ProviderChangeRequestStat>, ProviderError>;
 
   readonly getChangeRequestChecks?: (
     input: ProviderRepositoryRef & { readonly number: number },
-  ) => Effect.Effect<PullRequestChecks, PullRequestProviderError>;
+  ) => Effect.Effect<PullRequestChecks, ProviderError>;
 
   readonly getChangeRequest: (
     input: ProviderRepositoryRef & { readonly number: number },
-  ) => Effect.Effect<ProviderChangeRequestDetail, PullRequestProviderError>;
+  ) => Effect.Effect<ProviderChangeRequestDetail, ProviderError>;
 
   /** Hosts without a narrow read use their existing detail response for hover cards. */
   readonly getChangeRequestPreview?: (
     input: ProviderRepositoryRef & { readonly number: number },
-  ) => Effect.Effect<
-    Omit<PullRequestPreview, "projectId" | "repository">,
-    PullRequestProviderError
-  >;
+  ) => Effect.Effect<Omit<PullRequestPreview, "projectId" | "repository">, ProviderError>;
 
   /**
    * The cheap live fields used by linked threads. Optional because a provider without a narrow
@@ -443,7 +440,7 @@ export interface PullRequestProviderApi {
    */
   readonly getChangeRequestSummary?: (
     input: ProviderRepositoryRef & { readonly number: number },
-  ) => Effect.Effect<ProviderChangeRequestSummary, PullRequestProviderError>;
+  ) => Effect.Effect<ProviderChangeRequestSummary, ProviderError>;
 
   /**
    * A cheap fingerprint of what a pull request watch reports, so it reads the change request in
@@ -452,7 +449,7 @@ export interface PullRequestProviderApi {
    */
   readonly getChangeRequestWatchFingerprint?: (
     input: ProviderRepositoryRef & { readonly number: number },
-  ) => Effect.Effect<ProviderChangeRequestWatchFingerprint | null, PullRequestProviderError>;
+  ) => Effect.Effect<ProviderChangeRequestWatchFingerprint | null, ProviderError>;
 
   /**
    * The host-native stack a change request belongs to, or null when it is not stacked. Optional
@@ -460,12 +457,12 @@ export interface PullRequestProviderApi {
    */
   readonly getChangeRequestStack?: (
     input: ProviderRepositoryRef & { readonly includeDetails?: boolean; readonly number: number },
-  ) => Effect.Effect<ProviderChangeRequestStack | null, PullRequestProviderError>;
+  ) => Effect.Effect<ProviderChangeRequestStack | null, ProviderError>;
 
   /** Comments, line threads, and commits, kept off the critical path for the core detail. */
   readonly getChangeRequestActivity: (
     input: ProviderRepositoryRef & { readonly number: number },
-  ) => Effect.Effect<ProviderChangeRequestActivity, PullRequestProviderError>;
+  ) => Effect.Effect<ProviderChangeRequestActivity, ProviderError>;
 
   /** One explicit page after a reader asks to continue an unfinished review thread. */
   readonly getReviewThreadComments?: (
@@ -474,7 +471,7 @@ export interface PullRequestProviderApi {
       readonly threadId: string;
       readonly cursor: string;
     },
-  ) => Effect.Effect<PullRequestThreadCommentsResult, PullRequestProviderError>;
+  ) => Effect.Effect<PullRequestThreadCommentsResult, ProviderError>;
 
   /**
    * The same answer `getChangeRequest` carries, on its own. Asked before anything is written, so
@@ -491,7 +488,7 @@ export interface PullRequestProviderApi {
       /** Skip branch comparison when checking permission for an unrelated operation. */
       readonly includeUpdateBranch?: boolean;
     },
-  ) => Effect.Effect<PullRequestViewerPermissions, PullRequestProviderError>;
+  ) => Effect.Effect<PullRequestViewerPermissions, ProviderError>;
 
   /**
    * One slice of the patch. Only called when `capabilities.diff` is true. A provider that can
@@ -505,7 +502,7 @@ export interface PullRequestProviderApi {
       /** One commit's own changes, rather than everything the change request carries. */
       readonly commit?: string | undefined;
     },
-  ) => Effect.Effect<ProviderDiffSlice, PullRequestProviderError>;
+  ) => Effect.Effect<ProviderDiffSlice, ProviderError>;
 
   /**
    * Full files at the exact revisions the host used for its patch. Optional where the provider
@@ -519,7 +516,7 @@ export interface PullRequestProviderApi {
       readonly oldPath: string;
       readonly newPath: string;
     },
-  ) => Effect.Effect<ProviderDiffFileContents, PullRequestProviderError>;
+  ) => Effect.Effect<ProviderDiffFileContents, ProviderError>;
 
   /**
    * Which files the reader has already cleared. Only called when `capabilities.viewedFiles` is
@@ -527,7 +524,7 @@ export interface PullRequestProviderApi {
    */
   readonly getFilesViewed?: (
     input: ProviderRepositoryRef & { readonly number: number },
-  ) => Effect.Effect<ProviderFilesViewed, PullRequestProviderError>;
+  ) => Effect.Effect<ProviderFilesViewed, ProviderError>;
 
   /**
    * Clears files, or puts them back. Only called when `capabilities.viewedFiles` is `"host"`.
@@ -539,7 +536,7 @@ export interface PullRequestProviderApi {
       readonly number: number;
       readonly files: ReadonlyArray<{ readonly path: string; readonly viewed: boolean }>;
     },
-  ) => Effect.Effect<void, PullRequestProviderError>;
+  ) => Effect.Effect<void, ProviderError>;
 
   /**
    * What version the head has of each of these files. Required of a host whose
@@ -553,7 +550,7 @@ export interface PullRequestProviderApi {
       readonly number: number;
       readonly paths: ReadonlyArray<string>;
     },
-  ) => Effect.Effect<ProviderFileRevisions, PullRequestProviderError>;
+  ) => Effect.Effect<ProviderFileRevisions, ProviderError>;
 
   readonly runAction: (
     input: ProviderRepositoryRef & {
@@ -568,7 +565,7 @@ export interface PullRequestProviderApi {
       /** Only meaningful for `update-branch`; absent takes the host's own default. */
       readonly updateMethod?: PullRequestUpdateMethod;
     },
-  ) => Effect.Effect<void, PullRequestProviderError>;
+  ) => Effect.Effect<void, ProviderError>;
 
   /**
    * Rewrites the change request's own words. Only called when `capabilities.edit.changeRequest`
@@ -581,11 +578,11 @@ export interface PullRequestProviderApi {
       readonly title?: string | undefined;
       readonly body?: string | undefined;
     },
-  ) => Effect.Effect<void, PullRequestProviderError>;
+  ) => Effect.Effect<void, ProviderError>;
 
   readonly comment: (
     input: ProviderRepositoryRef & { readonly number: number; readonly body: string },
-  ) => Effect.Effect<void, PullRequestProviderError>;
+  ) => Effect.Effect<void, ProviderError>;
 
   /**
    * Rewrites a remark somebody already posted. Only called when `capabilities.edit.comment` is
@@ -602,7 +599,7 @@ export interface PullRequestProviderApi {
       readonly kind: "issue-comment" | "review-comment";
       readonly body: string;
     },
-  ) => Effect.Effect<void, PullRequestProviderError>;
+  ) => Effect.Effect<void, ProviderError>;
 
   /**
    * Sends a whole review at once. Only called for a verdict the host declared in
@@ -616,7 +613,7 @@ export interface PullRequestProviderApi {
       readonly body: string;
       readonly comments: ReadonlyArray<PullRequestReviewCommentDraft>;
     },
-  ) => Effect.Effect<void, PullRequestProviderError>;
+  ) => Effect.Effect<void, ProviderError>;
 
   /**
    * The people this viewer may ask for a review, with whoever has already been asked marked as
@@ -627,7 +624,7 @@ export interface PullRequestProviderApi {
    */
   readonly listReviewerCandidates: (
     input: ProviderRepositoryRef & { readonly number: number },
-  ) => Effect.Effect<PullRequestReviewerCandidateList, PullRequestProviderError>;
+  ) => Effect.Effect<PullRequestReviewerCandidateList, ProviderError>;
 
   /**
    * Asks for a review, or takes the request back. Only called when
@@ -647,7 +644,7 @@ export interface PullRequestProviderApi {
       }>;
       readonly requested: boolean;
     },
-  ) => Effect.Effect<void, PullRequestProviderError>;
+  ) => Effect.Effect<void, ProviderError>;
 
   /**
    * The repository's labels, with the ones already on the change request marked. Present with
@@ -655,7 +652,7 @@ export interface PullRequestProviderApi {
    */
   readonly listLabelCandidates?: (
     input: ProviderRepositoryRef & { readonly number: number },
-  ) => Effect.Effect<PullRequestLabelCandidateList, PullRequestProviderError>;
+  ) => Effect.Effect<PullRequestLabelCandidateList, ProviderError>;
 
   /** Puts labels on the change request, or takes them off. One call for both directions. */
   readonly setLabels?: (
@@ -664,7 +661,7 @@ export interface PullRequestProviderApi {
       readonly labels: ReadonlyArray<string>;
       readonly applied: boolean;
     },
-  ) => Effect.Effect<void, PullRequestProviderError>;
+  ) => Effect.Effect<void, ProviderError>;
 
   /** Only called when `capabilities.review.reply` is true. */
   readonly replyToThread: (
@@ -673,7 +670,7 @@ export interface PullRequestProviderApi {
       readonly threadId: string;
       readonly body: string;
     },
-  ) => Effect.Effect<void, PullRequestProviderError>;
+  ) => Effect.Effect<void, ProviderError>;
 
   /**
    * Adds a reaction, or takes it back. Only called when `capabilities.reactions` is true.
@@ -689,7 +686,7 @@ export interface PullRequestProviderApi {
       readonly content: PullRequestReactionContent;
       readonly reacted: boolean;
     },
-  ) => Effect.Effect<void, PullRequestProviderError>;
+  ) => Effect.Effect<void, ProviderError>;
 
   /** Only called when `capabilities.review.resolve` is true. */
   readonly setThreadResolution: (
@@ -698,5 +695,5 @@ export interface PullRequestProviderApi {
       readonly threadId: string;
       readonly resolved: boolean;
     },
-  ) => Effect.Effect<void, PullRequestProviderError>;
+  ) => Effect.Effect<void, ProviderError>;
 }

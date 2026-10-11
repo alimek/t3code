@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
 import {
   CommandId,
@@ -363,11 +364,14 @@ export const make = Effect.gen(function* () {
           while (cursor !== null) {
             if (cursors.has(cursor)) return null;
             cursors.add(cursor);
-            const page: PullRequestThreadCommentsResult = yield* pullRequests.threadComments({
-              ...reference,
-              threadId: thread.id,
-              cursor,
-            });
+            const page: PullRequestThreadCommentsResult = yield* pullRequests.threadComments(
+              trustedReadAuthority,
+              {
+                ...reference,
+                threadId: thread.id,
+                cursor,
+              },
+            );
             for (const comment of page.comments) {
               comments.set(comment.id, {
                 ...comment,
@@ -453,7 +457,7 @@ export const make = Effect.gen(function* () {
    * read would be refused.
    */
   const fingerprintOf = (group: WatchGroup) =>
-    pullRequests.watchFingerprint(referenceOf(group)).pipe(
+    pullRequests.watchFingerprint(trustedReadAuthority, referenceOf(group)).pipe(
       Effect.catchCause(
         (cause): Effect.Effect<ProviderChangeRequestWatchFingerprint | null | "paused"> =>
           Cause.hasInterruptsOnly(cause)
@@ -480,13 +484,13 @@ export const make = Effect.gen(function* () {
     const reference = referenceOf(group);
     // The reads are recorded against this fingerprint, so a cached answer older than it must not
     // stand in for them. Clients are not told: this only drops this pull request's cached reads.
-    if (fingerprint !== null) yield* pullRequests.invalidate({ reference });
+    if (fingerprint !== null) yield* pullRequests.invalidate(trustedReadAuthority, { reference });
     const read = yield* Effect.exit(
       Effect.all(
         [
-          pullRequests.detail({ ...reference, allowStale: false }),
+          pullRequests.detail(trustedReadAuthority, { ...reference, allowStale: false }),
           plan.activity
-            ? pullRequests.activity(reference).pipe(Effect.map(Option.some))
+            ? pullRequests.activity(trustedReadAuthority, reference).pipe(Effect.map(Option.some))
             : Effect.succeed(Option.none<PullRequestActivity>()),
         ],
         { concurrency: 2 },

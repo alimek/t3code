@@ -16,7 +16,7 @@ import {
 } from "@t3tools/contracts";
 
 import type * as PullRequestFilesViewed from "../persistence/PullRequestFilesViewed.ts";
-import type { ProviderFileRevisions, PullRequestProviderError } from "./PullRequestProvider.ts";
+import type { ProviderFileRevisions, ProviderError } from "./PullRequestProvider.ts";
 import type { PullRequestError, SupportedProject } from "./PullRequestService.ts";
 
 /**
@@ -39,9 +39,7 @@ interface FileRevisionsDependencies {
   readonly runFork: (effect: Effect.Effect<void>) => unknown;
   readonly refEpoch: (ref: PullRequestRef) => number;
   readonly fileRevisionsEpoch: () => number;
-  readonly toPullRequestError: (
-    operation: string,
-  ) => (error: PullRequestProviderError) => PullRequestError;
+  readonly toPullRequestError: (operation: string) => (error: ProviderError) => PullRequestError;
 }
 
 const makeFileRevisions = (dependencies: FileRevisionsDependencies) => {
@@ -183,14 +181,20 @@ const makeFileRevisions = (dependencies: FileRevisionsDependencies) => {
       if (refreshingFileRevisions.has(key)) return Effect.succeed(held.revisions);
       // Its own fiber rather than a child: the caller has been answered and is gone before this
       // lands. One at a time per change request, so a page of files costs one host read.
-      return Effect.sync(() => {
-        refreshingFileRevisions.add(key);
-        runFork(
-          Effect.ignore(fetch).pipe(
-            Effect.ensuring(Effect.sync(() => refreshingFileRevisions.delete(key))),
-          ),
-        );
-      }).pipe(Effect.as(held.revisions));
+      return Effect.context<never>().pipe(
+        Effect.flatMap((caller) =>
+          Effect.sync(() => {
+            refreshingFileRevisions.add(key);
+            runFork(
+              Effect.ignore(fetch).pipe(
+                Effect.provideContext(caller),
+                Effect.ensuring(Effect.sync(() => refreshingFileRevisions.delete(key))),
+              ),
+            );
+          }),
+        ),
+        Effect.as(held.revisions),
+      );
     });
   };
 
@@ -261,10 +265,12 @@ export const make = (dependencies: Dependencies) => {
         "filesViewed",
       ).pipe(
         Effect.catch((error) =>
-          Effect.logWarning("reporting viewed files without what the head has of them", {
-            operation: "filesViewed",
-            reason: error._tag,
-          }).pipe(Effect.as(null)),
+          error._tag === "EnvironmentAuthorizationError"
+            ? Effect.fail(error)
+            : Effect.logWarning("reporting viewed files without what the head has of them", {
+                operation: "filesViewed",
+                reason: error._tag,
+              }).pipe(Effect.as(null)),
         ),
       );
       return {
@@ -341,10 +347,12 @@ export const make = (dependencies: Dependencies) => {
               // A host that won't say what its head has costs the press its baseline, not the
               // press itself: the mark is stored with none and holds until pressed again.
               Effect.catch((error) =>
-                Effect.logWarning("recording viewed files without what the head has of them", {
-                  operation: "setFilesViewed",
-                  reason: error._tag,
-                }).pipe(Effect.as(null)),
+                error._tag === "EnvironmentAuthorizationError"
+                  ? Effect.fail(error)
+                  : Effect.logWarning("recording viewed files without what the head has of them", {
+                      operation: "setFilesViewed",
+                      reason: error._tag,
+                    }).pipe(Effect.as(null)),
               ),
             );
       const viewedAt = DateTime.formatIso(yield* DateTime.now);
