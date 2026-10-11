@@ -107,24 +107,6 @@ export const make = Effect.gen(function* () {
   ) {
     const value = yield* current(authority, scope);
     if (value === undefined) return;
-    if (input.threadId !== undefined) yield* thread(authority, input.threadId, scope);
-    const registered = yield* roots(scope);
-    if (
-      input.projectId !== undefined &&
-      !registered.some(
-        (r) =>
-          r.project === input.projectId &&
-          r.thread === null &&
-          resourceGrantAllowsProject(value.resourceGrant, ProjectId.make(r.project)),
-      )
-    )
-      return yield* denied(scope);
-    if (
-      input.threadId !== undefined &&
-      input.projectId !== undefined &&
-      !registered.some((r) => r.thread === input.threadId && r.project === input.projectId)
-    )
-      return yield* denied(scope);
     // Owner credentials retain host cwd compatibility, but still reload the action scope.
     if (
       value.resourceGrant.projects.mode === "all" &&
@@ -133,86 +115,120 @@ export const make = Effect.gen(function* () {
       input.threadId === undefined
     )
       return;
-    if (!validRoot(input.cwd)) return yield* denied(scope);
-    const candidates = registered.filter(
-      (r): r is typeof r & { readonly root: string } =>
-        validRoot(r.root) &&
+    type RegisteredRoot = Effect.Success<ReturnType<typeof roots>>[number];
+    let originalAssociation: ReadonlyArray<RegisteredRoot> | undefined;
+    // ponytail: retry unrelated registration churn once; deny if it keeps changing.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const value = yield* current(authority, scope);
+      if (value === undefined) return;
+      if (input.threadId !== undefined) yield* thread(authority, input.threadId, scope);
+      const registered = yield* roots(scope);
+      if (
+        input.projectId !== undefined &&
+        !registered.some(
+          (r) =>
+            r.project === input.projectId &&
+            r.thread === null &&
+            resourceGrantAllowsProject(value.resourceGrant, ProjectId.make(r.project)),
+        )
+      )
+        return yield* denied(scope);
+      if (
+        input.threadId !== undefined &&
+        input.projectId !== undefined &&
+        !registered.some((r) => r.thread === input.threadId && r.project === input.projectId)
+      )
+        return yield* denied(scope);
+      if (!validRoot(input.cwd)) return yield* denied(scope);
+      const candidates = registered.filter((r): r is typeof r & { readonly root: string } =>
+        validRoot(r.root),
+      );
+      const threadProject =
+        input.threadId === undefined
+          ? undefined
+          : registered.find((r) => r.thread === input.threadId)?.project;
+      const allowed = (row: (typeof candidates)[number]) =>
         registered.some(
           (parent) =>
-            parent.thread === null && parent.project === r.project && validRoot(parent.root),
+            parent.thread === null && parent.project === row.project && validRoot(parent.root),
+        ) &&
+        resourceGrantAllowsProject(value.resourceGrant, ProjectId.make(row.project)) &&
+        (input.projectId === undefined || row.project === input.projectId) &&
+        (threadProject === undefined || row.project === threadProject) &&
+        (input.threadId === undefined || row.thread === null || row.thread === input.threadId);
+      const requested = NodePath.resolve(input.cwd);
+      const rawMatches = candidates.filter((r) => within(requested, NodePath.resolve(r.root)));
+      const rawDepth = Math.max(...rawMatches.map((r) => NodePath.resolve(r.root).length));
+      if (rawMatches.some((r) => NodePath.resolve(r.root).length === rawDepth && !allowed(r)))
+        return yield* denied(scope);
+      if (!candidates.some(allowed)) return yield* denied(scope);
+      const canonical = yield* fs.realPath(input.cwd).pipe(Effect.mapError(() => denied(scope)));
+      const matches = yield* Effect.forEach(candidates, (row) =>
+        fs.realPath(row.root).pipe(
+          Effect.map((root) => ({ ...row, canonical: root })),
+          Effect.orElseSucceed(() => undefined),
         ),
-    );
-    const threadProject =
-      input.threadId === undefined
-        ? undefined
-        : registered.find((r) => r.thread === input.threadId)?.project;
-    const allowed = (row: (typeof candidates)[number]) =>
-      resourceGrantAllowsProject(value.resourceGrant, ProjectId.make(row.project)) &&
-      (input.projectId === undefined || row.project === input.projectId) &&
-      (threadProject === undefined || row.project === threadProject) &&
-      (input.threadId === undefined || row.thread === null || row.thread === input.threadId);
-    const requested = NodePath.resolve(input.cwd);
-    const rawMatches = candidates.filter((r) => within(requested, NodePath.resolve(r.root)));
-    const rawDepth = Math.max(...rawMatches.map((r) => NodePath.resolve(r.root).length));
-    if (rawMatches.some((r) => NodePath.resolve(r.root).length === rawDepth && !allowed(r)))
-      return yield* denied(scope);
-    if (!candidates.some(allowed)) return yield* denied(scope);
-    const canonical = yield* fs.realPath(input.cwd).pipe(Effect.mapError(() => denied(scope)));
-    const matches = yield* Effect.forEach(candidates, (row) =>
-      fs.realPath(row.root).pipe(
-        Effect.map((root) => ({ ...row, canonical: root })),
-        Effect.orElseSucceed(() => undefined),
-      ),
-    );
-    const containing = matches.flatMap((r) =>
-      r !== undefined && within(canonical, r.canonical) ? [r] : [],
-    );
-    const depth = Math.max(...containing.map((r) => r.canonical.length));
-    const owners = containing.filter((r) => r.canonical.length === depth);
-    if (owners.length === 0 || owners.some((r) => !allowed(r))) return yield* denied(scope);
-    // Git/VCS discovery walks ancestors. A registered child cannot route reads into a foreign
-    // repository above its boundary, even when the child itself has no repository marker.
-    for (let directory = canonical; ; directory = NodePath.dirname(directory)) {
-      const repository = yield* Effect.all([
-        fs.exists(NodePath.join(directory, ".git")),
-        fs.exists(NodePath.join(directory, ".jj")),
-      ]).pipe(Effect.mapError(() => denied(scope)));
-      if (repository.some(Boolean)) {
-        const repoOwners = matches.flatMap((r) =>
-          r !== undefined && within(directory, r.canonical) ? [r] : [],
-        );
-        const repoDepth = Math.max(...repoOwners.map((r) => r.canonical.length));
-        if (
-          !repoOwners.some((r) => r.canonical.length === repoDepth) ||
-          repoOwners.some(
-            (r) =>
-              r.canonical.length === repoDepth &&
-              (!allowed(r) || !owners.some((owner) => owner.project === r.project)),
+      );
+      const containing = matches.flatMap((r) =>
+        r !== undefined && within(canonical, r.canonical) ? [r] : [],
+      );
+      const depth = Math.max(...containing.map((r) => r.canonical.length));
+      const owners = containing.filter((r) => r.canonical.length === depth);
+      if (owners.length === 0 || owners.some((r) => !allowed(r))) return yield* denied(scope);
+      // Git/VCS discovery walks ancestors. A registered child cannot route reads into a foreign
+      // repository above its boundary, even when the child itself has no repository marker.
+      for (let directory = canonical; ; directory = NodePath.dirname(directory)) {
+        const repository = yield* Effect.all([
+          fs.exists(NodePath.join(directory, ".git")),
+          fs.exists(NodePath.join(directory, ".jj")),
+        ]).pipe(Effect.mapError(() => denied(scope)));
+        if (repository.some(Boolean)) {
+          const repoOwners = matches.flatMap((r) =>
+            r !== undefined && within(directory, r.canonical) ? [r] : [],
+          );
+          const repoDepth = Math.max(...repoOwners.map((r) => r.canonical.length));
+          if (
+            !repoOwners.some((r) => r.canonical.length === repoDepth) ||
+            repoOwners.some(
+              (r) =>
+                r.canonical.length === repoDepth &&
+                (!allowed(r) || !owners.some((owner) => owner.project === r.project)),
+            )
           )
-        )
-          return yield* denied(scope);
-        break;
+            return yield* denied(scope);
+          break;
+        }
+        if (NodePath.dirname(directory) === directory) break;
       }
-      if (NodePath.dirname(directory) === directory) break;
-    }
-    // No SQL transaction spans realPath. Changed registration invalidates this checked association.
-    const latest = yield* current(authority, scope);
-    const liveRoots = yield* roots(scope);
-    if (
-      !latest ||
-      registered.length !== liveRoots.length ||
-      registered.some(
-        (r, i) =>
-          r.project !== liveRoots[i]?.project ||
-          r.thread !== liveRoots[i]?.thread ||
-          r.root !== liveRoots[i]?.root,
-      ) ||
-      owners.some(
-        (r) => !resourceGrantAllowsProject(latest.resourceGrant, ProjectId.make(r.project)),
+      // No SQL transaction spans realPath. Changes to the actual association invalidate admission.
+      originalAssociation ??= registered.filter(
+        (r) =>
+          (r.thread === null && owners.some((owner) => owner.project === r.project)) ||
+          owners.some(
+            (owner) =>
+              owner.project === r.project && owner.thread === r.thread && owner.root === r.root,
+          ) ||
+          (input.threadId !== undefined && r.thread === input.threadId),
+      );
+      const latest = yield* current(authority, scope);
+      const liveRoots = yield* roots(scope);
+      const sameRoot = (a: RegisteredRoot, b: RegisteredRoot) =>
+        a.project === b.project && a.thread === b.thread && a.root === b.root;
+      if (
+        !latest ||
+        originalAssociation.some((r) => !liveRoots.some((live) => sameRoot(r, live))) ||
+        owners.some(
+          (r) => !resourceGrantAllowsProject(latest.resourceGrant, ProjectId.make(r.project)),
+        )
       )
-    )
-      return yield* denied(scope);
-    return owners;
+        return yield* denied(scope);
+      if (
+        registered.length === liveRoots.length &&
+        registered.every((r, i) => sameRoot(r, liveRoots[i]!))
+      )
+        return owners;
+    }
+    return yield* denied(scope);
   });
   const repository = Effect.fnUntraced(function* (
     authority: ThreadReadAuthority,

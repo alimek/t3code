@@ -29,6 +29,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import { trustedMutationAuthority, type MutationAuthority } from "../auth/CommandAuthorization.ts";
 import { createPendingAttachmentId, toSafeThreadAttachmentSegment } from "../attachmentStore.ts";
@@ -157,7 +158,7 @@ const makeFixture = Effect.gen(function* () {
   );
   const launchContext = yield* Layer.build(
     Launch.layer.pipe(
-      Layer.provide(
+      Layer.provideMerge(
         Layer.mergeAll(
           Layer.succeed(ProjectService.ProjectService, f.projectService),
           Layer.succeed(Threads.ThreadManagementService, threads),
@@ -208,6 +209,7 @@ const makeFixture = Effect.gen(function* () {
     sink,
     threads,
     launches,
+    setupTracker: Context.get(launchContext, SetupTracker.WorktreeSetupTracker),
     fs,
     stat,
     copyFile,
@@ -1239,4 +1241,77 @@ it.effect(
       assert.isTrue(yield* f.fs.exists(f.copyFile.mock.calls[1]![1]));
       assert.isTrue(yield* f.fs.exists(pendingPath));
     }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("fresh worktree setup path waits for durable binding", () =>
+  Effect.gen(function* () {
+    const f = yield* makeFixture;
+    const root = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-review-setup-root-" });
+    const worktree = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-review-setup-worktree-" });
+    yield* f.sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectA}`;
+    f.createWorktree.mockImplementation(() =>
+      Effect.succeed({ worktree: { path: worktree, refName: "fixture", headSha: "abc" } }),
+    );
+    const reached = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const dispatch = f.threads.dispatch;
+    const spy = vi
+      .spyOn(f.threads, "dispatch")
+      .mockImplementation((caller, command) =>
+        command.type === "thread.metadata.update" &&
+        String(command.commandId).endsWith(":workspace")
+          ? Deferred.succeed(reached, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.andThen(dispatch(caller, command)),
+            )
+          : dispatch(caller, command),
+      );
+    try {
+      const launched = yield* f.launches.launch(authority, {
+        ...launchInput("review-setup-order"),
+        workspaceStrategy: { type: "worktree", baseRef: "main", branch: "fixture" },
+      });
+      yield* Deferred.await(reached);
+      const reader = {
+        current: Effect.succeed({ scopes: [AuthOrchestrationReadScope], resourceGrant: grantA }),
+      };
+      const snapshot = yield* f.setupTracker.get(reader, launched.threadId);
+      assert.isNull(snapshot?.worktreePath);
+      assert.isTrue(
+        snapshot?.stages.some((stage) => stage.id === "checkout" && stage.status === "done") ??
+          false,
+      );
+      const first = yield* Deferred.make<void>();
+      const snapshots = yield* f.setupTracker.stream(reader, launched.threadId).pipe(
+        Stream.tap((snapshot) =>
+          snapshot?.worktreePath == null ? Deferred.succeed(first, undefined) : Effect.void,
+        ),
+        Stream.takeUntil((snapshot) => snapshot?.worktreePath === worktree),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      yield* Deferred.await(first);
+      assert.isNull((yield* f.threads.getThreadShell(launched.threadId))?.worktreePath);
+      yield* Deferred.succeed(release, undefined);
+      yield* Deferred.await(f.setupStarted);
+      assert.equal((yield* f.setupTracker.get(reader, launched.threadId))?.worktreePath, worktree);
+      assert.equal((yield* f.threads.getThreadShell(launched.threadId))?.worktreePath, worktree);
+      const emitted = yield* Fiber.join(snapshots);
+      assert.isNull(emitted[0]?.worktreePath);
+      assert.equal(emitted.at(-1)?.worktreePath, worktree);
+      // A forged snapshot still cannot borrow the newly committed association.
+      const forged = yield* f.fs.makeTempDirectoryScoped({ prefix: "t3-review-setup-forged-" });
+      yield* f.setupTracker.update(launched.threadId, (snapshot) => ({
+        ...snapshot,
+        worktreePath: forged,
+      }));
+      yield* denied(f.setupTracker.get(reader, launched.threadId));
+      yield* denied(
+        f.setupTracker.stream(reader, launched.threadId).pipe(Stream.take(1), Stream.runCollect),
+      );
+    } finally {
+      yield* Deferred.succeed(release, undefined);
+      spy.mockRestore();
+    }
+  }).pipe(Effect.provide(layerTest)),
 );

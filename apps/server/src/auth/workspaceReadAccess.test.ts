@@ -567,3 +567,88 @@ it.effect(
       ).toEqual([]);
     }).pipe(Effect.provide(testLayer)),
 );
+
+it.effect("malformed foreign root cannot erase foreign worktree denial", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    const access = yield* Access.make;
+    for (const root of ["/", "relative/root", `${f.b}/../hidden`, `${f.b}\0bad`]) {
+      yield* f.sql`UPDATE projection_projects SET workspace_root = ${root} WHERE project_id = ${projectB}`;
+      yield* denied(access.admit(f.authority, { cwd: f.foreignWorktree, projectId: projectA }));
+      f.set({ ...grantA, projects: { mode: "explicit", ids: [projectB] } });
+      yield* denied(access.admit(f.authority, { cwd: f.foreignWorktree, projectId: projectB }));
+      f.set();
+      yield* access.admit(f.authority, { cwd: f.child });
+    }
+    expect(f.calls).toEqual([]);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect.each(["unrelated", "raw overlap", "canonical alias overlap"] as const)(
+  "foreign worktree update %s re-evaluates current A association",
+  (change) =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      const other = `${f.base}/different-b-worktree`;
+      if (change === "canonical alias overlap") yield* f.fs.symlink(f.worktree, other);
+      else yield* f.fs.makeDirectory(other);
+      const reached = yield* Deferred.make<void>();
+      const resume = yield* Deferred.make<void>();
+      let once = true;
+      const fs = {
+        ...f.fs,
+        realPath: (path: string) =>
+          path === f.a && once
+            ? Effect.sync(() => {
+                once = false;
+              }).pipe(
+                Effect.andThen(Deferred.succeed(reached, undefined)),
+                Effect.andThen(Deferred.await(resume)),
+                Effect.andThen(f.fs.realPath(path)),
+              )
+            : f.fs.realPath(path),
+      };
+      const access = yield* Access.make.pipe(Effect.provideService(FileSystem.FileSystem, fs));
+      const read = yield* access
+        .read(
+          f.authority,
+          { cwd: f.worktree, threadId: activeA },
+          Effect.sync(() => f.calls.push("read-A")),
+        )
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(reached);
+      yield* f.sql`UPDATE orchestration_v2_projection_threads SET payload_json = json_set(payload_json, '$.worktreePath', ${change === "raw overlap" ? f.worktree : other}) WHERE thread_id = ${activeB}`;
+      yield* Deferred.succeed(resume, undefined);
+      if (change === "unrelated") {
+        yield* Fiber.join(read);
+        expect(f.calls).toEqual(["read-A"]);
+      } else {
+        yield* denied(Fiber.join(read));
+        expect(f.calls).toEqual([]);
+      }
+    }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("owner unhinted fast path avoids global registration SQL", () =>
+  Effect.gen(function* () {
+    const f = yield* fixture;
+    f.set({ version: 1, projects: { mode: "all" }, providers: { mode: "all" } });
+    let queries = 0;
+    const sql = new Proxy(f.sql, {
+      apply: (target, context, args) => {
+        queries++;
+        return Reflect.apply(target, context, args);
+      },
+    });
+    const access = yield* Access.make.pipe(Effect.provideService(SqlClient.SqlClient, sql));
+    yield* access.admit(f.authority, { cwd: f.a });
+    expect(queries).toBe(0);
+    f.set(grantNone, []);
+    yield* denied(access.admit(f.authority, { cwd: f.a }));
+    expect(queries).toBe(0);
+    f.set({ version: 1, projects: { mode: "all" }, providers: { mode: "all" } });
+    yield* access.admit(f.authority, { cwd: f.a, projectId: projectA });
+    expect(queries).toBeGreaterThan(0);
+    yield* denied(access.admit(f.authority, { cwd: f.b, projectId: projectA }));
+  }).pipe(Effect.provide(testLayer)),
+);
