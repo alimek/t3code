@@ -89,13 +89,14 @@ export const claimPendingAttachments = Effect.fn("AttachmentClaims.claimPendingA
         if (input.command === undefined) return yield* mutationDenied();
         const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
         if (Option.isNone(sql)) return yield* mutationDenied();
-        return yield* sql.value.withTransaction(
+        yield* sql.value.withTransaction(
           authorizeAttachmentClaim(sql.value, authority, {
             ...input,
             command: input.command,
             attachmentIds: input.attachments.map((attachment) => attachment.id),
-          }).pipe(Effect.andThen(effect)),
+          }),
         );
+        return yield* effect;
       });
     yield* withAdmission(() => Effect.void);
     yield* validateAttachmentLimits(input.attachments);

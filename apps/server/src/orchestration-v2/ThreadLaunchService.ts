@@ -938,18 +938,14 @@ const make = Effect.gen(function* () {
         const workspaceStrategy: ThreadLaunchWorkspaceStrategy =
           input.workspaceStrategy.type === "root" && Option.isNone(launchReceipt)
             ? Option.match(
-                yield* sql
-                  .withTransaction(
-                    Effect.gen(function* () {
-                      yield* admitLaunch(authority, admitted);
-                      return yield* managedFolders.folderForThread({
-                        projectId: input.projectId,
-                        threadId: candidateThreadId,
-                        text: input.initialMessage?.text ?? input.title,
-                      });
-                    }),
-                  )
-                  .pipe(Effect.mapError(mapError(input, "provision-worktree", candidateThreadId))),
+                yield* Effect.gen(function* () {
+                  yield* admitLaunch(authority, admitted);
+                  return yield* managedFolders.folderForThread({
+                    projectId: input.projectId,
+                    threadId: candidateThreadId,
+                    text: input.initialMessage?.text ?? input.title,
+                  });
+                }).pipe(Effect.mapError(mapError(input, "provision-worktree", candidateThreadId))),
                 {
                   onNone: () => input.workspaceStrategy,
                   onSome: (worktreePath) => ({ type: "existing_worktree", worktreePath }),

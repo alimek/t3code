@@ -824,3 +824,34 @@ it.effect("existing-workspace launch uses registered roots and preserves operate
     assert.equal(f.runSetup.mock.calls.length, 1);
   }).pipe(Effect.provide(layerTest)),
 );
+
+it.effect("claim and folder I/O release the SQL transaction before external work", () =>
+  Effect.gen(function* () {
+    const f = yield* makeFixture;
+    const outsideTransaction = Effect.gen(function* () {
+      assert.isTrue(Option.isNone(yield* Effect.serviceOption(f.sql.transactionService)));
+      yield* f.sql`SELECT 1`.pipe(Effect.orDie);
+    });
+    const stat = f.stat.getMockImplementation()!;
+    const copy = f.copyFile.getMockImplementation()!;
+    f.stat.mockImplementation((...args) => outsideTransaction.pipe(Effect.andThen(stat(...args))));
+    f.copyFile.mockImplementation((...args) =>
+      outsideTransaction.pipe(Effect.andThen(copy(...args))),
+    );
+    f.folder.mockImplementation(() => outsideTransaction.pipe(Effect.as(Option.none<string>())));
+
+    yield* Claims.claimPendingAttachments(authority, {
+      threadId: activeA,
+      attachments: [f.pending],
+      command: message("claim-without-sql-lock", [f.pending]),
+    }).pipe(Effect.provide(f.intakeLayer));
+    yield* f.launches.launch(authority, launchInput("folder-without-sql-lock"));
+    yield* f.launches.launch(
+      trustedMutationAuthority,
+      launchInput("trusted-folder-without-sql-lock"),
+    );
+    assert.equal(f.stat.mock.calls.length, 1);
+    assert.equal(f.copyFile.mock.calls.length, 1);
+    assert.equal(f.folder.mock.calls.length, 2);
+  }).pipe(Effect.provide(layerTest)),
+);
