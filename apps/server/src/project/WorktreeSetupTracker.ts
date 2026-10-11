@@ -82,7 +82,10 @@ export class WorktreeSetupTracker extends Context.Service<
      * caller's dispatch has already failed and rolled back when this returns.
      * Returns false when nothing is running or the setup is past cancellation.
      */
-    readonly cancel: (threadId: ThreadId) => Effect.Effect<boolean>;
+    readonly cancel: (
+      authority: ThreadReadAuthority,
+      threadId: ThreadId,
+    ) => Effect.Effect<boolean, EnvironmentAuthorizationError>;
     readonly get: (
       authority: ThreadReadAuthority,
       threadId: ThreadId,
@@ -315,13 +318,32 @@ export const make = Effect.gen(function* () {
       return next;
     });
 
-  const cancel: WorktreeSetupTracker["Service"]["cancel"] = (threadId) =>
+  const cancel: WorktreeSetupTracker["Service"]["cancel"] = (authority, threadId) =>
     Effect.gen(function* () {
+      const owner = yield* access.thread(authority, threadId, "orchestration:operate");
       const current = yield* Ref.get(setups);
       const tracked = current.get(threadId);
+      const admission =
+        owner === undefined
+          ? undefined
+          : yield* access.capture(
+              authority,
+              { cwd: owner.worktree ?? owner.root, threadId },
+              "orchestration:operate",
+            );
       if (!tracked || tracked.snapshot.phase !== "running" || !tracked.fiber) {
+        if (admission !== undefined && tracked?.snapshot.worktreePath != null)
+          yield* admission.beforeEffect(tracked.snapshot.worktreePath);
         return false;
       }
+      if (admission !== undefined)
+        yield* admission.beforeEffect(tracked.snapshot.worktreePath ?? admission.input.cwd);
+      const latest = (yield* Ref.get(setups)).get(threadId);
+      if (
+        latest?.fiber !== tracked.fiber ||
+        latest.snapshot.worktreePath !== tracked.snapshot.worktreePath
+      )
+        return false;
       yield* Fiber.interrupt(tracked.fiber);
       return true;
     });

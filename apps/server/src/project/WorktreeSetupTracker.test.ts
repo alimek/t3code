@@ -177,14 +177,14 @@ it.layer(Layer.mergeAll(Sqlite.layerMemory, NodeServices.layer))("WorktreeSetupT
       yield* Deferred.await(started);
       yield* tracker.begin({ threadId, branch: null, baseRef: null, stages: ["agent"], fiber });
 
-      expect(yield* tracker.cancel(threadId)).toBe(true);
+      expect(yield* tracker.cancel(trustedReadAuthority, threadId)).toBe(true);
       // cancel returns only after the bootstrap fiber has unwound.
       const exit = yield* Fiber.await(fiber);
       expect(Exit.hasInterrupts(exit)).toBe(true);
 
       yield* tracker.finish(threadId, "cancelled");
-      expect(yield* tracker.cancel(threadId)).toBe(false);
-      expect(yield* tracker.cancel(ThreadId.make("unknown"))).toBe(false);
+      expect(yield* tracker.cancel(trustedReadAuthority, threadId)).toBe(false);
+      expect(yield* tracker.cancel(trustedReadAuthority, ThreadId.make("unknown"))).toBe(false);
     }),
   );
 
@@ -195,7 +195,7 @@ it.layer(Layer.mergeAll(Sqlite.layerMemory, NodeServices.layer))("WorktreeSetupT
       yield* tracker.begin({ threadId, branch: null, baseRef: null, stages: ["agent"], fiber });
 
       yield* tracker.markUncancellable(threadId);
-      expect(yield* tracker.cancel(threadId)).toBe(false);
+      expect(yield* tracker.cancel(trustedReadAuthority, threadId)).toBe(false);
       expect((yield* tracker.get(trustedReadAuthority, threadId))?.phase).toBe("running");
       yield* Fiber.interrupt(fiber);
     }),

@@ -3067,7 +3067,7 @@ const layerWsRpc = (
         ),
         [WS_METHODS.worktreeSetupCancel]: (input) =>
           worktreeSetupTracker
-            .cancel(input.threadId)
+            .cancel(readAuthority, input.threadId)
             .pipe(Effect.map((cancelled) => ({ cancelled }))),
         [WS_METHODS.vcsPull]: (input) =>
           gitWorkflow.pullCurrentBranch(readAuthority, input.cwd, refreshGitStatus),
@@ -3113,17 +3113,11 @@ const layerWsRpc = (
               ),
           ),
         [WS_METHODS.gitPreparePullRequestThread]: (input) =>
-          gitWorkflow
-            .preparePullRequestThread(input)
-            .pipe(Effect.tap(() => refreshTrustedGitStatus(input.cwd))),
+          gitWorkflow.preparePullRequestThread(readAuthority, input, refreshGitStatus),
         [WS_METHODS.vcsCreateWorktree]: (input) =>
-          gitWorkflow
-            .createWorktree(input)
-            .pipe(Effect.tap(() => refreshTrustedGitStatus(input.cwd))),
+          gitWorkflow.createWorktree(readAuthority, input, undefined, refreshGitStatus),
         [WS_METHODS.vcsRemoveWorktree]: (input) =>
-          gitWorkflow
-            .removeWorktree(input)
-            .pipe(Effect.tap(() => refreshTrustedGitStatus(input.cwd))),
+          gitWorkflow.removeWorktree(readAuthority, input, refreshGitStatus),
         [WS_METHODS.vcsCreateRef]: (input) =>
           gitWorkflow.createRef(readAuthority, input, refreshGitStatus),
         [WS_METHODS.vcsSwitchRef]: (input) =>

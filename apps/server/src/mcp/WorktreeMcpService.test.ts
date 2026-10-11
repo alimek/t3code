@@ -1,5 +1,5 @@
+import { trustedReadAuthority, type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { trustedMutationAuthority } from "../auth/CommandAuthorization.ts";
-import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { describe, expect, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -219,7 +219,10 @@ const makeHarness = (options: HarnessOptions = {}) => {
       : Effect.succeed({ commitSha: "abc123", remoteRefName: "origin/dev" }),
   );
   const createWorktree = vi.fn(
-    (input: { readonly newRefName?: string | undefined; readonly path: string | null }) =>
+    (
+      _authority: ThreadReadAuthority,
+      input: { readonly newRefName?: string | undefined; readonly path: string | null },
+    ) =>
       options.createWorktreeFails
         ? (Effect.fail("simulated worktree creation failure") as never)
         : (options.createWorktreeGate ?? Effect.void).pipe(
@@ -263,31 +266,33 @@ const makeHarness = (options: HarnessOptions = {}) => {
     }),
   );
   const refreshStatus = vi.fn((_authority: unknown, _: string) => Effect.die("refreshStatus stub"));
-  const runForThread = vi.fn((input: { readonly worktreePath: string }) => {
-    switch (options.setupScript ?? "started") {
-      case "no-script":
-        return Effect.succeed({ status: "no-script" } as const);
-      case "dies":
-        return Effect.die(new Error("setup runner defect"));
-      case "fails":
-        return Effect.fail(
-          new ProjectSetupScriptRunner.ProjectSetupScriptProjectNotFoundError({
-            threadId,
-            worktreePath: input.worktreePath,
-          }),
-        );
-      default:
-        return Effect.succeed({
-          status: "started",
-          async: false,
-          scriptId: "setup",
-          scriptName: "Setup",
-          scriptCommand: "vp install",
-          terminalId: "setup-terminal",
-          cwd: input.worktreePath,
-        } as const);
-    }
-  });
+  const runForThread = vi.fn(
+    (_authority: ThreadReadAuthority, input: { readonly worktreePath: string }) => {
+      switch (options.setupScript ?? "started") {
+        case "no-script":
+          return Effect.succeed({ status: "no-script" } as const);
+        case "dies":
+          return Effect.die(new Error("setup runner defect"));
+        case "fails":
+          return Effect.fail(
+            new ProjectSetupScriptRunner.ProjectSetupScriptProjectNotFoundError({
+              threadId,
+              worktreePath: input.worktreePath,
+            }),
+          );
+        default:
+          return Effect.succeed({
+            status: "started",
+            async: false,
+            scriptId: "setup",
+            scriptName: "Setup",
+            scriptCommand: "vp install",
+            terminalId: "setup-terminal",
+            cwd: input.worktreePath,
+          } as const);
+      }
+    },
+  );
 
   // Optional deterministic Path semantics: providing this BEFORE the general
   // mocks means the service resolves Path here rather than from NodeServices,
@@ -406,7 +411,7 @@ describe("t3_worktree_handoff", () => {
       });
 
       expect(harness.fetchRemote).not.toHaveBeenCalled();
-      expect(harness.createWorktree).toHaveBeenCalledWith({
+      expect(harness.createWorktree).toHaveBeenCalledWith(trustedReadAuthority, {
         cwd: workspaceRoot,
         refName: "dev",
         newRefName: "feature/handoff",
@@ -423,7 +428,7 @@ describe("t3_worktree_handoff", () => {
           expectedWorktreePath: null,
         }),
       );
-      expect(harness.runForThread).toHaveBeenCalledWith({
+      expect(harness.runForThread).toHaveBeenCalledWith(trustedReadAuthority, {
         threadId,
         projectId,
         projectCwd: workspaceRoot,
@@ -519,7 +524,7 @@ describe("t3_worktree_handoff", () => {
         runSetupScript: false,
       });
 
-      expect(harness.fetchRemote).toHaveBeenCalledWith({
+      expect(harness.fetchRemote).toHaveBeenCalledWith(trustedReadAuthority, {
         cwd: workspaceRoot,
         remoteName: "origin",
       });
@@ -528,7 +533,7 @@ describe("t3_worktree_handoff", () => {
         refName: "dev",
         fallbackRemoteName: "origin",
       });
-      expect(harness.createWorktree).toHaveBeenCalledWith({
+      expect(harness.createWorktree).toHaveBeenCalledWith(trustedReadAuthority, {
         cwd: workspaceRoot,
         refName: "abc123",
         newRefName: "feature/from-origin",
@@ -723,7 +728,7 @@ describe("t3_worktree_handoff", () => {
     return Effect.gen(function* () {
       const exit = yield* Effect.exit(runHandoff(harness, { branch: "feature/dispatch-defect" }));
       expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "operation_failed" });
-      expect(harness.removeWorktree).toHaveBeenCalledWith({
+      expect(harness.removeWorktree).toHaveBeenCalledWith(trustedReadAuthority, {
         cwd: workspaceRoot,
         path: "/worktrees/project/feature/dispatch-defect",
         force: true,
@@ -738,12 +743,12 @@ describe("t3_worktree_handoff", () => {
       expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "already_in_worktree" });
       expect(harness.createWorktree).toHaveBeenCalledTimes(1);
       // The freshly created worktree must not be left orphaned.
-      expect(harness.removeWorktree).toHaveBeenCalledWith({
+      expect(harness.removeWorktree).toHaveBeenCalledWith(trustedReadAuthority, {
         cwd: workspaceRoot,
         path: "/worktrees/project/feature/raced",
         force: true,
       });
-      expect(harness.deleteLocalBranch).toHaveBeenCalledWith({
+      expect(harness.deleteLocalBranch).toHaveBeenCalledWith(trustedReadAuthority, {
         cwd: workspaceRoot,
         refName: "feature/raced",
         force: true,
@@ -757,7 +762,7 @@ describe("t3_worktree_handoff", () => {
     return Effect.gen(function* () {
       const exit = yield* Effect.exit(runHandoff(harness, { branch: "feature/recheck-fails" }));
       expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "operation_failed" });
-      expect(harness.removeWorktree).toHaveBeenCalledWith({
+      expect(harness.removeWorktree).toHaveBeenCalledWith(trustedReadAuthority, {
         cwd: workspaceRoot,
         path: "/worktrees/project/feature/recheck-fails",
         force: true,
@@ -773,7 +778,7 @@ describe("t3_worktree_handoff", () => {
       expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "invalid_request" });
       expect(harness.dispatch).not.toHaveBeenCalled();
       // The created worktree must not be left orphaned.
-      expect(harness.removeWorktree).toHaveBeenCalledWith({
+      expect(harness.removeWorktree).toHaveBeenCalledWith(trustedReadAuthority, {
         cwd: workspaceRoot,
         path: "/worktrees/project/feature/archived-race",
         force: true,
@@ -837,7 +842,7 @@ describe("t3_worktree_handoff", () => {
       );
       expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "operation_failed" });
       expect(harness.removeWorktree).toHaveBeenCalledTimes(1);
-      expect(harness.deleteLocalBranch).toHaveBeenCalledWith({
+      expect(harness.deleteLocalBranch).toHaveBeenCalledWith(trustedReadAuthority, {
         cwd: workspaceRoot,
         refName: "feature/rollback-branch-fails",
         force: true,
@@ -854,6 +859,7 @@ describe("t3_worktree_handoff", () => {
       });
       expect(result.worktreePath).toBe("C:\\worktrees\\custom");
       expect(harness.createWorktree).toHaveBeenCalledWith(
+        trustedReadAuthority,
         expect.objectContaining({ path: "C:\\worktrees\\custom" }),
       );
     });
@@ -932,7 +938,7 @@ describe("t3_worktree_handoff", () => {
       const exit = yield* Effect.exit(runHandoff(harness, { branch: "feature/dispatch-fails" }));
       expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "operation_failed" });
       expect(harness.createWorktree).toHaveBeenCalledTimes(1);
-      expect(harness.removeWorktree).toHaveBeenCalledWith({
+      expect(harness.removeWorktree).toHaveBeenCalledWith(trustedReadAuthority, {
         cwd: workspaceRoot,
         path: "/worktrees/project/feature/dispatch-fails",
         force: true,

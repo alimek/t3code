@@ -693,7 +693,7 @@ function preparePullRequestThread(
   manager: GitManager.GitManager["Service"],
   input: GitPreparePullRequestThreadInput,
 ) {
-  return manager.preparePullRequestThread(input);
+  return manager.preparePullRequestThread(trustedReadAuthority, input);
 }
 
 function makeManager(input?: {
@@ -5046,7 +5046,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         },
         setupScriptRunner: {
-          runForThread: (setupInput) =>
+          runForThread: (_authority, setupInput) =>
             Effect.sync(() => {
               setupCalls.push(setupInput);
               return { status: "no-script" as const };
@@ -5272,7 +5272,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         },
         setupScriptRunner: {
-          runForThread: (setupInput) =>
+          runForThread: (_authority, setupInput) =>
             Effect.sync(() => {
               setupCalls.push(setupInput);
               return { status: "no-script" as const };
@@ -5393,7 +5393,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         },
         setupScriptRunner: {
-          runForThread: (setupInput) =>
+          runForThread: (_authority, setupInput) =>
             Effect.sync(() => {
               setupCalls.push(setupInput);
               return { status: "no-script" as const };
@@ -5452,7 +5452,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         },
         setupScriptRunner: {
-          runForThread: (setupInput) =>
+          runForThread: (_authority, setupInput) =>
             Effect.sync(() => {
               setupCalls.push(setupInput);
               return { status: "no-script" as const };
@@ -5603,7 +5603,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         },
         setupScriptRunner: {
-          runForThread: (setupInput) =>
+          runForThread: (_authority, setupInput) =>
             Effect.sync(() => {
               setupCalls.push(setupInput);
               return { status: "no-script" as const };
@@ -5678,7 +5678,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         },
         setupScriptRunner: {
-          runForThread: (setupInput) =>
+          runForThread: (_authority, setupInput) =>
             Effect.sync(() => {
               setupCalls.push(setupInput);
               return { status: "no-script" as const };
@@ -5811,7 +5811,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         },
         setupScriptRunner: {
-          runForThread: (setupInput) =>
+          runForThread: (_authority, setupInput) =>
             Effect.sync(() => {
               setupCalls.push(setupInput);
               return { status: "no-script" as const };
@@ -6043,7 +6043,7 @@ it.layer(layerGitManagerTest)("GitManager", (it) => {
           },
         },
         setupScriptRunner: {
-          runForThread: (input) =>
+          runForThread: (_authority, input) =>
             Effect.fail(
               new ProjectSetupScriptRunner.ProjectSetupScriptOperationError({
                 threadId: input.threadId,

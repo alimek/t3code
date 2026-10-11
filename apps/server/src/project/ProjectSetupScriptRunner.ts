@@ -1,4 +1,11 @@
-import { ProjectId, type ProjectScript } from "@t3tools/contracts";
+import {
+  EnvironmentAuthorizationError,
+  ProjectId,
+  ThreadId,
+  type ProjectScript,
+} from "@t3tools/contracts";
+import { trustedReadAuthority, type ThreadReadAuthority } from "../auth/ResourceAuthorization.ts";
+import * as WorkspaceReadAccess from "../auth/workspaceReadAccess.ts";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import {
   projectScriptRuntimeEnv,
@@ -118,8 +125,12 @@ export class ProjectSetupScriptRunner extends Context.Service<
   ProjectSetupScriptRunner,
   {
     readonly runForThread: (
+      authority: ThreadReadAuthority,
       input: ProjectSetupScriptRunnerInput,
-    ) => Effect.Effect<ProjectSetupScriptRunnerResult, ProjectSetupScriptRunnerError>;
+    ) => Effect.Effect<
+      ProjectSetupScriptRunnerResult,
+      ProjectSetupScriptRunnerError | EnvironmentAuthorizationError
+    >;
   }
 >()("t3/project/ProjectSetupScriptRunner") {}
 
@@ -201,6 +212,7 @@ function wrapCommandForCompletion(
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
+  const access = yield* WorkspaceReadAccess.make;
   const projects = yield* ProjectService.ProjectService;
   const terminalManager = yield* TerminalManager.TerminalManager;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -311,18 +323,52 @@ export const make = Effect.gen(function* () {
 
   const runForThread: ProjectSetupScriptRunner["Service"]["runForThread"] = Effect.fn(
     "ProjectSetupScriptRunner.runForThread",
-  )(function* (input) {
+  )(function* (authority, input) {
+    const owner = yield* access.thread(
+      authority,
+      ThreadId.make(input.threadId),
+      "orchestration:operate",
+    );
+    const inherited = yield* WorkspaceReadAccess.workspaceEffectAdmission;
+    const source =
+      authority === trustedReadAuthority
+        ? undefined
+        : yield* access.capture(
+            authority,
+            {
+              cwd: input.projectCwd ?? input.project?.workspaceRoot ?? owner!.root,
+              threadId: ThreadId.make(input.threadId),
+              projectId:
+                input.projectId === undefined ? undefined : ProjectId.make(input.projectId),
+            },
+            "orchestration:operate",
+          );
+    const check = Effect.gen(function* () {
+      if (source === undefined) return;
+      yield* source.beforeEffect(source.input.cwd);
+      if (
+        inherited !== undefined &&
+        inherited.authority === authority &&
+        inherited.input.threadId === input.threadId
+      ) {
+        yield* inherited.beforeEffect(input.worktreePath);
+      } else {
+        yield* source.beforeEffect(input.worktreePath);
+      }
+    });
+    yield* check;
     const errorContext = {
       threadId: input.threadId,
       worktreePath: input.worktreePath,
       ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
       ...(input.projectCwd === undefined ? {} : { projectCwd: input.projectCwd }),
     };
-    const suppliedProject = input.project;
+    const suppliedProject = authority === trustedReadAuthority ? input.project : undefined;
+    const actualProjectId = owner === undefined ? input.projectId : owner.project;
     const projectById =
       suppliedProject ??
-      (input.projectId
-        ? yield* projects.getById(ProjectId.make(input.projectId)).pipe(
+      (actualProjectId
+        ? yield* projects.getById(ProjectId.make(actualProjectId)).pipe(
             Effect.map(Option.getOrUndefined),
             Effect.mapError(
               (cause) =>
@@ -354,6 +400,14 @@ export const make = Effect.gen(function* () {
     if (!project) {
       return yield* new ProjectSetupScriptProjectNotFoundError(errorContext);
     }
+    if (
+      owner !== undefined &&
+      (project.id !== owner.project || project.workspaceRoot !== owner.root)
+    )
+      return yield* new EnvironmentAuthorizationError({
+        requiredScope: "orchestration:operate",
+        message: "This connection cannot run this worktree setup.",
+      });
 
     const settings = yield* serverSettings.getSettings.pipe(
       Effect.mapError(
@@ -370,6 +424,7 @@ export const make = Effect.gen(function* () {
     const script =
       trigger === "settle" ? settleProjectScript(scripts) : setupProjectScript(scripts);
     if (!script) {
+      yield* check;
       return {
         status: "no-script",
       } as const;
@@ -406,6 +461,7 @@ export const make = Effect.gen(function* () {
           )
         : script.command;
 
+    yield* check;
     yield* terminalManager
       .open({
         threadId: input.threadId,
@@ -438,6 +494,7 @@ export const make = Effect.gen(function* () {
           })
         : undefined;
 
+    yield* check.pipe(Effect.tapError(() => Effect.sync(() => observed?.unsubscribe())));
     yield* terminalManager
       .write({
         threadId: input.threadId,
@@ -467,6 +524,7 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+    yield* check;
     return {
       status: "started",
       scriptId: script.id,

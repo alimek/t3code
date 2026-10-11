@@ -22,6 +22,23 @@ export const workspaceEffectAdmission = Context.Reference<WorkspaceActionAdmissi
   "t3/auth/workspaceEffectAdmission",
   { defaultValue: () => undefined },
 );
+/** Only the worktree service's current operation can claim its computed creation path. */
+export const worktreeEffectAdmission = Context.Reference<
+  | {
+      readonly source: WorkspaceActionAdmission;
+      readonly additionalScope: AuthEnvironmentScope | undefined;
+      readonly prepare: (
+        path: string,
+        serverOwned: boolean,
+      ) => Effect.Effect<void, EnvironmentAuthorizationError>;
+      readonly claim: (path: string) => Effect.Effect<void, EnvironmentAuthorizationError>;
+      readonly protect: (
+        path: string,
+        recursive?: boolean,
+      ) => Effect.Effect<void, EnvironmentAuthorizationError>;
+    }
+  | undefined
+>("t3/auth/worktreeEffectAdmission", { defaultValue: () => undefined });
 export type WorkspaceActionAdmission = {
   readonly authority: ThreadReadAuthority;
   readonly input: WorkspaceReadInput;
@@ -104,8 +121,15 @@ export const make = Effect.gen(function* () {
   ) {
     const value = yield* current(authority, scope);
     if (value === undefined) return;
-    const rows = yield* sql<{ readonly project: string; readonly root: string }>`
-      SELECT t.project_id AS project, p.workspace_root AS root FROM orchestration_v2_projection_threads t
+    const rows = yield* sql<{
+      readonly project: string;
+      readonly root: string;
+      readonly worktree: string | null;
+    }>`
+      SELECT t.project_id AS project, p.workspace_root AS root,
+        CASE WHEN json_valid(t.payload_json) AND json_type(t.payload_json, '$.worktreePath') = 'text'
+          THEN json_extract(t.payload_json, '$.worktreePath') END AS worktree
+      FROM orchestration_v2_projection_threads t
       JOIN projection_projects p ON p.project_id = t.project_id
       WHERE t.thread_id = ${threadId} AND t.deleted_at IS NULL AND p.deleted_at IS NULL
     `.pipe(Effect.mapError(() => denied(scope)));
@@ -396,5 +420,262 @@ export const make = Effect.gen(function* () {
         Effect.provideService(workspaceEffectAdmission, checked),
       );
     });
-  return { admit, read, thread, repository, capture, run };
+  const canonicalDestination = Effect.fnUntraced(function* (requested: string) {
+    let parent = requested;
+    const suffix: string[] = [];
+    while (
+      !(yield* fs.exists(parent).pipe(Effect.mapError(() => denied("source-control:write"))))
+    ) {
+      if (NodePath.dirname(parent) === parent) return yield* denied("source-control:write");
+      suffix.unshift(NodePath.basename(parent));
+      parent = NodePath.dirname(parent);
+    }
+    const canonical = yield* fs
+      .realPath(parent)
+      .pipe(Effect.mapError(() => denied("source-control:write")));
+    return NodePath.join(canonical, ...suffix);
+  });
+  const destination = Effect.fnUntraced(function* (
+    source: WorkspaceActionAdmission,
+    requested: string,
+    serverOwned: boolean,
+    recursive = true,
+  ) {
+    yield* source.beforeEffect(source.input.cwd);
+    const value = yield* current(source.authority, source.scope);
+    if (
+      value === undefined ||
+      (value.resourceGrant.projects.mode === "all" && value.resourceGrant.providers.mode === "all")
+    )
+      return;
+    if (!validRoot(requested) || source.projectId === undefined) return yield* denied(source.scope);
+    // Missing creation/removed paths use their existing ancestor, after raw ownership barriers.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const registered = yield* roots(source.scope);
+      const candidates = registered.filter((r): r is typeof r & { readonly root: string } =>
+        validRoot(r.root),
+      );
+      const allowed = (row: (typeof candidates)[number]) =>
+        row.project === source.projectId &&
+        (source.input.threadId === undefined ||
+          row.thread === null ||
+          row.thread === source.input.threadId);
+      const overlapping = (path: string, root: string) =>
+        within(path, root) || (recursive && within(root, path));
+      if (candidates.some((r) => overlapping(requested, NodePath.resolve(r.root)) && !allowed(r)))
+        return yield* denied(source.scope);
+      const canonical = yield* canonicalDestination(requested);
+      const canonicalRoots = yield* Effect.forEach(candidates, (row) =>
+        canonicalDestination(row.root).pipe(
+          Effect.map((root) => ({ ...row, canonical: root })),
+          recoverWorkspaceError(() => undefined),
+        ),
+      );
+      if (
+        canonicalRoots.some(
+          (r) => r !== undefined && overlapping(canonical, r.canonical) && !allowed(r),
+        )
+      )
+        return yield* denied(source.scope);
+      if (
+        !serverOwned &&
+        !canonicalRoots.some((r) => r !== undefined && allowed(r) && within(canonical, r.canonical))
+      )
+        return yield* denied(source.scope);
+      yield* source.checkSql;
+      const live = yield* roots(source.scope);
+      if (
+        registered.length === live.length &&
+        registered.every(
+          (r, i) =>
+            r.project === live[i]!.project &&
+            r.thread === live[i]!.thread &&
+            r.root === live[i]!.root,
+        )
+      )
+        return registered;
+    }
+    return yield* denied(source.scope);
+  });
+  const runWorktree = <A, E, R>(
+    authority: ThreadReadAuthority,
+    input: WorkspaceReadInput,
+    operation: Effect.Effect<A, E, R>,
+    options?: {
+      readonly destination?: string | null | undefined;
+      readonly additionalScope?: AuthEnvironmentScope | undefined;
+      readonly afterSuccess?: WorkspaceActionCallback<A> | undefined;
+    },
+  ) =>
+    Effect.gen(function* () {
+      const active = yield* worktreeEffectAdmission;
+      if (
+        active !== undefined &&
+        active.source.authority === authority &&
+        active.source.input.cwd === input.cwd &&
+        active.source.input.threadId === input.threadId &&
+        active.source.input.projectId === input.projectId &&
+        active.additionalScope === options?.additionalScope
+      ) {
+        return yield* active.source.beforeEffect(input.cwd).pipe(
+          Effect.andThen(operation),
+          Effect.tap(() => active.source.beforeEffect(input.cwd)),
+          Effect.tap((result) => options?.afterSuccess?.(active.source, result) ?? Effect.void),
+          Effect.tap(() => active.source.beforeEffect(input.cwd)),
+        );
+      }
+      const source = yield* capture(authority, input, "source-control:write");
+      const additional =
+        options?.additionalScope === undefined
+          ? undefined
+          : yield* capture(authority, input, options.additionalScope);
+      const inherited = yield* workspaceEffectAdmission;
+      const sourceCheck = source
+        .beforeEffect(input.cwd)
+        .pipe(
+          Effect.andThen(additional?.beforeEffect(input.cwd) ?? Effect.void),
+          Effect.andThen(inherited?.beforeEffect(input.cwd) ?? Effect.void),
+        );
+      let creation:
+        | {
+            readonly path: string;
+            readonly canonical: string;
+            readonly serverOwned: boolean;
+            claimed: boolean;
+          }
+        | undefined;
+      const protectedPaths = new Map<string, boolean>();
+      let canonicalBarrierRoots: Effect.Success<ReturnType<typeof roots>> | undefined;
+      // Commit admission stays pure SQL. Canonical path checks run before the transaction.
+      const checkDestinationsSql = Effect.gen(function* () {
+        const value = yield* current(authority, source.scope);
+        if (
+          value === undefined ||
+          (value.resourceGrant.projects.mode === "all" &&
+            value.resourceGrant.providers.mode === "all")
+        )
+          return;
+        const registered = yield* roots(source.scope);
+        if (
+          canonicalBarrierRoots !== undefined &&
+          (registered.length !== canonicalBarrierRoots.length ||
+            canonicalBarrierRoots.some(
+              (r, i) =>
+                r.project !== registered[i]!.project ||
+                r.thread !== registered[i]!.thread ||
+                r.root !== registered[i]!.root,
+            ))
+        )
+          return yield* denied(source.scope);
+        const candidates = registered.filter((r): r is typeof r & { readonly root: string } =>
+          validRoot(r.root),
+        );
+        const allowed = (row: (typeof candidates)[number]) =>
+          row.project === source.projectId &&
+          (input.threadId === undefined || row.thread === null || row.thread === input.threadId);
+        for (const path of [
+          ...protectedPaths.keys(),
+          ...(creation === undefined ? [] : [creation.path]),
+        ]) {
+          if (
+            candidates.some(
+              (r) =>
+                (within(path, r.root) ||
+                  (protectedPaths.get(path) !== false && within(r.root, path))) &&
+                !allowed(r),
+            )
+          )
+            return yield* denied(source.scope);
+        }
+        yield* source.checkSql;
+      });
+      const checkDestination = (path: string, serverOwned = false) =>
+        sourceCheck.pipe(
+          Effect.andThen(destination(source, path, serverOwned)),
+          Effect.tap((registered) =>
+            Effect.sync(() => {
+              canonicalBarrierRoots = registered;
+            }),
+          ),
+        );
+      const checkPaths = Effect.gen(function* () {
+        yield* sourceCheck;
+        for (const [path, recursive] of protectedPaths)
+          canonicalBarrierRoots = yield* destination(source, path, false, recursive);
+        if (creation !== undefined) {
+          canonicalBarrierRoots = yield* destination(source, creation.path, creation.serverOwned);
+          if ((yield* canonicalDestination(creation.path)) !== creation.canonical)
+            return yield* denied(source.scope);
+        }
+      });
+      const admission: WorkspaceActionAdmission = {
+        ...source,
+        checkSql: source.checkSql.pipe(
+          Effect.andThen(additional?.checkSql ?? Effect.void),
+          Effect.andThen(checkDestinationsSql),
+        ),
+        beforeEffect: (cwd, scope) =>
+          Effect.gen(function* () {
+            // Re-evaluate one unrelated registration change across the last canonical await.
+            for (let attempt = 0; attempt < 2; attempt++) {
+              yield* checkPaths;
+              if (creation?.claimed && cwd === creation.path) {
+                if (scope !== undefined && scope !== source.scope) yield* current(authority, scope);
+              } else {
+                yield* source.beforeEffect(cwd, scope);
+                if (cwd !== input.cwd) {
+                  canonicalBarrierRoots = yield* destination(source, cwd, false, false);
+                  protectedPaths.set(cwd, protectedPaths.get(cwd) ?? false);
+                }
+              }
+              if (canonicalBarrierRoots !== undefined) {
+                const live = yield* roots(source.scope);
+                if (
+                  live.length !== canonicalBarrierRoots.length ||
+                  canonicalBarrierRoots.some(
+                    (r, i) =>
+                      r.project !== live[i]!.project ||
+                      r.thread !== live[i]!.thread ||
+                      r.root !== live[i]!.root,
+                  )
+                )
+                  continue;
+              }
+              yield* admission.checkSql;
+              return;
+            }
+            return yield* denied(source.scope);
+          }),
+      };
+      const lifecycle = {
+        source: admission,
+        additionalScope: options?.additionalScope,
+        prepare: Effect.fnUntraced(function* (path: string, serverOwned: boolean) {
+          if (creation !== undefined) return yield* denied(source.scope);
+          yield* checkDestination(path, serverOwned);
+          const canonical = yield* canonicalDestination(path);
+          yield* checkDestination(path, serverOwned);
+          creation = { path, canonical, serverOwned, claimed: false };
+        }),
+        claim: Effect.fnUntraced(function* (path: string) {
+          if (creation === undefined || creation.path !== path) return yield* denied(source.scope);
+          creation.claimed = true;
+          yield* admission.beforeEffect(path);
+        }),
+        protect: Effect.fnUntraced(function* (path: string, recursive = true) {
+          yield* sourceCheck;
+          canonicalBarrierRoots = yield* destination(source, path, false, recursive);
+          protectedPaths.set(path, (protectedPaths.get(path) ?? false) || recursive);
+        }),
+      };
+      if (options?.destination != null) yield* lifecycle.protect(options.destination);
+      return yield* operation.pipe(
+        Effect.tap(() => admission.beforeEffect(input.cwd)),
+        Effect.tap((result) => options?.afterSuccess?.(admission, result) ?? Effect.void),
+        Effect.tap(() => admission.beforeEffect(input.cwd)),
+        Effect.provideService(workspaceEffectAdmission, admission),
+        Effect.provideService(worktreeEffectAdmission, lifecycle),
+      );
+    });
+  return { admit, read, thread, repository, capture, run, runWorktree };
 });

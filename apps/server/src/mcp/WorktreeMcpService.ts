@@ -261,7 +261,7 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const worktree = yield* restore(
           gitWorkflow
-            .createWorktree({
+            .createWorktree(trustedReadAuthority, {
               cwd: projectCwd,
               refName: worktreeBaseRef,
               newRefName: input.branch,
@@ -288,17 +288,23 @@ const make = Effect.gen(function* () {
         // the worktree must succeed before deleting its freshly created branch;
         // otherwise the branch may still be checked out there.
         const removeCreatedWorktree = Effect.suspend(() =>
-          gitWorkflow.removeWorktree({ cwd: projectCwd, path: worktreePath, force: true }).pipe(
-            Effect.andThen(
-              Effect.suspend(() =>
-                gitWorkflow.deleteLocalBranch(trustedReadAuthority, {
-                  cwd: projectCwd,
-                  refName: worktree.worktree.refName,
-                  force: true,
-                }),
+          gitWorkflow
+            .removeWorktree(trustedReadAuthority, {
+              cwd: projectCwd,
+              path: worktreePath,
+              force: true,
+            })
+            .pipe(
+              Effect.andThen(
+                Effect.suspend(() =>
+                  gitWorkflow.deleteLocalBranch(trustedReadAuthority, {
+                    cwd: projectCwd,
+                    refName: worktree.worktree.refName,
+                    force: true,
+                  }),
+                ),
               ),
             ),
-          ),
         ).pipe(Effect.ignoreCause({ log: true }));
 
         const recheckAndBind = Effect.gen(function* () {
@@ -400,7 +406,7 @@ const make = Effect.gen(function* () {
         let setupScript: WorktreeMcpSetupScriptStatus = { status: "skipped" };
         if (input.runSetupScript ?? true) {
           setupScript = yield* setupScriptRunner
-            .runForThread({
+            .runForThread(trustedReadAuthority, {
               threadId: scope.thread.threadId,
               projectId: projection.thread.projectId,
               projectCwd,

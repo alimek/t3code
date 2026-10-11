@@ -615,7 +615,7 @@ const makeHarness = Effect.fn("makeThreadSettlementHarness")(function* (options:
         Queue.offer(closedIdle, input).pipe(Effect.andThen(options.onCloseIdle?.() ?? Effect.void)),
     }),
     Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({
-      runForThread: (input) =>
+      runForThread: (_authority, input) =>
         Queue.offer(scriptRuns, input).pipe(
           Effect.andThen(options.onScriptRun?.(input) ?? Effect.void),
           Effect.as({ status: "no-script" } as const),

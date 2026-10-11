@@ -138,7 +138,7 @@ function makeHarness(options: HarnessOptions = {}) {
   const layerOutbox = EffectOutbox.layer.pipe(Layer.provide(layerDatabase));
   const createWorktree = vi.fn(
     options.createWorktree ??
-      ((input) =>
+      ((_authority, input) =>
         Effect.succeed({
           worktree: { path: "/repo-worktrees/feature", refName: input.newRefName, headSha: "abc" },
         } as never)),
@@ -147,8 +147,10 @@ function makeHarness(options: HarnessOptions = {}) {
     options.renameBranch ?? ((_authority, input) => Effect.succeed({ branch: input.newBranch })),
   );
   const removeWorktree = vi.fn(
-    (_input: Parameters<GitWorkflow.GitWorkflowService["Service"]["removeWorktree"]>[0]) =>
-      Effect.void,
+    (
+      _authority: unknown,
+      _input: Parameters<GitWorkflow.GitWorkflowService["Service"]["removeWorktree"]>[1],
+    ) => Effect.void,
   );
   const runSetup = vi.fn(
     options.runSetup ?? (() => Effect.succeed({ status: "no-script" as const })),
@@ -1125,7 +1127,7 @@ it.effect("runs a Scratch thread launched at the root in its own folder", () =>
       assert.deepEqual(claimed, [{ threadId: launched.threadId, text: "Convert these PNGs" }]);
       assert.equal(launched.projection.thread.worktreePath, "/scratch/folder-1");
       yield* waitUntil(() => Effect.sync(() => harness.runSetup.mock.calls.length === 1));
-      assert.equal(harness.runSetup.mock.calls[0]?.[0]?.worktreePath, "/scratch/folder-1");
+      assert.equal(harness.runSetup.mock.calls[0]?.[1]?.worktreePath, "/scratch/folder-1");
       assert.equal(harness.createWorktree.mock.calls.length, 0);
 
       // A retry replays the first attempt and claims no second folder.
@@ -1169,7 +1171,7 @@ it.effect("names the worktree itself when the client provides no branch", () =>
       );
       yield* waitUntil(() => Effect.sync(() => harness.createWorktree.mock.calls.length === 1));
       assert.match(
-        harness.createWorktree.mock.calls[0]?.[0]?.newRefName ?? "",
+        harness.createWorktree.mock.calls[0]?.[1]?.newRefName ?? "",
         /^t3\/[0-9a-f]{8}$/u,
       );
       yield* waitUntil(() =>
@@ -1186,7 +1188,7 @@ it.effect("renames a temporary t3/<hash> branch off the provisioning critical pa
     const branchNameStarted = yield* Deferred.make<void>();
     const allowBranchName = yield* Deferred.make<void>();
     const harness = makeHarness({
-      createWorktree: (input) =>
+      createWorktree: (_authority, input) =>
         Effect.succeed({
           worktree: { path: "/repo-worktrees/temp", refName: input.newRefName, headSha: "abc" },
         } as never),
@@ -1209,7 +1211,7 @@ it.effect("renames a temporary t3/<hash> branch off the provisioning critical pa
         }),
       );
       yield* Deferred.await(branchNameStarted);
-      assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "t3/abcd1234");
+      assert.equal(harness.createWorktree.mock.calls[0]?.[1]?.newRefName, "t3/abcd1234");
       yield* waitUntil(() =>
         threads
           .getThreadProjection(trustedReadAuthority, launched.threadId)
@@ -1238,7 +1240,7 @@ it.effect("provisions under t3-<hash> when a plain t3 branch blocks t3/*", () =>
   Effect.gen(function* () {
     const harness = makeHarness({
       hasCommit: (_authority, input) => Effect.succeed(input.refName === "refs/heads/t3"),
-      createWorktree: (input) =>
+      createWorktree: (_authority, input) =>
         Effect.succeed({
           worktree: { path: "/repo-worktrees/temp", refName: input.newRefName, headSha: "abc" },
         } as never),
@@ -1260,7 +1262,7 @@ it.effect("provisions under t3-<hash> when a plain t3 branch blocks t3/*", () =>
           .getThreadProjection(trustedReadAuthority, launched.threadId)
           .pipe(Effect.map((projection) => projection.thread.branch === "generated-branch")),
       );
-      assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "t3-abcd1234");
+      assert.equal(harness.createWorktree.mock.calls[0]?.[1]?.newRefName, "t3-abcd1234");
       assert.equal(harness.renameBranch.mock.calls[0]?.[1]?.oldBranch, "t3-abcd1234");
     }).pipe(Effect.provide(harness.layer));
   }),
@@ -1282,7 +1284,7 @@ it.effect("keeps an explicit branch name instead of generating one", () =>
       );
       yield* waitUntil(() => Effect.sync(() => harness.createWorktree.mock.calls.length === 1));
       assert.equal(harness.generateBranchName.mock.calls.length, 0);
-      assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "my-feature");
+      assert.equal(harness.createWorktree.mock.calls[0]?.[1]?.newRefName, "my-feature");
     }).pipe(Effect.provide(harness.layer));
   }),
 );
@@ -1290,7 +1292,7 @@ it.effect("keeps an explicit branch name instead of generating one", () =>
 it.effect("keeps the temporary branch when branch generation fails", () =>
   Effect.gen(function* () {
     const harness = makeHarness({
-      createWorktree: (input) =>
+      createWorktree: (_authority, input) =>
         Effect.succeed({
           worktree: { path: "/repo-worktrees/temp", refName: input.newRefName, headSha: "abc" },
         } as never),
@@ -1309,7 +1311,7 @@ it.effect("keeps the temporary branch when branch generation fails", () =>
         }),
       );
       yield* waitUntil(() => Effect.sync(() => harness.generateBranchName.mock.calls.length === 1));
-      assert.equal(harness.createWorktree.mock.calls[0]?.[0]?.newRefName, "t3/abcd1234");
+      assert.equal(harness.createWorktree.mock.calls[0]?.[1]?.newRefName, "t3/abcd1234");
       yield* waitUntil(() =>
         threads
           .getThreadProjection(trustedReadAuthority, launched.threadId)
@@ -1547,7 +1549,7 @@ it.effect("a retry reuses a recorded worktree without undoing its branch rename"
 it.effect("removes a worktree that failed before the thread recorded it", () => {
   const harness = makeHarness({
     // A checkout that dies after claiming its directory.
-    createWorktree: (_input, options) =>
+    createWorktree: (_authority, _input, options) =>
       (options?.progress?.onWorktreeClaimed?.("/repo-worktrees/partial") ?? Effect.void).pipe(
         Effect.andThen(Effect.fail(new Error("checkout failed") as never)),
       ),
@@ -1573,7 +1575,7 @@ it.effect("removes a worktree that failed before the thread recorded it", () => 
     // Unrecorded, so a retry would create a second checkout beside it.
     assert.equal(projection.thread.worktreePath, null);
     assert.deepEqual(
-      harness.removeWorktree.mock.calls.map(([input]) => input.path),
+      harness.removeWorktree.mock.calls.map(([_authority, input]) => input.path),
       ["/repo-worktrees/partial"],
     );
   }).pipe(Effect.provide(harness.layer));
@@ -2290,7 +2292,7 @@ it.effect("cancels tracked setup before provider work is released", () =>
       const launched = yield* launches.launch(trustedMutationAuthority, input);
       yield* Deferred.await(entered);
       assert.equal((yield* tracker.get(trustedReadAuthority, launched.threadId))?.phase, "running");
-      assert.isTrue(yield* tracker.cancel(launched.threadId));
+      assert.isTrue(yield* tracker.cancel(trustedReadAuthority, launched.threadId));
       assert.equal(
         (yield* tracker.get(trustedReadAuthority, launched.threadId))?.phase,
         "cancelled",

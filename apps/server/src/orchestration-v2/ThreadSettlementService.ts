@@ -572,7 +572,7 @@ export const make = Effect.gen(function* () {
       if (thread.settledOverride !== "settled") return;
       const settledAtMs = toMillis(thread.settledAt);
       if (settledAtMs === null || settleActionRunAt.get(threadId) === settledAtMs) return;
-      const run = yield* projectScripts.runForThread({
+      const run = yield* projectScripts.runForThread(trustedReadAuthority, {
         threadId,
         projectId: thread.projectId,
         worktreePath,

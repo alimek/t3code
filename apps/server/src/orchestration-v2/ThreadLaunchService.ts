@@ -594,6 +594,7 @@ const make = Effect.gen(function* () {
         yield* setupTracker.stageStatus(threadId, "checkout", "running");
         const worktree = yield* git
           .createWorktree(
+            trustedReadAuthority,
             {
               cwd: project.workspaceRoot,
               refName: startRef,
@@ -693,7 +694,7 @@ const make = Effect.gen(function* () {
       }
       yield* setupTracker.stageStatus(threadId, "setup-script", "running");
       const setup = yield* setupScripts
-        .runForThread({
+        .runForThread(trustedReadAuthority, {
           threadId,
           projectId: input.projectId,
           projectCwd: project.workspaceRoot,
@@ -794,7 +795,11 @@ const make = Effect.gen(function* () {
             // removal leaves the directory for the user to clean up rather than
             // reusing a checkout that may be half written.
             yield* git
-              .removeWorktree({ cwd: project.workspaceRoot, path: removedPath, force: true })
+              .removeWorktree(trustedReadAuthority, {
+                cwd: project.workspaceRoot,
+                path: removedPath,
+                force: true,
+              })
               .pipe(
                 Effect.andThen(
                   threads

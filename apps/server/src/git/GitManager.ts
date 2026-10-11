@@ -140,6 +140,7 @@ export class GitManager extends Context.Service<
   GitManager,
   {
     readonly createWorktree: (
+      authority: ThreadReadAuthority,
       input: VcsCreateWorktreeInput,
       options?: GitVcsDriver.CreateWorktreeOptions,
     ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError | EnvironmentAuthorizationError>;
@@ -197,6 +198,7 @@ export class GitManager extends Context.Service<
       GitManagerServiceError | EnvironmentAuthorizationError
     >;
     readonly preparePullRequestThread: (
+      authority: ThreadReadAuthority,
       input: GitPreparePullRequestThreadInput,
     ) => Effect.Effect<
       GitPreparePullRequestThreadResult,
@@ -820,7 +822,10 @@ export const make = Effect.gen(function* () {
       ),
     );
   const sourceControlProvider = (cwd: string) =>
-    beforeReadEffect(cwd).pipe(Effect.andThen(sourceControlProviders.resolve({ cwd })));
+    beforeReadEffect(cwd).pipe(
+      Effect.andThen(sourceControlProviders.resolve({ cwd })),
+      Effect.tap(() => beforeReadEffect(cwd)),
+    );
   const serverSettingsService = yield* ServerSettings.ServerSettingsService;
   const threads = yield* ProjectionStore.ProjectionStoreV2;
   const projects = yield* ProjectStore.ProjectStoreV2;
@@ -831,6 +836,7 @@ export const make = Effect.gen(function* () {
   }) {
     yield* beforeReadEffect(input.cwd);
     const settings = yield* serverSettingsService.getSettings;
+    yield* beforeReadEffect(input.cwd);
     if (!hasProjectSettingsOverrides(settings)) return settings;
     const projectId: ProjectId | null = yield* input.threadId !== undefined
       ? threads.getThreadShell(input.threadId).pipe(
@@ -850,7 +856,7 @@ export const make = Effect.gen(function* () {
   );
   const createWorktree: GitManager["Service"]["createWorktree"] = Effect.fn(
     "GitManager.createWorktree",
-  )(function* (input, options) {
+  )(function* (_authority, input, options) {
     const submodules =
       options?.submodules !== undefined
         ? options.submodules
@@ -1042,12 +1048,14 @@ export const make = Effect.gen(function* () {
   ) =>
     configurePullRequestHeadUpstreamBase(cwd, pullRequest, localBranch).pipe(
       Effect.catch((error) =>
-        Effect.logWarning("GitManager.configurePullRequestHeadUpstream failed", {
-          cwd,
-          localBranch,
-          headBranch: pullRequest.headBranch,
-          cause: error,
-        }).pipe(Effect.asVoid),
+        isEnvironmentAuthorizationError(error)
+          ? Effect.fail(error)
+          : Effect.logWarning("GitManager.configurePullRequestHeadUpstream failed", {
+              cwd,
+              localBranch,
+              headBranch: pullRequest.headBranch,
+              cause: error,
+            }).pipe(Effect.asVoid),
       ),
     );
 
@@ -1106,29 +1114,32 @@ export const make = Effect.gen(function* () {
   ) =>
     materializePullRequestHeadBranchBase(cwd, pullRequest, localBranch).pipe(
       Effect.catch((primaryCause) =>
-        gitCore
-          .fetchPullRequestBranch({
-            cwd,
-            prNumber: pullRequest.number,
-            branch: localBranch,
-          })
-          .pipe(
-            Effect.mapError(
-              (fallbackCause) =>
-                new GitPullRequestMaterializationError({
-                  cwd,
-                  pullRequestNumber: pullRequest.number,
-                  headRepository: resolveHeadRepositoryNameWithOwner(pullRequest),
-                  headBranch: pullRequest.headBranch,
-                  localBranch,
-                  cause: new AggregateError(
-                    [primaryCause, fallbackCause],
-                    `Repository-head and pull-request-ref fetches both failed for pull request #${pullRequest.number}.`,
-                    { cause: primaryCause },
-                  ),
-                }),
-            ),
-          ),
+        isEnvironmentAuthorizationError(primaryCause)
+          ? Effect.fail(primaryCause)
+          : gitCore
+              .fetchPullRequestBranch({
+                cwd,
+                prNumber: pullRequest.number,
+                branch: localBranch,
+              })
+              .pipe(
+                Effect.mapError((fallbackCause) =>
+                  isEnvironmentAuthorizationError(fallbackCause)
+                    ? fallbackCause
+                    : new GitPullRequestMaterializationError({
+                        cwd,
+                        pullRequestNumber: pullRequest.number,
+                        headRepository: resolveHeadRepositoryNameWithOwner(pullRequest),
+                        headBranch: pullRequest.headBranch,
+                        localBranch,
+                        cause: new AggregateError(
+                          [primaryCause, fallbackCause],
+                          `Repository-head and pull-request-ref fetches both failed for pull request #${pullRequest.number}.`,
+                          { cause: primaryCause },
+                        ),
+                      }),
+                ),
+              ),
       ),
     );
   const tempDir = process.env.TMPDIR ?? process.env.TEMP ?? process.env.TMP ?? "/tmp";
@@ -2536,6 +2547,7 @@ export const make = Effect.gen(function* () {
   });
 
   const preparePullRequestThread = Effect.fn("preparePullRequestThread")(function* (
+    authority: ThreadReadAuthority,
     input: GitPreparePullRequestThreadInput,
   ) {
     const maybeRunSetupScript = (worktreePath: string) => {
@@ -2543,18 +2555,20 @@ export const make = Effect.gen(function* () {
         return Effect.void;
       }
       return projectSetupScriptRunner
-        .runForThread({
+        .runForThread(authority, {
           threadId: input.threadId,
           projectCwd: input.cwd,
           worktreePath,
         })
         .pipe(
           Effect.catch((error) =>
-            Effect.logWarning("GitManager.preparePullRequestThread setup script failed", {
-              threadId: input.threadId,
-              worktreePath,
-              cause: error,
-            }).pipe(Effect.asVoid),
+            isEnvironmentAuthorizationError(error)
+              ? Effect.fail(error)
+              : Effect.logWarning("GitManager.preparePullRequestThread setup script failed", {
+                  threadId: input.threadId,
+                  worktreePath,
+                  cause: error,
+                }).pipe(Effect.asVoid),
           ),
         );
     };
@@ -2568,6 +2582,7 @@ export const make = Effect.gen(function* () {
       const pullRequest = toResolvedPullRequest(pullRequestSummary);
 
       if (input.mode === "local") {
+        yield* beforeReadEffect(input.cwd);
         yield* (yield* sourceControlProvider(input.cwd)).checkoutChangeRequest({
           cwd: input.cwd,
           reference: normalizedReference,
@@ -2593,6 +2608,7 @@ export const make = Effect.gen(function* () {
       const ensureExistingWorktreeUpstream = Effect.fn("ensureExistingWorktreeUpstream")(function* (
         worktreePath: string,
       ) {
+        yield* beforeReadEffect(worktreePath);
         const details = yield* gitCore.statusDetails(worktreePath);
         yield* configurePullRequestHeadUpstream(
           worktreePath,
@@ -2655,24 +2671,26 @@ export const make = Effect.gen(function* () {
             // A host that publishes no `refs/pull/<n>/head` leaves the remote-tracking branch,
             // taken only where it is the head branch's own rather than whatever the checkout
             // happened to be cut from.
-            Effect.catch(() =>
-              Effect.gen(function* () {
-                const details = yield* gitCore.statusDetails(worktreePath);
-                if (
-                  details.upstreamRef === null ||
-                  !details.upstreamRef.endsWith(`/${pullRequest.headBranch}`)
-                ) {
-                  return yield* new GitManagerError({
-                    operation: "preparePullRequestThread",
-                    cwd: worktreePath,
-                    detail: "The pull request head could not be resolved for this checkout.",
-                  });
-                }
-                return yield* gitCore.resolveCommit({
-                  cwd: worktreePath,
-                  revision: details.upstreamRef,
-                });
-              }),
+            Effect.catch((error) =>
+              isEnvironmentAuthorizationError(error)
+                ? Effect.fail(error)
+                : Effect.gen(function* () {
+                    const details = yield* gitCore.statusDetails(worktreePath);
+                    if (
+                      details.upstreamRef === null ||
+                      !details.upstreamRef.endsWith(`/${pullRequest.headBranch}`)
+                    ) {
+                      return yield* new GitManagerError({
+                        operation: "preparePullRequestThread",
+                        cwd: worktreePath,
+                        detail: "The pull request head could not be resolved for this checkout.",
+                      });
+                    }
+                    return yield* gitCore.resolveCommit({
+                      cwd: worktreePath,
+                      revision: details.upstreamRef,
+                    });
+                  }),
             ),
             Effect.flatMap((target) =>
               gitCore.refreshCheckedOutBranch({
@@ -2682,14 +2700,16 @@ export const make = Effect.gen(function* () {
               }),
             ),
             Effect.catch((error) =>
-              Effect.logWarning(
-                "GitManager.preparePullRequestThread reused worktree refresh failed",
-                {
-                  worktreePath,
-                  localBranch: localPullRequestBranch,
-                  cause: error,
-                },
-              ).pipe(Effect.as({ moved: false, onTarget: false })),
+              isEnvironmentAuthorizationError(error)
+                ? Effect.fail(error)
+                : Effect.logWarning(
+                    "GitManager.preparePullRequestThread reused worktree refresh failed",
+                    {
+                      worktreePath,
+                      localBranch: localPullRequestBranch,
+                      cause: error,
+                    },
+                  ).pipe(Effect.as({ moved: false, onTarget: false })),
             ),
           );
 
@@ -2724,6 +2744,7 @@ export const make = Effect.gen(function* () {
             continue;
           }
 
+          yield* beforeReadEffect(branch.worktreePath);
           const worktreePath = yield* canonicalizeExistingPath(branch.worktreePath);
           if (worktreePath !== rootWorktreePath) {
             return branch;
@@ -2734,6 +2755,8 @@ export const make = Effect.gen(function* () {
       });
 
       const existingBranchBeforeFetch = yield* findLocalHeadBranch(input.cwd);
+      if (existingBranchBeforeFetch?.worktreePath)
+        yield* beforeReadEffect(existingBranchBeforeFetch.worktreePath);
       const existingBranchBeforeFetchPath = existingBranchBeforeFetch?.worktreePath
         ? yield* canonicalizeExistingPath(existingBranchBeforeFetch.worktreePath)
         : null;
@@ -2762,6 +2785,8 @@ export const make = Effect.gen(function* () {
       );
 
       const existingBranchAfterFetch = yield* findLocalHeadBranch(input.cwd);
+      if (existingBranchAfterFetch?.worktreePath)
+        yield* beforeReadEffect(existingBranchAfterFetch.worktreePath);
       const existingBranchAfterFetchPath = existingBranchAfterFetch?.worktreePath
         ? yield* canonicalizeExistingPath(existingBranchAfterFetch.worktreePath)
         : null;
@@ -2798,6 +2823,7 @@ export const make = Effect.gen(function* () {
           ),
         },
       );
+      yield* beforeReadEffect(worktree.worktree.path);
       yield* ensureExistingWorktreeUpstream(worktree.worktree.path);
       yield* maybeRunSetupScript(worktree.worktree.path);
 
@@ -3075,7 +3101,15 @@ export const make = Effect.gen(function* () {
   );
 
   return GitManager.of({
-    createWorktree,
+    createWorktree: (authority, input, options) =>
+      access.runWorktree(
+        authority,
+        input,
+        createWorktree(authority, input, options).pipe(
+          Effect.tap((result) => beforeReadEffect(result.worktree.path)),
+        ),
+        { destination: input.path },
+      ),
     localStatus: (authority, input, scope = AuthOrchestrationReadScope) =>
       access.read(
         authority,
@@ -3123,10 +3157,22 @@ export const make = Effect.gen(function* () {
           Effect.provideService(statusReadAuthority, { authority, input }),
         ),
       ),
-    preparePullRequestThread: (input) =>
-      preparePullRequestThread(input).pipe(
-        Effect.provideService(statusReadAuthority, undefined),
-        Effect.catchTags({ EnvironmentAuthorizationError: Effect.die }),
+    preparePullRequestThread: (authority, input) =>
+      access.runWorktree(
+        authority,
+        input,
+        preparePullRequestThread(authority, input).pipe(
+          Effect.tap((result) =>
+            result.worktreePath === null ? Effect.void : beforeReadEffect(result.worktreePath),
+          ),
+          Effect.provideService(statusReadAuthority, undefined),
+        ),
+        {
+          additionalScope:
+            input.mode === "worktree" && input.threadId !== undefined
+              ? "orchestration:operate"
+              : undefined,
+        },
       ),
     runStackedAction,
     subscribePullRequestStateChanges: PubSub.subscribe(pullRequestStateChanges).pipe(

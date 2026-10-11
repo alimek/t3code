@@ -1,3 +1,6 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Sqlite from "../persistence/Sqlite.ts";
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it, vi } from "@effect/vitest";
 import { ProjectId } from "@t3tools/contracts";
@@ -78,13 +81,15 @@ it.effect("resolves setup scripts through the standalone project service", () =>
         Layer.mock(TerminalManager.TerminalManager)({ open, write, subscribe, closeIdle }),
         ServerSettings.layerTest(),
         NodeCrypto.layer,
+        NodeServices.layer,
+        Sqlite.layerMemory,
       ),
     ),
   );
 
   return Effect.gen(function* () {
     const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
-    const result = yield* runner.runForThread({
+    const result = yield* runner.runForThread(trustedReadAuthority, {
       threadId: "thread-1",
       projectId,
       worktreePath: "/repo-worktree",
@@ -108,7 +113,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
     });
     assert.equal(write.mock.calls[0]?.[0].data, "vp install\r");
     const lines: string[] = [];
-    const observed = yield* runner.runForThread({
+    const observed = yield* runner.runForThread(trustedReadAuthority, {
       threadId: "thread-1",
       projectId,
       worktreePath: "/repo-worktree",
@@ -130,7 +135,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
     assert.deepEqual(lines, ["Downloading 10%", "Downloading 20%", "Done"]);
     yield* listener({ type: "closed", threadId: "thread-1", terminalId: "setup-setup" });
 
-    const settle = yield* runner.runForThread({
+    const settle = yield* runner.runForThread(trustedReadAuthority, {
       threadId: "thread-1",
       projectId,
       worktreePath: "/repo-worktree",
@@ -142,7 +147,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
 
     // A clean run closes its shell once the prompt is back, not at the
     // sentinel, so the prompt redraw is not taken for new activity.
-    const observedSettle = yield* runner.runForThread({
+    const observedSettle = yield* runner.runForThread(trustedReadAuthority, {
       threadId: "thread-1",
       projectId,
       worktreePath: "/repo-worktree",

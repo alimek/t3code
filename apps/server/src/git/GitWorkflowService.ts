@@ -112,7 +112,9 @@ export class GitWorkflowService extends Context.Service<
       GitManagerServiceError | EnvironmentAuthorizationError
     >;
     readonly preparePullRequestThread: (
+      authority: ThreadReadAuthority,
       input: GitPreparePullRequestThreadInput,
+      afterSuccess?: WorkspaceReadAccess.WorkspaceActionCallback<GitPreparePullRequestThreadResult>,
     ) => Effect.Effect<
       GitPreparePullRequestThreadResult,
       GitManagerServiceError | EnvironmentAuthorizationError
@@ -122,8 +124,10 @@ export class GitWorkflowService extends Context.Service<
       input: VcsListRefsInput,
     ) => Effect.Effect<VcsListRefsResult, GitCommandError | EnvironmentAuthorizationError>;
     readonly createWorktree: (
+      authority: ThreadReadAuthority,
       input: VcsCreateWorktreeInput,
       options?: GitVcsDriver.CreateWorktreeOptions,
+      afterSuccess?: WorkspaceReadAccess.WorkspaceActionCallback<VcsCreateWorktreeResult>,
     ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError | EnvironmentAuthorizationError>;
     readonly listLocalBranchNames: (
       authority: ThreadReadAuthority,
@@ -165,11 +169,16 @@ export class GitWorkflowService extends Context.Service<
       GitCommandError | EnvironmentAuthorizationError
     >;
     readonly removeWorktree: (
+      authority: ThreadReadAuthority,
       input: VcsRemoveWorktreeInput,
+      afterSuccess?: WorkspaceReadAccess.WorkspaceActionCallback<void>,
     ) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
-    readonly pruneWorktrees: (input: {
-      readonly cwd: string;
-    }) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
+    readonly pruneWorktrees: (
+      authority: ThreadReadAuthority,
+      input: {
+        readonly cwd: string;
+      },
+    ) => Effect.Effect<void, GitCommandError | EnvironmentAuthorizationError>;
     readonly deleteLocalBranch: (
       authority: ThreadReadAuthority,
       input: GitVcsDriver.GitDeleteLocalBranchInput,
@@ -368,16 +377,6 @@ export const make = Effect.gen(function* () {
     return true;
   });
 
-  const routeGitManager =
-    <Input extends { readonly cwd: string }, Output>(
-      operation: string,
-      run: (
-        input: Input,
-      ) => Effect.Effect<Output, GitManagerServiceError | EnvironmentAuthorizationError>,
-    ) =>
-    (input: Input) =>
-      ensureGit(operation, input.cwd).pipe(Effect.andThen(run(input)));
-
   return GitWorkflowService.of({
     isRepository: (authority, cwd) =>
       access.read(
@@ -517,10 +516,34 @@ export const make = Effect.gen(function* () {
           Effect.andThen(gitManager.resolvePullRequest(authority, input)),
         ),
       ),
-    preparePullRequestThread: routeGitManager(
-      "GitWorkflowService.preparePullRequestThread",
-      gitManager.preparePullRequestThread,
-    ),
+    preparePullRequestThread: (authority, input, afterSuccess) =>
+      access.runWorktree(
+        authority,
+        input,
+        ensureGit("GitWorkflowService.preparePullRequestThread", input.cwd).pipe(
+          Effect.tap((handle) =>
+            access.repository(
+              authority,
+              input,
+              handle.repository.rootPath,
+              AuthSourceControlWriteScope,
+            ),
+          ),
+          Effect.andThen(gitManager.preparePullRequestThread(authority, input)),
+          Effect.tap((result) =>
+            result.worktreePath === null
+              ? Effect.void
+              : WorkspaceReadAccess.beforeWorkspaceEffect(result.worktreePath),
+          ),
+        ),
+        {
+          additionalScope:
+            input.mode === "worktree" && input.threadId !== undefined
+              ? "orchestration:operate"
+              : undefined,
+          afterSuccess,
+        },
+      ),
     listRefs: (authority, input) =>
       access.read(
         authority,
@@ -533,9 +556,23 @@ export const make = Effect.gen(function* () {
           ),
         ),
       ),
-    createWorktree: (input, options) =>
-      ensureGitCommand("GitWorkflowService.createWorktree", input.cwd).pipe(
-        Effect.andThen(gitManager.createWorktree(input, options)),
+    createWorktree: (authority, input, options, afterSuccess) =>
+      access.runWorktree(
+        authority,
+        input,
+        ensureGitCommand("GitWorkflowService.createWorktree", input.cwd).pipe(
+          Effect.tap((handle) =>
+            access.repository(
+              authority,
+              input,
+              handle.repository.rootPath,
+              AuthSourceControlWriteScope,
+            ),
+          ),
+          Effect.andThen(gitManager.createWorktree(authority, input, options)),
+          Effect.tap((result) => WorkspaceReadAccess.beforeWorkspaceEffect(result.worktree.path)),
+        ),
+        { destination: input.path, afterSuccess },
       ),
     listLocalBranchNames: (authority, cwd) =>
       access.read(
@@ -596,13 +633,38 @@ export const make = Effect.gen(function* () {
           Effect.andThen(git.resolveRemoteTrackingCommit(input)),
         ),
       ),
-    removeWorktree: (input) =>
-      ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(
-        Effect.andThen(git.removeWorktree(input)),
+    removeWorktree: (authority, input, afterSuccess) =>
+      access.runWorktree(
+        authority,
+        input,
+        ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(
+          Effect.tap((handle) =>
+            access.repository(
+              authority,
+              input,
+              handle.repository.rootPath,
+              AuthSourceControlWriteScope,
+            ),
+          ),
+          Effect.andThen(git.removeWorktree(input)),
+        ),
+        { destination: input.path, afterSuccess },
       ),
-    pruneWorktrees: (input) =>
-      ensureGitCommand("GitWorkflowService.pruneWorktrees", input.cwd).pipe(
-        Effect.andThen(git.pruneWorktrees(input)),
+    pruneWorktrees: (authority, input) =>
+      access.runWorktree(
+        authority,
+        input,
+        ensureGitCommand("GitWorkflowService.pruneWorktrees", input.cwd).pipe(
+          Effect.tap((handle) =>
+            access.repository(
+              authority,
+              input,
+              handle.repository.rootPath,
+              AuthSourceControlWriteScope,
+            ),
+          ),
+          Effect.andThen(git.pruneWorktrees(input)),
+        ),
       ),
     deleteLocalBranch: (authority, input, afterSuccess) =>
       access.run(

@@ -1,5 +1,5 @@
 import { AuthSourceControlWriteScope } from "@t3tools/contracts";
-import { workspaceEffectAdmission } from "../auth/workspaceReadAccess.ts";
+import { workspaceEffectAdmission, worktreeEffectAdmission } from "../auth/workspaceReadAccess.ts";
 import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { recoverWorkspaceError } from "../auth/workspaceReadAccess.ts";
 import {
@@ -3477,6 +3477,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       : ["worktree", "add", worktreePath, input.refName];
     const progress = options?.progress;
     const onCheckoutProgress = progress?.onCheckoutProgress;
+    const lifecycle = yield* worktreeEffectAdmission;
+    if (lifecycle !== undefined) yield* lifecycle.prepare(worktreePath, input.path == null);
 
     const checkoutWorkers = (yield* readConfigValue(input.cwd, "checkout.workers")) ?? "0";
     yield* executeGit(
@@ -3505,6 +3507,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     if (progress?.onWorktreeClaimed) {
       yield* progress.onWorktreeClaimed(worktreePath);
     }
+    if (lifecycle !== undefined) yield* lifecycle.claim(worktreePath);
 
     // `git worktree add` leaves submodules empty, so a repo that keeps agent
     // skills, tooling or source in one gets a worktree that is quietly missing
@@ -3513,6 +3516,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     // populate a submodule must not roll back the caller's thread. Repos with
     // hundreds of nested submodules opt out or stop at the top level; the
     // caller resolves that from settings, or the checkout's t3.json decides.
+    yield* beforeWorkspaceEffect(worktreePath);
     const hasSubmodules = yield* fileSystem
       .exists(path.join(worktreePath, ".gitmodules"))
       .pipe(recoverWorkspaceError(() => false));
@@ -3523,17 +3527,26 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           options?.submodules ?? null,
           options?.submodules != null
             ? null
-            : yield* fileSystem.readFileString(path.join(worktreePath, T3_PROJECT_FILE_NAME)).pipe(
-                Effect.flatMap((contents) => {
-                  const file = parseT3ProjectFile(contents);
-                  return file === null
-                    ? Effect.logWarning("t3.json is invalid; initializing submodules recursively", {
-                        worktreePath,
-                      }).pipe(Effect.as(null))
-                    : Effect.succeed(file);
-                }),
-                recoverWorkspaceError(() => null),
-              ),
+            : yield* beforeWorkspaceEffect(worktreePath)
+                .pipe(
+                  Effect.andThen(
+                    fileSystem.readFileString(path.join(worktreePath, T3_PROJECT_FILE_NAME)),
+                  ),
+                )
+                .pipe(
+                  Effect.flatMap((contents) => {
+                    const file = parseT3ProjectFile(contents);
+                    return file === null
+                      ? Effect.logWarning(
+                          "t3.json is invalid; initializing submodules recursively",
+                          {
+                            worktreePath,
+                          },
+                        ).pipe(Effect.as(null))
+                      : Effect.succeed(file);
+                  }),
+                  recoverWorkspaceError(() => null),
+                ),
         );
     if (hasSubmodules && submoduleMode.value === "none" && progress?.onSubmodulesDisabled) {
       yield* progress.onSubmodulesDisabled({
@@ -3560,16 +3573,18 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       ).pipe(
         Effect.matchEffect({
           onFailure: (cause) =>
-            Effect.logWarning("worktree submodule checkout failed; submodule paths are empty", {
-              worktreePath,
-              cause,
-            }).pipe(
-              Effect.andThen(
-                progress?.onSubmodulesFinished
-                  ? progress.onSubmodulesFinished({ ok: false, detail: cause.message })
-                  : Effect.void,
-              ),
-            ),
+            cause._tag === "EnvironmentAuthorizationError"
+              ? Effect.fail(cause)
+              : Effect.logWarning("worktree submodule checkout failed; submodule paths are empty", {
+                  worktreePath,
+                  cause,
+                }).pipe(
+                  Effect.andThen(
+                    progress?.onSubmodulesFinished
+                      ? progress.onSubmodulesFinished({ ok: false, detail: cause.message })
+                      : Effect.void,
+                  ),
+                ),
           onSuccess: () =>
             progress?.onSubmodulesFinished
               ? progress.onSubmodulesFinished({ ok: true, detail: null })
@@ -3844,6 +3859,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   )(function* (input) {
     // Git refuses to remove a worktree with untracked files unless forced, but
     // its check honors `status.showUntrackedFiles=no` and would delete them.
+    const lifecycle = yield* worktreeEffectAdmission;
+    if (lifecycle !== undefined) yield* lifecycle.protect(input.path);
     const args = ["-c", "status.showUntrackedFiles=normal", "worktree", "remove"];
     if (input.force) {
       args.push("--force");
@@ -3893,6 +3910,19 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const pruneWorktrees: GitVcsDriver.GitVcsDriver["Service"]["pruneWorktrees"] = Effect.fn(
     "pruneWorktrees",
   )(function* (input) {
+    const lifecycle = yield* worktreeEffectAdmission;
+    if (lifecycle !== undefined) {
+      const listed = yield* executeGit("GitVcsDriver.pruneWorktrees.list", input.cwd, [
+        "worktree",
+        "list",
+        "--porcelain",
+        "-z",
+      ]);
+      for (const line of listed.stdout.split("\0")) {
+        if (line.startsWith("worktree "))
+          yield* lifecycle.protect(line.slice("worktree ".length), false);
+      }
+    }
     yield* executeGit("GitVcsDriver.pruneWorktrees", input.cwd, ["worktree", "prune"], {
       timeoutMs: 15_000,
       fallbackErrorDetail: "git worktree prune failed",

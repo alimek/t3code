@@ -1,3 +1,4 @@
+import { trustedReadAuthority } from "../auth/ResourceAuthorization.ts";
 import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
@@ -142,8 +143,10 @@ it("does not commit running state when inherited background routing cannot be re
 
     expect(error._tag).toBe("ProviderTurnStartError");
     expect(projectionReadCount).toBe(2);
-    expect(pruneWorktrees).toHaveBeenCalledWith({ cwd: "/tmp/provider-turn-start-project" });
-    expect(createWorktree).toHaveBeenCalledWith({
+    expect(pruneWorktrees).toHaveBeenCalledWith(trustedReadAuthority, {
+      cwd: "/tmp/provider-turn-start-project",
+    });
+    expect(createWorktree).toHaveBeenCalledWith(trustedReadAuthority, {
       cwd: "/tmp/provider-turn-start-project",
       refName: "feature/restore",
       path: "/tmp/missing-provider-turn-start-worktree",
