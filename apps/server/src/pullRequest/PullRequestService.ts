@@ -3859,9 +3859,8 @@ export const make = Effect.gen(function* () {
               (ref) =>
                 canonicalRef(ref).pipe(
                   Effect.map(Option.some),
-                  Effect.catchIf(
-                    (error) => !isAuthorizationError(error),
-                    () => Effect.succeedNone,
+                  Effect.catch((error) =>
+                    isAuthorizationError(error) ? Effect.fail(error) : Effect.succeedNone,
                   ),
                 ),
             ).pipe(

@@ -7801,9 +7801,9 @@ it.effect(
     }),
 );
 
-it.effect(
-  "cuts a changed actual SQL owner after identity preflight before routing credentials, cache or API",
-  () =>
+it.effect.each(["summary", "listStats"] as const)(
+  "%s cuts a changed actual SQL owner after identity preflight before routing credentials, cache or API",
+  (method) =>
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
@@ -7843,6 +7843,11 @@ it.effect(
                 effects.push("api");
                 return changeRequest(1, "2026-07-02T00:00:00Z");
               }),
+            listChangeRequestStats: () =>
+              Effect.sync(() => {
+                effects.push("api");
+                return [];
+              }),
           }),
         ],
       });
@@ -7855,11 +7860,13 @@ it.effect(
       };
       const fiber = yield* Effect.forkChild(
         assertDenied(
-          service.withRoutingCredential(
-            testAuthority(grantA),
-            ref,
-            service.summary(testAuthority(grantA), ref),
-          ),
+          method === "listStats"
+            ? service.listStats(testAuthority(grantA), { refs: [ref] })
+            : service.withRoutingCredential(
+                testAuthority(grantA),
+                ref,
+                service.summary(testAuthority(grantA), ref),
+              ),
         ),
       );
       yield* Deferred.await(started);
